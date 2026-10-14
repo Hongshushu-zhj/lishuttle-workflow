@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>lishuttle 本地平台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <span class="logo">lishuttle 本地平台</span>
+  <label>项目 <select id="project"></select></label>
+  <button id="btn-doctor">体检</button>
+  <button id="btn-build">编译</button>
+  <button id="btn-stage">装配配置</button>
+  <span id="env-note" class="muted"></span>
+</header>
+
+<div id="hint" class="hint">把鼠标放到参数上，这里显示说明</div>
+
+<div class="layout">
+  <aside>
+    <div class="panel">
+      <div class="panel-title">地图工作目录</div>
+      <input id="map-root" class="path">
+      <button id="btn-rescan-map" class="mini">重新扫描</button>
+      <div id="city-list"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">工参任务目录</div>
+      <input id="gongcan-root" class="path">
+      <button id="btn-rescan-task" class="mini">重新扫描</button>
+      <div id="task-list"></div>
+    </div>
+  </aside>
+
+  <main>
+    <nav class="tabs">
+      <button data-tab="params" class="active">功能与参数</button>
+      <button data-tab="csv">工参CSV</button>
+      <button data-tab="run">运行</button>
+      <button data-tab="results">结果</button>
+    </nav>
+
+    <section id="tab-params" class="tab active">
+      <div class="row">
+        <span class="lbl">功能 -f：</span><span id="func-radios"></span>
+      </div>
+      <div class="row">
+        <span class="lbl">任务名：</span><input id="job-name" class="txt" placeholder="如 pl-guangzhou">
+        <span class="lbl" title="本次运行的编号标签，可选。不填程序按 0 处理；本地跑不影响计算结果和输出路径，保持默认即可">任务ID -t：</span><input id="task-id" class="txt s" value="1" title="本次运行的编号标签，可选。不填程序按 0 处理；本地跑不影响计算结果和输出路径">
+        <span class="lbl">算高：</span><input id="max-h" class="txt s" value="3" title="最大计算高度(米)">
+        <span class="lbl">层高：</span><input id="floor-h" class="txt s" value="3" title="每层高度(米)">
+        <label><input type="checkbox" id="copy-files" checked> 替换天线/模型进exe(带备份)</label>
+        <button id="btn-render" class="primary">装配并渲染</button>
+      </div>
+      <div class="row muted" id="selection-note">先在左侧选城市/场景和工参任务</div>
+      <pre id="render-output" class="console hidden"></pre>
+      <div id="params-area"></div>
+    </section>
+
+    <section id="tab-csv" class="tab">
+      <div class="row">
+        <select id="csv-path" class="path"></select>
+        <button id="btn-csv-load" class="mini">加载</button>
+        <button id="btn-csv-save" class="mini primary">保存(备份.bak)</button>
+        <span class="lbl">整列设置：</span>
+        <input id="csv-col" class="txt s" placeholder="列名(中英文均可)">
+        <input id="csv-val" class="txt s" placeholder="值">
+        <button id="btn-csv-col" class="mini">应用整列</button>
+        <span id="csv-msg" class="muted"></span>
+      </div>
+      <div id="csv-wrap" class="csv-wrap"><span class="muted">选择上方加载，或在「功能与参数」页选任务后自动带入</span></div>
+    </section>
+
+    <section id="tab-run" class="tab">
+      <div class="row">
+        <span id="run-info" class="muted">尚未渲染</span>
+        <button id="btn-run" class="primary">运行 lishuttle</button>
+        <button id="btn-stop">停止</button>
+        <span id="run-status" class="badge hidden"></span>
+      </div>
+      <pre id="run-console" class="console"></pre>
+    </section>
+
+    <section id="tab-results" class="tab">
+      <div class="row">
+        <span class="lbl">任务名：</span><input id="result-job" class="txt" placeholder="与运行时的任务名一致">
+        <button id="btn-results" class="mini">查看</button>
+        <button id="btn-open-dir" class="mini">打开目录</button>
+        <span id="result-status" class="badge hidden"></span>
+      </div>
+      <div class="cols2">
+        <div><div class="panel-title">输出文件</div><div id="result-files"></div></div>
+        <div><div class="panel-title">日志尾部（红=ERROR/FATAL）</div><pre id="result-log" class="console short"></pre></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

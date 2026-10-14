@@ -1,0 +1,1388 @@
+{
+ "groups": [
+  "路径与数据",
+  "计算范围与精度",
+  "高度分层",
+  "传播与阈值",
+  "天线与增益",
+  "室内射线追踪",
+  "室内接收缩放",
+  "射线记录",
+  "模型校正",
+  "模型存储",
+  "参数优化",
+  "通感",
+  "气象"
+ ],
+ "params": [
+  {
+   "name": "EngineeringFilePath",
+   "label": "工参CSV",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "both",
+   "desc": "工程参数表：室外为小区表(44列)，室内为AP位置表。平台选任务后自动填"
+  },
+  {
+   "name": "ProjectionFilePath",
+   "label": "地图投影文件",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "outdoor",
+   "desc": "heights/projection.txt，WGS84/UTM投影参数，选城市后自动填"
+  },
+  {
+   "name": "HeightIndexPath",
+   "label": "高程索引",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "outdoor",
+   "desc": "heights/index.txt，高程数据索引"
+  },
+  {
+   "name": "ClutterIndexPath",
+   "label": "杂波索引",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "outdoor",
+   "desc": "clutter/index.txt，地物分类数据索引"
+  },
+  {
+   "name": "ClutterMenuPath",
+   "label": "杂波菜单",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "outdoor",
+   "desc": "clutter/menu.txt，地物类别清单"
+  },
+  {
+   "name": "BuildingIndexPath",
+   "label": "建筑索引",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "outdoor",
+   "desc": "buildings/index.txt，建筑数据索引"
+  },
+  {
+   "name": "BulidVectorIndexPath",
+   "label": "建筑矢量索引",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "outdoor",
+   "desc": "buildvector/index.txt。注意字段名就是BulidVector(源码拼写如此)，勿改"
+  },
+  {
+   "name": "MapFormat",
+   "label": "地图类型",
+   "group": "路径与数据",
+   "type": "fixed",
+   "applies": "indoor",
+   "desc": "indoor=室内，PLANET=室外。室内外分流开关，室内任务保持indoor"
+  },
+  {
+   "name": "MapPath",
+   "label": "室内地图目录",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "indoor",
+   "desc": "室内地图数据目录(含building.das)，选室内场景后自动填"
+  },
+  {
+   "name": "ClutterMatchPath",
+   "label": "杂波匹配配置",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "outdoor",
+   "desc": "城市名cluttermatchsettings.xml，地物与传播模型对应关系"
+  },
+  {
+   "name": "SceneSettingsPath",
+   "label": "场景配置",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "both",
+   "desc": "scenesettings.xml。留空时程序回退到exe旁config目录的默认文件"
+  },
+  {
+   "name": "PolygonFilePath",
+   "label": "区域多边形",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "both",
+   "desc": "WGS84经纬度多边形txt，限定计算范围。室外必填，室内可留空"
+  },
+  {
+   "name": "PathlossDirectory",
+   "label": "输出根目录",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "both",
+   "desc": "输出根。程序会自动追加运行单name属性作为末级目录，所以这里只写根"
+  },
+  {
+   "name": "DriverTestFileDictionaryPath",
+   "label": "路测数据目录",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "both",
+   "func": "cali,dt",
+   "desc": "路测数据(MinimumDriveTest)目录，-f dt和-f cali需要"
+  },
+  {
+   "name": "DefaultCalcRadius",
+   "label": "计算半径(米)",
+   "group": "计算范围与精度",
+   "type": "int",
+   "applies": "both",
+   "default": "800",
+   "desc": "每小区/AP周边的计算范围半径"
+  },
+  {
+   "name": "DefaultCalcResolution",
+   "label": "栅格分辨率(米)",
+   "group": "计算范围与精度",
+   "type": "float",
+   "applies": "both",
+   "default": "5",
+   "desc": "输出栅格大小。室外默认5；室内一般改0.2(见如何跑室内)"
+  },
+  {
+   "name": "DefaultAngleRes",
+   "label": "角度分辨率(度)",
+   "group": "计算范围与精度",
+   "type": "int",
+   "applies": "both",
+   "default": "1",
+   "desc": "射线追踪的角度采样间隔"
+  },
+  {
+   "name": "DefaultUEHeight",
+   "label": "UE高度(米)",
+   "group": "计算范围与精度",
+   "type": "float",
+   "applies": "both",
+   "default": "1.5",
+   "desc": "接收终端离地高度"
+  },
+  {
+   "name": "SpatialCalcMode",
+   "label": "计算模式",
+   "group": "计算范围与精度",
+   "type": "text",
+   "applies": "outdoor",
+   "default": "3d",
+   "desc": "3d=分层立体计算，ground=仅地面。ground时高度层数自动归零"
+  },
+  {
+   "name": "MaxHops",
+   "label": "最大跳数",
+   "group": "计算范围与精度",
+   "type": "int",
+   "applies": "outdoor",
+   "default": "6",
+   "desc": "室外射线最大传播跳数"
+  },
+  {
+   "name": "Max_Error",
+   "label": "收敛误差",
+   "group": "计算范围与精度",
+   "type": "float",
+   "applies": "both",
+   "default": "0.01",
+   "desc": "迭代类计算的收敛判据"
+  },
+  {
+   "name": "Epoch",
+   "label": "迭代轮数",
+   "group": "计算范围与精度",
+   "type": "int",
+   "applies": "both",
+   "default": "20",
+   "desc": "迭代类计算的最大轮数"
+  },
+  {
+   "name": "IsForcedCalc",
+   "label": "强制重算",
+   "group": "计算范围与精度",
+   "type": "bool",
+   "applies": "both",
+   "default": "false",
+   "desc": "true=忽略缓存强制重算。调试期建议true；室内模板默认true"
+  },
+  {
+   "name": "MaxCalcHeight",
+   "label": "最大计算高度(米)",
+   "group": "高度分层",
+   "type": "int",
+   "applies": "outdoor",
+   "default": "3",
+   "desc": "层数=MaxCalcHeight/DefaultFloorHeight。100/10=10m到100m共10层；3/3=只有3m一层"
+  },
+  {
+   "name": "DefaultFloorHeight",
+   "label": "层高(米)",
+   "group": "高度分层",
+   "type": "int",
+   "applies": "outdoor",
+   "default": "3",
+   "desc": "每层高度，与MaxCalcHeight一起决定输出层数"
+  },
+  {
+   "name": "UsingBuildingPolygon",
+   "label": "使用建筑轮廓",
+   "group": "传播与阈值",
+   "type": "bool",
+   "applies": "both",
+   "default": "true",
+   "desc": "是否用建筑多边形参与几何计算"
+  },
+  {
+   "name": "RoofOrGround",
+   "label": "参考平面",
+   "group": "传播与阈值",
+   "type": "text",
+   "applies": "both",
+   "default": "Ground",
+   "desc": "Ground=地面，Roof=屋顶"
+  },
+  {
+   "name": "PeneLossMode",
+   "label": "穿透损耗模式",
+   "group": "传播与阈值",
+   "type": "int",
+   "applies": "both",
+   "default": "0",
+   "desc": "0=默认经验模式，其他值由实现定义"
+  },
+  {
+   "name": "OnlyOutdoor",
+   "label": "仅室外",
+   "group": "传播与阈值",
+   "type": "bool",
+   "applies": "outdoor",
+   "default": "false",
+   "desc": "true=不计算室内部分"
+  },
+  {
+   "name": "MicroThreshold",
+   "label": "微站阈值",
+   "group": "传播与阈值",
+   "type": "float",
+   "applies": "both",
+   "default": "0.25",
+   "desc": "微/宏站划分阈值"
+  },
+  {
+   "name": "MacroThreshold",
+   "label": "宏站阈值",
+   "group": "传播与阈值",
+   "type": "float",
+   "applies": "both",
+   "default": "0.9",
+   "desc": "微/宏站划分阈值"
+  },
+  {
+   "name": "MicroMaxRadius",
+   "label": "微站最大半径(米)",
+   "group": "传播与阈值",
+   "type": "int",
+   "applies": "both",
+   "default": "500",
+   "desc": "微站覆盖半径上限"
+  },
+  {
+   "name": "MacroMinAntHeight",
+   "label": "宏站最小天线高度(米)",
+   "group": "传播与阈值",
+   "type": "int",
+   "applies": "both",
+   "default": "15",
+   "desc": "判定宏站的天线高度下限"
+  },
+  {
+   "name": "EdgeDistanceOfMerged",
+   "label": "边缘合并距离(米)",
+   "group": "传播与阈值",
+   "type": "int",
+   "applies": "both",
+   "default": "10",
+   "desc": "多边形/墙体边缘合并距离阈值"
+  },
+  {
+   "name": "DistanceOfVirtualSource",
+   "label": "虚源距离(米)",
+   "group": "传播与阈值",
+   "type": "int",
+   "applies": "both",
+   "default": "500",
+   "desc": "虚拟源法的距离参数，与镜像/等效源相关"
+  },
+  {
+   "name": "MaxPower",
+   "label": "功率上限(dBm)",
+   "group": "传播与阈值",
+   "type": "float",
+   "applies": "both",
+   "default": "200",
+   "desc": "校正/优化时发射功率搜索上界"
+  },
+  {
+   "name": "MinPower",
+   "label": "功率下限(dBm)",
+   "group": "传播与阈值",
+   "type": "float",
+   "applies": "both",
+   "default": "1",
+   "desc": "校正/优化时发射功率搜索下界"
+  },
+  {
+   "name": "MaxDistance",
+   "label": "距离上限(米)",
+   "group": "传播与阈值",
+   "type": "int",
+   "applies": "both",
+   "default": "900",
+   "desc": "参与计算/校正的样本距离上界"
+  },
+  {
+   "name": "MinDistance",
+   "label": "距离下限(米)",
+   "group": "传播与阈值",
+   "type": "int",
+   "applies": "both",
+   "default": "1",
+   "desc": "参与计算/校正的样本距离下界"
+  },
+  {
+   "name": "Distlimit",
+   "label": "距离比例限",
+   "group": "传播与阈值",
+   "type": "float",
+   "applies": "both",
+   "default": "0.2",
+   "desc": "校正样本的距离比例筛选限"
+  },
+  {
+   "name": "AntGainCalced",
+   "label": "计入天线增益",
+   "group": "天线与增益",
+   "type": "bool",
+   "applies": "both",
+   "default": "true",
+   "desc": "是否在计算中应用天线方向图增益"
+  },
+  {
+   "name": "FourierScale",
+   "label": "傅里叶比例",
+   "group": "天线与增益",
+   "type": "float",
+   "applies": "outdoor",
+   "default": "0.5",
+   "desc": "方向图傅里叶展开系数"
+  },
+  {
+   "name": "CordPrecision",
+   "label": "坐标精度",
+   "group": "天线与增益",
+   "type": "int",
+   "applies": "outdoor",
+   "default": "4",
+   "desc": "输出坐标小数位数"
+  },
+  {
+   "name": "RsrpOffset",
+   "label": "RSRP偏移(dB)",
+   "group": "天线与增益",
+   "type": "float",
+   "applies": "outdoor",
+   "default": "0",
+   "desc": "预测RSRP的整体偏移修正"
+  },
+  {
+   "name": "MinimumWallLength",
+   "label": "最小墙段长度(米)",
+   "group": "室内射线追踪",
+   "type": "float",
+   "applies": "indoor",
+   "default": "0.1",
+   "desc": "过滤极短墙段，减少无效计算"
+  },
+  {
+   "name": "MaxRayNumber",
+   "label": "每射线最大分支数",
+   "group": "室内射线追踪",
+   "type": "int",
+   "applies": "indoor",
+   "default": "8",
+   "desc": "单条射线传播分支上限。调小可加速，结合svn日志定位代码错误"
+  },
+  {
+   "name": "MaxDiffraction",
+   "label": "最大衍射次数",
+   "group": "室内射线追踪",
+   "type": "int",
+   "applies": "indoor",
+   "default": "2",
+   "desc": "允许的最大绕射次数"
+  },
+  {
+   "name": "MaxReflection",
+   "label": "最大反射次数",
+   "group": "室内射线追踪",
+   "type": "int",
+   "applies": "indoor",
+   "default": "4",
+   "desc": "允许的最大反射次数"
+  },
+  {
+   "name": "MaxPenetration",
+   "label": "最大穿透次数",
+   "group": "室内射线追踪",
+   "type": "int",
+   "applies": "indoor",
+   "default": "2",
+   "desc": "允许的最大穿透次数(墙体/门窗)"
+  },
+  {
+   "name": "MaxDeepth",
+   "label": "最大传播深度",
+   "group": "室内射线追踪",
+   "type": "int",
+   "applies": "indoor",
+   "default": "6",
+   "desc": "反射+衍射+穿透累计事件数上限"
+  },
+  {
+   "name": "IndoorRxPowerSF",
+   "label": "室内RSRP缩放因子",
+   "group": "室内接收缩放",
+   "type": "int",
+   "applies": "both",
+   "default": "10",
+   "desc": "室内接收功率的缩放系数"
+  },
+  {
+   "name": "IndoorSinrSF",
+   "label": "室内SINR缩放因子",
+   "group": "室内接收缩放",
+   "type": "int",
+   "applies": "both",
+   "default": "2",
+   "desc": "室内信噪比的缩放系数"
+  },
+  {
+   "name": "RaySpectrumSaved",
+   "label": "保存射线频谱",
+   "group": "射线记录",
+   "type": "bool",
+   "applies": "outdoor",
+   "func": "rays,pred,pl",
+   "default": "false",
+   "desc": "true=记录射线数据。跑-f rays前必须改true"
+  },
+  {
+   "name": "RaysCache",
+   "label": "射线缓存数",
+   "group": "射线记录",
+   "type": "int",
+   "applies": "both",
+   "default": "1000",
+   "desc": "射线数据缓存条数"
+  },
+  {
+   "name": "CellPLCache",
+   "label": "路损缓存数",
+   "group": "射线记录",
+   "type": "int",
+   "applies": "both",
+   "default": "1000",
+   "desc": "小区路损缓存条数"
+  },
+  {
+   "name": "PWaveCount",
+   "label": "P波数量",
+   "group": "射线记录",
+   "type": "int",
+   "applies": "outdoor",
+   "default": "5",
+   "desc": "入射波采样数"
+  },
+  {
+   "name": "SigmaRCS",
+   "label": "RCS西格玛",
+   "group": "射线记录",
+   "type": "float",
+   "applies": "outdoor",
+   "default": "0.01",
+   "desc": "雷达散射截面参数(通感相关)"
+  },
+  {
+   "name": "CorModelName",
+   "label": "待校正模型名",
+   "group": "模型校正",
+   "type": "text",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "test",
+   "desc": "要校正的传播模型名称"
+  },
+  {
+   "name": "CalNewModelName",
+   "label": "校正后模型名",
+   "group": "模型校正",
+   "type": "text",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "test",
+   "desc": "校正完成后保存的模型名"
+  },
+  {
+   "name": "IsCorrect_Los_K0andKnear",
+   "label": "校正LOS K0/Knear",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "true",
+   "desc": "视距路径损耗近端系数是否参与校正"
+  },
+  {
+   "name": "IsCorrect_Los_Kfar",
+   "label": "校正LOS Kfar",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "true",
+   "desc": "视距远端斜率是否参与校正"
+  },
+  {
+   "name": "IsCorrect_nLos_K0andKnear",
+   "label": "校正NLOS K0/Knear",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "true",
+   "desc": "非视距近端系数是否参与校正"
+  },
+  {
+   "name": "IsCorrect_nLos_Kfar",
+   "label": "校正NLOS Kfar",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "true",
+   "desc": "非视距远端斜率是否参与校正"
+  },
+  {
+   "name": "IsCorrectDiffraction",
+   "label": "校正衍射",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "true",
+   "desc": "衍射系数是否参与校正"
+  },
+  {
+   "name": "IsCorrectReflection",
+   "label": "校正反射",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "true",
+   "desc": "反射系数是否参与校正"
+  },
+  {
+   "name": "IsCorrectSceneModel",
+   "label": "校正场景模型",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "false",
+   "desc": "是否校正场景相关模型"
+  },
+  {
+   "name": "ForceCalibaration",
+   "label": "强制校正",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "false",
+   "desc": "样本不足时是否仍强制校正(源码拼写如此)"
+  },
+  {
+   "name": "CorrectByDT",
+   "label": "路测校正",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "false",
+   "desc": "是否用路测数据驱动校正"
+  },
+  {
+   "name": "IsFilterBackData",
+   "label": "过滤回退数据",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "true",
+   "desc": "是否过滤异常样本"
+  },
+  {
+   "name": "MinSamples",
+   "label": "最小样本数",
+   "group": "模型校正",
+   "type": "int",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "10",
+   "desc": "校正所需最少路测样本数"
+  },
+  {
+   "name": "MinDistRangeBefore15",
+   "label": "15前最小距离段",
+   "group": "模型校正",
+   "type": "int",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "50",
+   "desc": "近距离样本段下限(米)"
+  },
+  {
+   "name": "MinDistanceRange",
+   "label": "最小距离段",
+   "group": "模型校正",
+   "type": "int",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "80",
+   "desc": "样本距离段下限(米)"
+  },
+  {
+   "name": "MinCorrCoef",
+   "label": "最小相关系数",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "0.5",
+   "desc": "校正结果相关性验收下限"
+  },
+  {
+   "name": "MaxGiniCoef",
+   "label": "最大基尼系数",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "0.4",
+   "desc": "校正结果均匀性验收上限"
+  },
+  {
+   "name": "MinAccuracyRate",
+   "label": "最小准确率",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "0.6",
+   "desc": "校正结果准确率验收下限"
+  },
+  {
+   "name": "MinK0",
+   "label": "K0下限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "18",
+   "desc": "K0校正结果允许下限"
+  },
+  {
+   "name": "MaxK0",
+   "label": "K0上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "38",
+   "desc": "K0校正结果允许上限"
+  },
+  {
+   "name": "MinKnear",
+   "label": "Knear下限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "18",
+   "desc": "Knear校正结果允许下限"
+  },
+  {
+   "name": "MaxKnear",
+   "label": "Knear上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "30",
+   "desc": "Knear校正结果允许上限"
+  },
+  {
+   "name": "MinDeltaKfar",
+   "label": "ΔKfar下限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "0",
+   "desc": "远端斜率增量允许下限"
+  },
+  {
+   "name": "MaxDeltaKfar",
+   "label": "ΔKfar上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "30",
+   "desc": "远端斜率增量允许上限"
+  },
+  {
+   "name": "MinDiff",
+   "label": "衍射系数下限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "0.1",
+   "desc": "衍射系数允许下限"
+  },
+  {
+   "name": "MaxDiff",
+   "label": "衍射系数上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "1",
+   "desc": "衍射系数允许上限"
+  },
+  {
+   "name": "MinRef",
+   "label": "反射系数下限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "0.2",
+   "desc": "反射系数允许下限"
+  },
+  {
+   "name": "MaxRef",
+   "label": "反射系数上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "1",
+   "desc": "反射系数允许上限"
+  },
+  {
+   "name": "Max_MeanError",
+   "label": "平均误差上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "0.5",
+   "desc": "校正后平均误差验收上限(dB)"
+  },
+  {
+   "name": "Max_VarError",
+   "label": "标准差上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "func": "cali,dt",
+   "default": "4",
+   "desc": "校正后误差标准差验收上限"
+  },
+  {
+   "name": "ModelTemporaryStorage",
+   "label": "模型临时存储",
+   "group": "模型存储",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,acp,ai,dt",
+   "default": "true",
+   "desc": "true=校正/优化的模型只临时保存，不写入models目录。调试期保持true"
+  },
+  {
+   "name": "RebuildSceneModel",
+   "label": "重建场景模型",
+   "group": "模型存储",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,acp,ai,dt",
+   "default": "false",
+   "desc": "是否强制重建场景模型"
+  },
+  {
+   "name": "isCorrectExclusiveModel",
+   "label": "专用模型校正",
+   "group": "模型存储",
+   "type": "bool",
+   "applies": "both",
+   "func": "cali,acp,ai,dt",
+   "default": "true",
+   "desc": "是否使用任务专属模型"
+  },
+  {
+   "name": "ACP_Algorithm",
+   "label": "ACP算法",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "0",
+   "desc": "0=标准PSO粒子群，其他值由实现定义"
+  },
+  {
+   "name": "IsOptRSRP",
+   "label": "优化RSRP",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "true",
+   "desc": "是否把RSRP纳入优化目标"
+  },
+  {
+   "name": "IsOptSINR",
+   "label": "优化SINR",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "true",
+   "desc": "是否把SINR纳入优化目标"
+  },
+  {
+   "name": "IsOptRSRPandSINR",
+   "label": "联合优化RSRP+SINR",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "true",
+   "desc": "两指标联合加权优化(室内模板用)"
+  },
+  {
+   "name": "RSRP_Weight",
+   "label": "RSRP权重",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "0.5",
+   "desc": "RSRP在目标函数中的权重"
+  },
+  {
+   "name": "SINR_Weight",
+   "label": "SINR权重",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "0.5",
+   "desc": "SINR在目标函数中的权重"
+  },
+  {
+   "name": "RSRPThreshold",
+   "label": "RSRP门限(dBm)",
+   "group": "参数优化",
+   "type": "text",
+   "applies": "both",
+   "func": "acp",
+   "default": "-89",
+   "desc": "低于该值视为覆盖差的栅格"
+  },
+  {
+   "name": "SINRThreshold",
+   "label": "SINR门限(dB)",
+   "group": "参数优化",
+   "type": "text",
+   "applies": "both",
+   "func": "acp",
+   "default": "5",
+   "desc": "低于该值视为质量差的栅格"
+  },
+  {
+   "name": "IsOptEleTilt",
+   "label": "优化电子下倾角",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "true",
+   "desc": "电子下倾角是否参与优化"
+  },
+  {
+   "name": "IsOptAzimuth",
+   "label": "优化方位角",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "true",
+   "desc": "方位角是否参与优化"
+  },
+  {
+   "name": "IsOptRsPower",
+   "label": "优化RS功率",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "true",
+   "desc": "参考信号功率是否参与优化"
+  },
+  {
+   "name": "IsOptMecTilt",
+   "label": "优化机械下倾角",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "false",
+   "desc": "机械下倾角是否参与优化"
+  },
+  {
+   "name": "IsOptOutdoor",
+   "label": "优化室外",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "true",
+   "desc": "室外目标是否参与"
+  },
+  {
+   "name": "IsOptIndoor",
+   "label": "优化室内",
+   "group": "参数优化",
+   "type": "bool",
+   "applies": "both",
+   "func": "acp",
+   "default": "false",
+   "desc": "室内目标是否参与"
+  },
+  {
+   "name": "MaxEleTilt",
+   "label": "电下倾上限(度)",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "6",
+   "desc": "电子下倾角取值上限"
+  },
+  {
+   "name": "MinEleTilt",
+   "label": "电下倾下限(度)",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "0",
+   "desc": "电子下倾角取值下限"
+  },
+  {
+   "name": "MaxAdjustableEleTilt",
+   "label": "电下倾可调幅度(度)",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "6",
+   "desc": "相对当前值允许的最大调整量"
+  },
+  {
+   "name": "MaxAdjustableAzimuth",
+   "label": "方位角可调幅度(度)",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "20",
+   "desc": "相对当前值允许的最大调整量"
+  },
+  {
+   "name": "MaxRSPower",
+   "label": "RS功率上限(dBm)",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "19.2",
+   "desc": "参考信号功率取值上限"
+  },
+  {
+   "name": "MinRSPower",
+   "label": "RS功率下限(dBm)",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "10",
+   "desc": "参考信号功率取值下限"
+  },
+  {
+   "name": "MaxAdjustableRSPower",
+   "label": "RS功率可调幅度(dB)",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "9",
+   "desc": "相对当前值允许的最大调整量"
+  },
+  {
+   "name": "MaxMecTilt",
+   "label": "机下倾上限(度)",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "15",
+   "desc": "机械下倾角取值上限"
+  },
+  {
+   "name": "MinMecTilt",
+   "label": "机下倾下限(度)",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "0",
+   "desc": "机械下倾角取值下限"
+  },
+  {
+   "name": "MaxAdjustableMecTilt",
+   "label": "机下倾可调幅度(度)",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "5",
+   "desc": "相对当前值允许的最大调整量"
+  },
+  {
+   "name": "PopulationSize",
+   "label": "粒子群规模",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "5",
+   "desc": "PSO粒子数量，越大越充分越慢"
+  },
+  {
+   "name": "SpeedRatio",
+   "label": "速度比例",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "0.2",
+   "desc": "PSO速度更新系数"
+  },
+  {
+   "name": "IntertiaFactor",
+   "label": "惯性因子",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "0.8",
+   "desc": "PSO惯性权重"
+  },
+  {
+   "name": "SelfLearnFactor",
+   "label": "自我学习因子",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "2",
+   "desc": "PSO个体最优牵引系数"
+  },
+  {
+   "name": "GroupLearnFactor",
+   "label": "群体学习因子",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "2",
+   "desc": "PSO群体最优牵引系数"
+  },
+  {
+   "name": "MaxIter",
+   "label": "最大迭代次数",
+   "group": "参数优化",
+   "type": "int",
+   "applies": "both",
+   "func": "acp",
+   "default": "10",
+   "desc": "PSO迭代上限，决定优化时长"
+  },
+  {
+   "name": "MinError",
+   "label": "最小误差",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "func": "acp",
+   "default": "0",
+   "desc": "提前收敛的误差阈值"
+  },
+  {
+   "name": "MonitorGridFilePath",
+   "label": "监视栅格文件",
+   "group": "通感",
+   "type": "path",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "desc": "通感监视区栅格路径，留空=不监视"
+  },
+  {
+   "name": "MonitorPolygonFilePath",
+   "label": "监视多边形",
+   "group": "通感",
+   "type": "path",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "desc": "通感监视区多边形路径，留空=不监视"
+  },
+  {
+   "name": "IndoorDistFilePath",
+   "label": "室内距离文件",
+   "group": "通感",
+   "type": "path",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "desc": "通感室内距离分布路径，留空=不用"
+  },
+  {
+   "name": "RxPowerSF",
+   "label": "RSRP缩放因子",
+   "group": "通感",
+   "type": "int",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "default": "4",
+   "desc": "室外接收功率缩放系数"
+  },
+  {
+   "name": "SinrSF",
+   "label": "SINR缩放因子",
+   "group": "通感",
+   "type": "int",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "default": "1",
+   "desc": "室外信噪比缩放系数"
+  },
+  {
+   "name": "BsInterf",
+   "label": "基站间干扰",
+   "group": "通感",
+   "type": "bool",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "default": "true",
+   "desc": "是否计算基站间干扰"
+  },
+  {
+   "name": "MultiPathInterf",
+   "label": "多径干扰",
+   "group": "通感",
+   "type": "bool",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "default": "false",
+   "desc": "是否计算多径干扰"
+  },
+  {
+   "name": "ClutterInf",
+   "label": "地物影响系数",
+   "group": "通感",
+   "type": "int",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "default": "5",
+   "desc": "地物对感知的影响系数"
+  },
+  {
+   "name": "UEThermalNoiseFactor",
+   "label": "UE热噪声系数",
+   "group": "通感",
+   "type": "float",
+   "applies": "outdoor",
+   "func": "commsensing",
+   "default": "4",
+   "desc": "终端热噪声系数"
+  },
+  {
+   "name": "Season",
+   "label": "季节",
+   "group": "气象",
+   "type": "int",
+   "applies": "both",
+   "default": "1",
+   "desc": "1=春2=夏3=秋4=冬，影响雨气雾衰减查表"
+  },
+  {
+   "name": "RainLevel",
+   "label": "降雨等级",
+   "group": "气象",
+   "type": "int",
+   "applies": "both",
+   "default": "0",
+   "desc": "0=无雨，等级越高衰减越大"
+  },
+  {
+   "name": "FogLevel",
+   "label": "雾等级",
+   "group": "气象",
+   "type": "int",
+   "applies": "both",
+   "default": "0",
+   "desc": "0=无雾，等级越高衰减越大"
+  },
+  {
+   "name": "IndoorRSRPThreshold",
+   "label": "室内RSRP门限(dBm)",
+   "group": "室内接收缩放",
+   "type": "text",
+   "applies": "both",
+   "default": "-110",
+   "desc": "室内覆盖评估门限"
+  },
+  {
+   "name": "IndoorSINRThreshold",
+   "label": "室内SINR门限(dB)",
+   "group": "室内接收缩放",
+   "type": "text",
+   "applies": "both",
+   "default": "-3",
+   "desc": "室内质量评估门限"
+  },
+  {
+   "name": "IndoorWeight",
+   "label": "室内权重",
+   "group": "室内接收缩放",
+   "type": "float",
+   "applies": "both",
+   "default": "0.5",
+   "desc": "室内目标在联合评估中的权重"
+  }
+ ],
+ "function_info": [
+  {
+   "name": "test",
+   "label": "基本自检",
+   "desc": "检查程序能否运行，显示授权截止日期"
+  },
+  {
+   "name": "debug",
+   "label": "内部调试",
+   "desc": "开发者内部测试用"
+  },
+  {
+   "name": "pl",
+   "label": "路损计算",
+   "desc": "逐小区计算传播路损，输出 .loss/.pene（室外）"
+  },
+  {
+   "name": "pred",
+   "label": "室外覆盖预测",
+   "desc": "室外覆盖预测(RSRP/SINR)。室内预测请用 indoorpred"
+  },
+  {
+   "name": "plindoor",
+   "label": "室内路损计算",
+   "desc": "室内 AP 路损，输出 .ils；需 MapFormat=indoor 的运行单"
+  },
+  {
+   "name": "predindoor",
+   "label": "室内覆盖预测",
+   "desc": "室内覆盖预测（源码 COVERAGE_PREDICT_INDOOR_SERVICE）"
+  },
+  {
+   "name": "rays",
+   "label": "室外射线记录",
+   "desc": "记录射线数据，需先把 RaySpectrumSaved 改 true"
+  },
+  {
+   "name": "indoorrays",
+   "label": "室内射线记录",
+   "desc": "记录室内射线数据"
+  },
+  {
+   "name": "dt",
+   "label": "路测数据分析",
+   "desc": "分析路测数据，需要路测数据目录"
+  },
+  {
+   "name": "cali",
+   "label": "传播模型校正",
+   "desc": "用路测数据校正 K0/Knear/Kfar/衍射/反射系数"
+  },
+  {
+   "name": "acp",
+   "label": "自动参数优化",
+   "desc": "粒子群优化下倾角/方位角/功率等射频参数"
+  },
+  {
+   "name": "ai",
+   "label": "智能模型训练",
+   "desc": "AI 传播模型训练，依赖 Python 运行时"
+  },
+  {
+   "name": "scene",
+   "label": "场景分类",
+   "desc": "对计算区域做场景分类"
+  },
+  {
+   "name": "debugbuild",
+   "label": "穿透损耗详单",
+   "desc": "输出建筑物穿透损耗详细数据"
+  },
+  {
+   "name": "commsensing",
+   "label": "通感一体化预测",
+   "desc": "通信+感知联合预测；工参必须 44 列含感知列"
+  },
+  {
+   "name": "plhybrid",
+   "label": "室内外混合路损",
+   "desc": "室内外混合路损计算（PATHLOSS_HYBRID_SERVICE，需当前引擎版本支持）"
+  },
+  {
+   "name": "hybridrays",
+   "label": "混合射线记录",
+   "desc": "室内外混合射线记录（HYBRID_RAYS_SERVICE）"
+  }
+ ]
+}
