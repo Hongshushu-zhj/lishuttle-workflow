@@ -19,7 +19,7 @@ Windows 和 Linux 用的是同一个文件。
 读三个东西：
     env/<target>.env                  环境定义（路径根、预设名、工具链）
     jobs/<job>.env                    任务单（功能、城市、工参、区域）
-    templates/runtimeschema.xml.tpl    模板
+    <PROJECT_DIR>/<CONFIG_SRC>/runtimelibrary/runtimeschema.xml    完整样例
 
 输出：
     <PROJECT_DIR>/<BUILD_SUBDIR>/Bin/runtimelibrary/<SCHEMA_NAME>        成品运行单
@@ -34,6 +34,8 @@ import json
 import os
 import re
 import sys
+import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape, quoteattr
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -252,6 +254,83 @@ def do_print_run(table):
     return 0
 
 
+def render_project_sample(table, job):
+    """复制当前引擎的完整样例，只定点替换任务值，不重排 XML 或注释。"""
+    sample = os.path.join(table['PROJECT_DIR'], table.get('CONFIG_SRC', 'ThirdPart/Config'),
+                          'runtimelibrary', 'runtimeschema.xml')
+    if not os.path.isfile(sample):
+        sys.exit(f'[错误] 找不到完整运行单样例：{to_slash(sample)}')
+    with open(sample, 'r', encoding='utf-8-sig', newline='') as fh:
+        text = fh.read()
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        sys.exit(f'[错误] 运行单样例 XML 无效：{sample}：{exc}')
+    if root.tag != 'RuntimeSchema':
+        sys.exit(f'[错误] 运行单样例根节点必须是 RuntimeSchema：{sample}')
+
+    values = {
+        'EngineeringFilePath': table['ENGINEERING_FILE'],
+        'PolygonFilePath': table.get('POLYGON_FILE', ''),
+        'SceneSettingsPath': table['SCENE_SETTINGS_FILE'],
+        'PathlossDirectory': table['OUT_ROOT'],
+    }
+    for key, tag in (('MAX_CALC_HEIGHT', 'MaxCalcHeight'),
+                     ('DEFAULT_FLOOR_HEIGHT', 'DefaultFloorHeight')):
+        if job.get(key):
+            values[tag] = table[key]
+    if table.get('DRIVETEST_DIR') or table.get('DT_ROOT'):
+        values['DriverTestFileDictionaryPath'] = table['DT_ROOT']
+    indoor = (table.get('MAP_FORMAT', '').lower() == 'indoor'
+              or table.get('TEMPLATE') == 'runtimeschema-indoor.xml.tpl')
+    if indoor:
+        values.update(MapFormat='indoor', MapPath=table.get('MAP_PATH', ''))
+    else:
+        city_dir = f"{to_slash(table['MAP_ROOT'])}/{table.get('CITY', '')}"
+        for tag, rel in (
+            ('ProjectionFilePath', 'heights/projection.txt'),
+            ('HeightIndexPath', 'heights/index.txt'),
+            ('ClutterIndexPath', 'clutter/index.txt'),
+            ('ClutterMenuPath', 'clutter/menu.txt'),
+            ('BuildingIndexPath', 'buildings/index.txt'),
+            ('BulidVectorIndexPath', 'buildvector/index.txt'),
+        ):
+            values[tag] = f'{city_dir}/{rel}'
+        values['ClutterMatchPath'] = table['CLUTTER_MATCH_FILE']
+
+    # 注释单独保留：其中即使出现标签或 ${...} 也不能被替换。
+    parts = re.split(r'(<!--.*?-->)', text, flags=re.S)
+    found = set()
+    for i in range(0, len(parts), 2):
+        part = parts[i]
+        def rename(match):
+            opening = match.group(0)
+            attr = re.compile(r'\bname\s*=\s*([\'"]).*?\1', re.S)
+            name = 'name=' + quoteattr(table['JOB_NAME'])
+            if attr.search(opening):
+                return attr.sub(lambda _: name, opening, count=1)
+            return opening[:-1] + ' ' + name + '>'
+        part = re.sub(r'<RuntimeSchema\b[^>]*>', rename, part, count=1)
+        for tag, value in values.items():
+            pattern = rf'(<{tag}\b[^>]*>)[^<]*(</{tag}\s*>)|<{tag}\b[^>]*/>'
+            def replace(match):
+                found.add(tag)
+                if match.group(1):
+                    return match.group(1) + escape(str(value)) + match.group(2)
+                return match.group(0)[:-2] + '>' + escape(str(value)) + f'</{tag}>'
+            part = re.sub(pattern, replace, part)
+        parts[i] = part
+    rendered = ''.join(parts)
+    # 室内分流所必需的字段在室外样例中可能不存在；其余字段一律不增删。
+    if indoor:
+        newline = '\r\n' if '\r\n' in text else '\n'
+        extra = ''.join(f'  <{tag}>{escape(values[tag])}</{tag}>{newline}'
+                        for tag in ('MapFormat', 'MapPath') if tag not in found)
+        rendered = rendered.replace('</RuntimeSchema>', extra + '</RuntimeSchema>')
+    ET.fromstring(rendered)  # 写盘前确认任务值没有破坏 XML。
+    return rendered, to_slash(sample)
+
+
 def do_render(env, job, target, job_path, env_path, write_output=True):
     table = build_table(env, job)
 
@@ -266,26 +345,28 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
     written = []
 
     if write_output:
-        # 模板可由任务单指定：室外任务默认 runtimeschema.xml.tpl，
-        # 室内任务（MapFormat=indoor）用 runtimeschema-indoor.xml.tpl
+        # 默认室内外入口均从当前项目完整样例复制。显式指定其他模板仍兼容。
         tpl_name = table.get("TEMPLATE") or "runtimeschema.xml.tpl"
-        tpl_path = os.path.join(ROOT, "templates", tpl_name)
-        if not os.path.isfile(tpl_path):
-            sys.exit(f"[错误] 找不到模板：{to_slash(tpl_path)}\n"
-                     f"        任务单里 TEMPLATE={tpl_name}，"
-                     f"可用模板见 templates/ 目录")
-        with open(tpl_path, "r", encoding="utf-8") as fh:
-            rendered = expand(fh.read(), table, "模板")
+        if tpl_name in ('runtimeschema.xml.tpl', 'runtimeschema-indoor.xml.tpl'):
+            rendered, source = render_project_sample(table, job)
+        else:
+            tpl_path = os.path.join(ROOT, "templates", tpl_name)
+            if not os.path.isfile(tpl_path):
+                sys.exit(f"[错误] 找不到模板：{to_slash(tpl_path)}")
+            with open(tpl_path, "r", encoding="utf-8") as fh:
+                rendered = expand(fh.read(), table, "模板")
+            source = to_slash(tpl_path)
 
         os.makedirs(table["RUNTIME_SCHEMA_DIR"], exist_ok=True)
         for name in schema_names:
             out_file = os.path.join(table["RUNTIME_SCHEMA_DIR"], name)
-            with open(out_file, "w", encoding="utf-8", newline="\n") as fh:
+            with open(out_file, "w", encoding="utf-8", newline="") as fh:
                 fh.write(rendered)
             written.append(to_slash(out_file))
 
         manifest = {
             "job_name": table["JOB_NAME"],
+            "schema_source": source,
             "target": target,
             "env_file": to_slash(os.path.relpath(env_path, ROOT)),
             "job_file": to_slash(os.path.relpath(job_path, ROOT)),
@@ -354,6 +435,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
     print()
 
     if written:
+        print(f"运行单底稿：{source}")
         print("已生成运行单：")
         for path in written:
             print(f"  {path}")
