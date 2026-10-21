@@ -59,6 +59,8 @@ async function init() {
   $("btn-run").onclick = doRun;
   $("btn-stop").onclick = () => post("stop", { sid: S.sid });
   $("btn-csv-load").onclick = loadCsv;
+  $("engineering-path").onchange = () => selectEngineering($("engineering-path").value, true);
+  $("csv-path").onchange = () => selectEngineering($("csv-path").value, true);
   $("btn-csv-save").onclick = saveCsv;
   $("btn-csv-col").onclick = setColumn;
   $("btn-results").onclick = loadResults;
@@ -143,6 +145,13 @@ function renderCities(cities) {
 
 function renderTasks(tasks) {
   S.tasks = tasks;
+  S.task = null;
+  $("engineering-path").replaceChildren();
+  $("engineering-path").disabled = true;
+  $("engineering-reason").textContent = "先选择工参任务";
+  $("csv-path").replaceChildren();
+  clearCsvEditor();
+  updateNote();
   $("task-list").innerHTML = tasks.map(t =>
     `<div class="task" data-name="${t.name}">
        <span>${t.name}</span><span class="badge ${t.kind}">${KIND_CN[t.kind]}</span>
@@ -151,11 +160,35 @@ function renderTasks(tasks) {
     document.querySelectorAll("#task-list .task").forEach(e => e.classList.remove("sel"));
     el.classList.add("sel");
     S.task = tasks.find(t => t.name === el.dataset.name);
-    updateNote();
-    // 工参CSV页签带入任务里的csv
-    fillSelect($("csv-path"), S.task.csvs, S.task.csvs[0]);
+    const candidates = S.task.engineering_candidates || [];
+    for (const id of ["engineering-path", "csv-path"]) {
+      const sel = $(id);
+      sel.replaceChildren(new Option(candidates.length ? "请选择工参 CSV" : "未识别到有效工参", ""));
+      candidates.forEach(p => sel.add(new Option(p.slice(S.task.dir.length + 1), p)));
+      sel.disabled = !candidates.length;
+    }
+    selectEngineering(S.task.engineering_file || "", false);
     if (!$("job-name").value) $("job-name").value = `${S.task.name}-${S.func}`;
   });
+}
+
+function clearCsvEditor() {
+  csvData = null;
+  $("csv-wrap").textContent = "工参选择已更新，请点击加载";
+  $("csv-msg").textContent = "";
+}
+
+function selectEngineering(path, manual) {
+  if (!S.task) return;
+  S.task.engineering_file = path;
+  $("engineering-path").value = path;
+  $("csv-path").value = path;
+  S.task.kind = (S.task.engineering_kinds || {})[path] || "unknown";
+  S.task.detect = manual && path ? "手动选择，工参表头已识别" : S.task.engineering_reason;
+  $("engineering-reason").textContent = path
+    ? `${S.task.detect} · ${path}` : S.task.engineering_reason;
+  clearCsvEditor();
+  updateNote();
 }
 
 function updateNote() {
@@ -197,11 +230,13 @@ function showFuncHint(f) {
 async function doRender() {
   if (!S.city) return toast("先在左侧选择城市/场景", false);
   if (!S.task) return toast("先在左侧选择工参任务", false);
+  if (!S.task.engineering_file) return toast(S.task.engineering_reason || "请选择装配工参", false);
   const jobName = $("job-name").value.trim();
   if (!jobName) return toast("先填任务名", false);
   const body = {
     job_name: jobName, func: S.func, task_id: $("task-id").value || "1",
     task: S.task, city: S.city.name, city_kind: S.city.kind,
+    engineering_file: S.task.engineering_file,
     max_calc_height: $("max-h").value, floor_height: $("floor-h").value,
     copy_files: $("copy-files").checked,
   };
@@ -273,7 +308,9 @@ let csvData = null;
 async function loadCsv() {
   const p = $("csv-path").value;
   if (!p) return toast("没有 CSV 路径，先在左侧选任务", false);
-  csvData = await get("csv", `path=${encodeURIComponent(p)}`);
+  const data = await get("csv", `path=${encodeURIComponent(p)}`);
+  if (p !== $("csv-path").value) return;
+  csvData = data;
   if (csvData.error) return toast(csvData.error, false);
   renderCsv();
 }

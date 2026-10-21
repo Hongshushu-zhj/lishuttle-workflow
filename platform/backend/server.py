@@ -102,6 +102,19 @@ class Api:
 
         if not task:
             return {"error": "未选择工参任务"}
+        # 不信任客户端缓存的 CSV 列表：按当前配置重新扫描并校验明确选择。
+        tasks, _ = core.scan_tasks()
+        current = next((t for t in tasks if t['name'] == task.get('name')
+                        and os.path.normcase(os.path.realpath(t['dir']))
+                        == os.path.normcase(os.path.realpath(task.get('dir', '')))), None)
+        if current is None:
+            return {"error": "任务已不存在，请重新扫描并选择"}
+        try:
+            selected = core.validate_engineering(current, body.get('engineering_file'))
+        except ValueError as exc:
+            return {"error": str(exc)}
+        current['engineering_file'] = selected
+        task = current
         job_file = core.build_job_env(job_name, func, task_id, task,
                                       city_name, city_kind, max_height, floor_height)
         rc, output = core.run_render(job_file)

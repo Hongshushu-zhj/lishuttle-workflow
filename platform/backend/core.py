@@ -5,7 +5,7 @@ lishuttle 本地平台核心逻辑：识别器 / 文件读写 / 渲染调用 / �
 
 设计约定（用户已确认）：
 - 参数修改直接写进对应文件（先备份 .bak），文件是唯一事实；
-- 室内外识别：文件夹名约定优先，CSV 表头兜底；
+- 室内外识别：以选定工参 CSV 的表头为准；
 - 所有路径拼接复用 scripts/render_schema.py 已验证的逻辑（经 env/jobs 驱动）。
 """
 
@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+from engineering import identify_engineering, validate_engineering
 
 HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
 ROOT = os.path.dirname(os.path.dirname(HERE))          # 工作流根目录
@@ -110,7 +111,8 @@ def scan_cities():
 
 
 def sniff_csv_encoding(path):
-    raw = open(path, "rb").read(64 * 1024)
+    with open(path, "rb") as fh:
+        raw = fh.read(64 * 1024)
     for enc in CSV_ENCODINGS:
         try:
             raw.decode(enc)
@@ -158,12 +160,13 @@ def scan_tasks():
             antenna = model = scene = ""
             antenna_dir = model_dir = ""
             for base, dirs, files in os.walk(full):
+                dirs.sort()
                 base_name = os.path.basename(base).lower()
                 if base_name == "antennas" and not antenna_dir:
                     antenna_dir = base
                 elif base_name == "models" and not model_dir:
                     model_dir = base
-                for f in files:
+                for f in sorted(files):
                     p = os.path.join(base, f)
                     lf = f.lower()
                     if lf.endswith(".csv"):
@@ -178,7 +181,7 @@ def scan_tasks():
                         model = p
                     elif lf == "scenesettings.xml":
                         scene = p
-            kind, basis = detect_task_kind(name, csvs)
+            kind, basis = 'unknown', ''
             tasks.append({
                 "name": name, "kind": kind, "detect": basis, "dir": to_slash(full),
                 "csvs": [to_slash(p) for p in csvs],
@@ -191,12 +194,14 @@ def scan_tasks():
                 "model_dir": to_slash(model_dir) if model_dir else "",
             })
         elif name.lower().endswith(".csv"):
-            kind, basis = detect_task_kind(name, [full])
+            kind, basis = 'unknown', '散文件'
             tasks.append({
                 "name": name, "kind": kind, "detect": basis + "(散文件)",
                 "dir": to_slash(gongcan), "csvs": [to_slash(full)],
                 "txts": [], "xmls": [], "antenna": "", "model": "", "scene": "",
             })
+    for task in tasks:
+        identify_engineering(task)
     return tasks, to_slash(gongcan)
 
 
@@ -231,9 +236,8 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind, max_heigh
         f'MAX_CALC_HEIGHT="{max_height}"',
         f'DEFAULT_FLOOR_HEIGHT="{floor_height}"',
     ]
-    csvs = task.get("csvs") if task else []
     txts = task.get("txts") if task else []
-    csv_file = to_slash(csvs[0]) if csvs else ""
+    csv_file = to_slash(validate_engineering(task))
     region = pick_region([to_slash(t) for t in txts], csv_file)
     if city_kind == "indoor":
         lines += [
