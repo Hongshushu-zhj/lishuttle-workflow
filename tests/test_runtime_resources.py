@@ -100,6 +100,9 @@ class RuntimeResourcesTests(unittest.TestCase):
         def overlay(*args, **kwargs):
             order.append('task')
             return []
+        def launch(*args):
+            order.append('launch')
+            return {'path': 'project/.vs/launch.vs.json', 'entries': ['cali']}
         with patch.object(core, 'load_env', return_value=self.env), \
              patch.object(core, 'scan_tasks', return_value=([task], 'tasks')), \
              patch.object(core, 'validate_engineering', return_value='engineering.csv'), \
@@ -107,11 +110,31 @@ class RuntimeResourcesTests(unittest.TestCase):
              patch.object(core, 'build_job_env', return_value='job.env'), \
              patch.object(core, 'run_render', side_effect=render), \
              patch.object(core, 'schema_path', return_value=__file__), \
-             patch.object(core, 'assemble_files', side_effect=overlay):
+             patch.object(core, 'assemble_files', side_effect=overlay), \
+             patch.object(core, 'sync_vs_launch', side_effect=launch) as sync:
             result = Api.render(dict(job_name='job', task=task, copy_antennas=True, copy_files=True))
-        self.assertEqual(order, ['base', 'render', 'task'])
+        self.assertEqual(order, ['base', 'render', 'task', 'launch'])
+        sync.assert_called_once_with(self.env, 'job.xml', 'pl', '1', 'outdoor')
         self.assertNotIn('error', result)
         self.assertIn('base_resources', result)
+        self.assertIn('vs_launch', result)
+
+    def test_launch_sync_failure_is_visible_and_failed_render_does_not_sync(self):
+        task = dict(name='task', dir=str(self.root / 'task'), has_antennas=False)
+        with patch.object(core, 'load_env', return_value=self.env), \
+             patch.object(core, 'scan_tasks', return_value=([task], 'tasks')), \
+             patch.object(core, 'validate_engineering', return_value='engineering.csv'), \
+             patch.object(core, 'build_job_env', return_value='job.env'), \
+             patch.object(core, 'run_render', return_value=(0, 'ok')) as render, \
+             patch.object(core, 'schema_path', return_value=__file__), \
+             patch.object(core, 'sync_vs_launch', side_effect=ValueError('JSON 无效')) as sync:
+            result = Api.render(dict(job_name='job', task=task))
+            self.assertIn('JSON 无效', result['vs_launch_warning'])
+            self.assertTrue(result['schema_ok'])
+            sync.reset_mock()
+            render.return_value = (1, 'failed')
+            result = Api.render(dict(job_name='job', task=task))
+            sync.assert_not_called()
 
     def test_preview_never_copies_and_missing_sources_stop_render(self):
         task = dict(name='task', dir=str(self.root / 'task'), has_antennas=False)

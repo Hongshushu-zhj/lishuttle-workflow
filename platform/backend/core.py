@@ -23,6 +23,7 @@ import tempfile
 import html
 import xml.etree.ElementTree as ET
 from engineering import identify_engineering, validate_engineering
+from vs_launch import sync_launch
 
 HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
 ROOT = os.path.dirname(os.path.dirname(HERE))          # 工作流根目录
@@ -786,6 +787,11 @@ class Runner:
 
 
 RUNNER = Runner()
+
+
+def sync_vs_launch(project_env, schema_name, func, task_id, city_kind):
+    return sync_launch(project_env, schema_name, func, task_id, city_kind,
+                       scan_functions(project_env['PROJECT_DIR']))
 
 
 def start_lishuttle(schema_name, func, task_id):

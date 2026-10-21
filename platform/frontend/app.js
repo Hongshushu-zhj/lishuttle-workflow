@@ -68,6 +68,8 @@ function applyProjectState(st) {
   $("render-output").classList.add("hidden");
   $("run-info").textContent = "尚未渲染";
   $("run-console").textContent = "";
+  S.sid = 0; S.since = 0;
+  $("btn-export-log").disabled = true;
   $("run-status").classList.add("hidden");
   $("result-files").innerHTML = "";
   $("result-log").textContent = "";
@@ -118,6 +120,7 @@ function bindActions() {
   $("btn-render").onclick = doRender;
   $("btn-run").onclick = doRun;
   $("btn-stop").onclick = () => post("stop", { sid: S.sid });
+  $("btn-export-log").onclick = exportRunLog;
   $("btn-csv-load").onclick = loadCsv;
   $("engineering-path").onchange = () => selectEngineering($("engineering-path").value, true);
   $("csv-path").onchange = () => selectEngineering($("csv-path").value, true);
@@ -389,7 +392,11 @@ async function submitRender(body) {
   const baseLog = base ? `基础运行资源：补齐 ${base.copied.length} 个文件，保留 ${base.kept_count} 个已有文件\n` +
     `配置来源：${base.config_source}\n动态库来源：${base.dll_source}\n目标：${base.exe_dir}\n` +
     base.copied.map(c => `${c.from} → ${c.to}`).join("\n") + "\n\n" : "";
-  ro.textContent = baseLog + (r.render_output || "(无输出)");
+  const launch = r.vs_launch;
+  const launchLog = launch ? `\n\nVisual Studio 启动项：${launch.path}\n` +
+    launch.entries.join("\n") + (launch.backup ? `\n原文件备份：${launch.backup}` : "") : "";
+  ro.textContent = baseLog + (r.render_output || "(无输出)") + launchLog +
+    (r.vs_launch_warning ? `\n\n${r.vs_launch_warning}` : "");
   if (!r.schema_ok) {
     toast("渲染失败：没生成运行单，看下方输出", false);
     return;
@@ -401,6 +408,7 @@ async function submitRender(body) {
   S.job = { name: jobName, schema: r.schema_name, func: r.func, taskId: r.task_id, outDir: r.out_dir };
   const copied = (r.copied || []).map(c => `${c.file} → ${c.to} ${c.backup}`).join("\n");
   toast(`渲染完成：${r.schema_name}${copied ? "\n已替换：" + copied : ""}`);
+  if (r.vs_launch_warning) toast(r.vs_launch_warning, false);
   updateNote();
   switchTab(document.querySelector('[data-tab="params"]'));
   loadParams();
@@ -535,6 +543,7 @@ async function doRun() {
 
 function attachConsole(sid, title) {
   S.sid = sid; S.since = 0;
+  $("btn-export-log").disabled = false;
   const con = $("run-console");
   con.textContent = title + "\n";
   $("run-status").className = "badge running hidden";
@@ -561,6 +570,42 @@ function attachConsole(sid, title) {
       toast(`${r.label} 结束，退出码 ${r.exit}`, r.exit === 0);
     }
   }, 700);
+}
+
+async function exportRunLog() {
+  const sid = S.sid, epoch = S.projectEpoch, project = S.project;
+  if (!sid) return toast("尚无运行日志，请先运行程序或工具", false);
+  const button = $("btn-export-log");
+  button.disabled = true;
+  let url;
+  try {
+    // Fetch from the beginning, including output not yet delivered by UI polling.
+    const r = await get("output", `sid=${sid}&since=0`);
+    if (sid !== S.sid || epoch !== S.projectEpoch) return;
+    if (r.error) return toast(`日志导出失败：${r.error}`, false);
+    const now = new Date();
+    const lines = [
+      "LiShuttle 运行日志", `项目：${project || ""}`, `会话：${sid}`,
+      `运行指令/工具：${r.label}`, `导出时间：${now.toISOString()}`,
+      `状态：${r.status === "done" ? "已结束" : "运行中（截至导出时）"}`,
+      `退出码：${r.exit == null ? "尚未退出" : r.exit}`, `日志行数：${r.total}`,
+      "", ...r.lines, "",
+    ];
+    const blob = new Blob(["\uFEFF", lines.join("\r\n")], {type:"text/plain;charset=utf-8"});
+    url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `run-log-${now.toISOString().replace(/[:.]/g, "-")}-session-${sid}.log`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    toast("日志已导出；运行中的日志包含截至导出时已收集的输出");
+  } catch (error) {
+    if (sid === S.sid && epoch === S.projectEpoch) toast(`日志导出失败：${error.message}`, false);
+  } finally {
+    if (url) setTimeout(() => URL.revokeObjectURL(url), 1000);
+    button.disabled = !S.sid;
+  }
 }
 
 /* ---------------- 结果 ---------------- */

@@ -172,6 +172,12 @@ class Api:
             ('antenna', copy_antennas), ('model', copy_files and not reuse)) if enabled)
         if groups and task and result['schema_ok']:
             result["copied"] = core.assemble_files(task, core.load_env(), groups=groups)
+        if rc == 0 and result['schema_ok']:
+            try:
+                result['vs_launch'] = core.sync_vs_launch(
+                    core.load_env(), result['schema_name'], func, task_id, city_kind)
+            except (OSError, ValueError) as exc:
+                result['vs_launch_warning'] = f'Visual Studio 启动项未同步：{exc}；请检查 .vs/launch.vs.json'
         return result
 
     @staticmethod
