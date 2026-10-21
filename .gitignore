@@ -6,6 +6,8 @@
 !.env.template
 /env/*.env
 /env/*.env.*
+/env/projects.json
+/env/projects.json.tmp
 !/env/local-win.env.example
 
 # Local platform adjustment notes.

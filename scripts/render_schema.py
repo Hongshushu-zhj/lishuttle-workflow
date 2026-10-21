@@ -34,6 +34,8 @@ import json
 import os
 import re
 import sys
+import shutil
+from task_schema import render_existing, runtime_details
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
@@ -227,7 +229,7 @@ def do_print_env(target, env_path):
     return 0
 
 
-def do_print_run(table):
+def do_print_run(table, prepare_render=False):
     """输出运行参数，供 run_*.bat / run_*.sh 解析。
 
     和渲染走的是同一个 build_table()，所以"渲染时用的路径"和
@@ -238,6 +240,10 @@ def do_print_run(table):
         sys.exit("[错误] 任务单里的 SCHEMA_NAME 是空的")
 
     out_dir = f"{to_slash(table['OUT_ROOT'])}/{table['JOB_NAME']}"
+    if table.get('SCHEMA_SOURCE'):
+        destination = os.path.join(table['RUNTIME_SCHEMA_DIR'], schema_names[0])
+        out_dir = (runtime_details(destination, table['EXE_DIR'])['out_dir'] if os.path.isfile(destination) and not prepare_render
+                   else render_existing(table)['out_dir'])
     values = {
         "FUNC": table["FUNC"],
         "TASK_ID": table.get("TASK_ID") or "0",
@@ -347,7 +353,18 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
     if write_output:
         # 默认室内外入口均从当前项目完整样例复制。显式指定其他模板仍兼容。
         tpl_name = table.get("TEMPLATE") or "runtimeschema.xml.tpl"
-        if tpl_name in ('runtimeschema.xml.tpl', 'runtimeschema-indoor.xml.tpl'):
+        existing = None
+        if table.get('SCHEMA_SOURCE'):
+            try:
+                existing = render_existing(table)
+            except ValueError as exc:
+                sys.exit(f'[错误] {exc}')
+            rendered, source = existing['text'], existing['source']
+            out_dir = existing['out_dir']
+            table['ENGINEERING_FILE'] = existing['engineering_file']
+            table['SCENE_SETTINGS_FILE'] = existing['scene_settings_file']
+            table['DT_ROOT'] = existing['drivetest_dir']
+        elif tpl_name in ('runtimeschema.xml.tpl', 'runtimeschema-indoor.xml.tpl'):
             rendered, source = render_project_sample(table, job)
         else:
             tpl_path = os.path.join(ROOT, "templates", tpl_name)
@@ -358,8 +375,15 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
             source = to_slash(tpl_path)
 
         os.makedirs(table["RUNTIME_SCHEMA_DIR"], exist_ok=True)
+        if existing:
+            for name in schema_names:
+                destination = os.path.join(table['RUNTIME_SCHEMA_DIR'], name)
+                if os.path.normcase(os.path.realpath(destination)) == os.path.normcase(os.path.realpath(source)):
+                    sys.exit('[错误] 源 XML 与目标文件相同，不能覆盖原始配置')
         for name in schema_names:
             out_file = os.path.join(table["RUNTIME_SCHEMA_DIR"], name)
+            if existing and os.path.isfile(out_file):
+                shutil.copy2(out_file, out_file + '.bak')
             with open(out_file, "w", encoding="utf-8", newline="") as fh:
                 fh.write(rendered)
             written.append(to_slash(out_file))
@@ -367,6 +391,8 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
         manifest = {
             "job_name": table["JOB_NAME"],
             "schema_source": source,
+            "schema_mode": 'existing' if existing else 'sample',
+            "path_changes": existing['changes'] if existing else [],
             "target": target,
             "env_file": to_slash(os.path.relpath(env_path, ROOT)),
             "job_file": to_slash(os.path.relpath(job_path, ROOT)),
@@ -397,6 +423,19 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
         mpath = manifest_path_for(table)
         with open(mpath, "w", encoding="utf-8") as fh:
             json.dump(manifest, fh, ensure_ascii=False, indent=2)
+
+    elif table.get('SCHEMA_SOURCE'):
+        details = runtime_details(os.path.join(table['RUNTIME_SCHEMA_DIR'], schema_names[0]), table['EXE_DIR'])
+        out_dir = details['out_dir']
+        table['ENGINEERING_FILE'] = details['engineering_file']
+        table['SCENE_SETTINGS_FILE'] = details['scene_settings_file']
+
+    # 已有 XML 的相对路径由引擎相对 exe 工作目录解释；只改变检查位置，不改 XML。
+    if table.get('SCHEMA_SOURCE'):
+        for key in ('ENGINEERING_FILE', 'SCENE_SETTINGS_FILE'):
+            path = table.get(key, '').replace('\\', '/')
+            if path and not os.path.isabs(path):
+                table[key] = os.path.join(table['EXE_DIR'], path)
 
     # ---- 检查输入文件 ----
     # 室外任务检查地图四件套索引；室内任务（MapFormat=indoor）只需
@@ -494,7 +533,10 @@ def main():
     job = read_env_file(job_path, "任务单")
 
     if "--print-run" in flags:
-        return do_print_run(build_table(env, job))
+        table = build_table(env, job)
+        prepare = ('--prepare-render' in flags and '--no-render' not in flags
+                   and table.get('RENDER_BEFORE_RUN', '1') != '0')
+        return do_print_run(table, prepare_render=prepare)
 
     return do_render(env, job, target, job_path, env_path,
                      write_output="--no-render" not in flags)

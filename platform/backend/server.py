@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 import webbrowser
+from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -33,10 +34,26 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
         ".png": "image/png", ".svg": "image/svg+xml"}
 
 
+PROJECT_LOCK = threading.RLock()
+
+
+def project_operation(fn):
+    """项目切换与依赖当前项目的操作串行执行，拒绝旧页面的写入。"""
+    @wraps(fn)
+    def wrapped(payload):
+        with PROJECT_LOCK:
+            expected = payload.get('_project') if isinstance(payload, dict) else None
+            if expected and expected != core.load_env().get('PROJECT_DIR', '').replace('\\', '/'):
+                return {'ok': False, 'error': '项目已切换，请刷新后重试', 'message': '项目已切换，请刷新后重试'}
+            return fn(payload)
+    return wrapped
+
+
 class Api:
     """路由表：method + path 前缀 → 处理函数。"""
 
     @staticmethod
+    @project_operation
     def state(_):
         projects, current_project = core.scan_projects()
         cities, map_root = core.scan_cities()
@@ -52,14 +69,21 @@ class Api:
                 "func_source": "来自 " + current_project + "/SwanUtility/incl/LiShuttleTypes.h"}
 
     @staticmethod
+    @project_operation
     def select_project(body):
         path = body.get("path", "")
-        if not os.path.isfile(os.path.join(path, "CMakePresets.json")):
-            return {"error": f"{path} 不是有效的项目目录（缺 CMakePresets.json）"}
-        core.save_env_keys(PROJECT_DIR=path.replace("\\", "/"))
-        return Api.state(None)
+        result = core.add_project(path)
+        if not result['ok']:
+            return result
+        core.save_env_keys(PROJECT_DIR=result['path'])
+        return dict(Api.state(None), project_warnings=result['warnings'])
 
     @staticmethod
+    def add_project(body):
+        return Api.select_project(body)
+
+    @staticmethod
+    @project_operation
     def set_map_root(body):
         path = body.get("path", "").replace("\\", "/")
         if not os.path.isdir(path):
@@ -69,6 +93,7 @@ class Api:
         return {"map_root": map_root, "cities": cities}
 
     @staticmethod
+    @project_operation
     def set_gongcan_root(body):
         path = body.get("path", "").replace("\\", "/")
         if not os.path.isdir(path):
@@ -78,6 +103,7 @@ class Api:
         return {"gongcan_root": gongcan_root, "tasks": tasks}
 
     @staticmethod
+    @project_operation
     def render(body):
         """装配并渲染：写 web-*.env → 调渲染脚本 → 可选复制共用文件。"""
         job_name = body.get("job_name") or ""
@@ -86,9 +112,8 @@ class Api:
         task = body.get("task")
         city_name = body.get("city") or ""
         city_kind = body.get("city_kind") or "outdoor"
-        max_height = str(body.get("max_calc_height") or "3")
-        floor_height = str(body.get("floor_height") or "3")
         copy_files = bool(body.get("copy_files"))
+        copy_antennas = bool(body.get('copy_antennas', copy_files and not body.get('use_existing_schema')))
 
         if not job_name or not job_name.replace("-", "").replace("_", "").isalnum():
             return {"error": "任务名只能用字母数字、-、_"}
@@ -110,24 +135,47 @@ class Api:
         if current is None:
             return {"error": "任务已不存在，请重新扫描并选择"}
         try:
-            selected = core.validate_engineering(current, body.get('engineering_file'))
+            reuse = bool(body.get('use_existing_schema'))
+            selected = (core.validate_engineering(current, body.get('engineering_file'))
+                        if not reuse or body.get('sync_engineering') or body.get('engineering_file') else '')
         except ValueError as exc:
             return {"error": str(exc)}
         current['engineering_file'] = selected
         task = current
+        copy_antennas = copy_antennas and bool(task.get('has_antennas'))
+        preview = None
+        if reuse:
+            try:
+                preview = core.preview_task_schema(body, task, city_kind)
+            except ValueError as exc:
+                return {'error': str(exc)}
+            if body.get('preview_only'):
+                return preview
+            if body.get('preview_token') != preview['token']:
+                return {'error': '配置或路径选择已变化，请重新预览后确认装配'}
         job_file = core.build_job_env(job_name, func, task_id, task,
-                                      city_name, city_kind, max_height, floor_height)
+                                      city_name, city_kind)
         rc, output = core.run_render(job_file)
         result = {"job_file": job_file, "render_exit": rc, "render_output": output,
                   "schema_name": f"{job_name}.xml", "func": func, "task_id": task_id,
                   "copied": []}
+        if preview:
+            result.update(runtime_name=preview['runtime_name'], out_dir=preview['out_dir'],
+                          path_changes=preview['changes'], warnings=preview['warnings'])
         schema_path = core.schema_path(result["schema_name"])
         result["schema_ok"] = os.path.isfile(schema_path)
-        if copy_files and task:
-            result["copied"] = core.assemble_files(task, core.load_env())
+        groups = tuple(key for key, enabled in (
+            ('antenna', copy_antennas), ('model', copy_files and not reuse)) if enabled)
+        if groups and task and result['schema_ok']:
+            result["copied"] = core.assemble_files(task, core.load_env(), groups=groups)
         return result
 
     @staticmethod
+    def preview_render(body):
+        return Api.render(dict(body, use_existing_schema=True, preview_only=True))
+
+    @staticmethod
+    @project_operation
     def params(query):
         schema = query.get("schema", [""])[0]
         func = query.get("func", [""])[0]
@@ -166,9 +214,21 @@ class Api:
                      for k in values if k not in seen]
             if extra:
                 out_groups.append({"group": "高级(字典未收录)", "rows": extra})
-        return {"file": path, "schema_name": name, "values": values, "groups": out_groups}
+        return {"file": path, "schema_name": name, "values": values, "groups": out_groups,
+                "thirdpart_defaults": core.thirdpart_defaults()}
 
     @staticmethod
+    @project_operation
+    def param_default(body):
+        tag = body.get('tag', '')
+        default = core.thirdpart_defaults().get(tag)
+        if not default or not default['available']:
+            return {'ok': False, 'message': (default or {}).get('reason', '当前项目样例没有此参数的默认值')}
+        ok, msg = core.write_schema_param(body.get('schema', ''), tag, default['value'])
+        return dict(ok=ok, message=msg, value=default['value'], source=default['source'])
+
+    @staticmethod
+    @project_operation
     def param_write(body):
         schema = body.get("schema", "")
         tag = body.get("tag", "")
@@ -192,6 +252,7 @@ class Api:
         return {"ok": ok, "message": msg}
 
     @staticmethod
+    @project_operation
     def run(body):
         schema = body.get("schema", "")
         func = body.get("func", "pl")
@@ -202,6 +263,7 @@ class Api:
         return {"sid": sid, "exe": exe}
 
     @staticmethod
+    @project_operation
     def toolkit(body):
         sid, bat = core.start_toolkit(body.get("step", "doctor"))
         return {"sid": sid, "bat": bat}
@@ -217,6 +279,7 @@ class Api:
         return {"stopped": core.RUNNER.stop(int(body.get("sid", "0")))}
 
     @staticmethod
+    @project_operation
     def results(query):
         return core.results(query.get("job", [""])[0])
 
@@ -232,11 +295,14 @@ class Api:
 ROUTES = {
     ("GET", "state"): Api.state,
     ("POST", "select_project"): Api.select_project,
+    ("POST", "add_project"): Api.add_project,
     ("POST", "set_map_root"): Api.set_map_root,
     ("POST", "set_gongcan_root"): Api.set_gongcan_root,
     ("POST", "render"): Api.render,
+    ("POST", "preview_render"): Api.preview_render,
     ("GET", "params"): Api.params,
     ("POST", "param_write"): Api.param_write,
+    ("POST", "param_default"): Api.param_default,
     ("GET", "csv"): Api.csv_get,
     ("POST", "csv_save"): Api.csv_save,
     ("POST", "csv_column"): Api.csv_column,

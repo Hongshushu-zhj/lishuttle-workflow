@@ -2,9 +2,20 @@
 * { box-sizing: border-box; }
 body { margin: 0; font: 13px/1.5 "Microsoft YaHei", sans-serif; color: #222; background: #f5f6f8; }
 
-header { display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+header { display: flex; flex-direction: column; gap: 8px; padding: 14px 20px;
   background: #1f2d3d; color: #fff; }
-header .logo { font-weight: bold; font-size: 15px; margin-right: 8px; }
+header .logo { font-weight: bold; font-size: 17px; }
+header .logo span { margin-left: 8px; font-size: 13px; font-weight: normal; color: #cfd8e3; }
+.header-main { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; width: 100%; }
+.project-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.header-tools { display: flex; gap: 8px; margin-left: auto; }
+.project-add-form { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; width: 100%; padding-top: 8px; border-top: 1px solid #46556a; }
+.project-add-form .txt { flex: 1 1 300px; min-width: 0; padding: 7px 8px; }
+.project-add-form .field-help { width: 100%; color: #bac8da; }
+.param-control { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.param-control input { flex: 1 1 180px; min-width: 0; }
+.param-default { white-space: nowrap; }
+#env-note { color: #bac8da; font-size: 12px; overflow-wrap: anywhere; }
 header label { color: #cfd8e3; }
 header select { min-width: 220px; }
 button { padding: 4px 12px; border: 1px solid #bbb; background: #fff; cursor: pointer;
@@ -14,20 +25,27 @@ button.primary { background: #2563eb; color: #fff; border-color: #2563eb; }
 button.primary:hover { background: #1d4fd8; }
 button.mini { padding: 2px 8px; font-size: 12px; }
 button:disabled { opacity: .5; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+input, select { font: inherit; }
+select { padding: 6px 8px; border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; color: #222; }
+input[type="checkbox"], input[type="radio"] { accent-color: #2563eb; }
+select:disabled, input:disabled { background: #f1f5f9; color: #64748b; cursor: not-allowed; }
 .muted { color: #888; }
 .hidden { display: none !important; }
 
 .hint { padding: 4px 14px; background: #fffbe6; border-bottom: 1px solid #f0e0a0;
   color: #665; min-height: 22px; }
 
-.layout { display: flex; gap: 10px; padding: 10px; align-items: flex-start; }
-aside { width: 230px; flex-shrink: 0; display: flex; flex-direction: column; gap: 10px; }
-main { flex: 1; background: #fff; border: 1px solid #e2e5ea; border-radius: 4px; min-height: 80vh; }
+.layout { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
+aside { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; gap: 14px; }
+main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; border-radius: 8px; min-height: 80vh; }
 
-.panel { background: #fff; border: 1px solid #e2e5ea; border-radius: 4px; padding: 8px; }
+.panel { background: #fff; border: 1px solid #e2e5ea; border-radius: 8px; padding: 12px; }
 .panel-title { font-weight: bold; margin-bottom: 6px; color: #1f2d3d; }
 .path { width: 100%; margin-bottom: 4px; font-size: 12px; padding: 3px 5px; }
 .txt { padding: 3px 6px; border: 1px solid #ccc; border-radius: 3px; }
+.panel .field-label { margin-bottom: 6px; }
+#city-list, #task-list { margin-top: 10px; overflow-wrap: anywhere; }
 .txt.s { width: 60px; }
 .lbl { color: #555; }
 
@@ -47,8 +65,35 @@ main { flex: 1; background: #fff; border: 1px solid #e2e5ea; border-radius: 4px;
 .tabs { display: flex; gap: 2px; border-bottom: 2px solid #e2e5ea; padding: 6px 10px 0; }
 .tabs button { border: 1px solid #e2e5ea; border-bottom: none; border-radius: 4px 4px 0 0; }
 .tabs button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
-.tab { display: none; padding: 12px; }
+.tab { display: none; padding: 18px; }
 .tab.active { display: block; }
+
+.selection-summary { padding: 10px 14px; margin-bottom: 16px; border: 1px solid #dbeafe;
+  border-radius: 6px; background: #eff6ff; color: #1e40af; overflow-wrap: anywhere; }
+.setup-card { padding: 16px; margin-bottom: 16px; border: 1px solid #e2e8f0; border-radius: 7px; }
+.setup-card h2, .section-heading h2 { margin: 0; color: #1f2d3d; font-size: 15px; font-weight: 600; }
+.setup-card h2 { margin-bottom: 14px; }
+.field { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; min-width: 0; }
+.field + .field { margin-top: 16px; }
+.field > label, .field-label { color: #475569; }
+.field-label { display: block; }
+.field .path { margin: 0; min-width: 0; padding: 7px 8px; }
+.field .txt { width: 100%; padding: 7px 8px; }
+.field-help { color: #64748b; font-size: 12px; overflow-wrap: anywhere; }
+.task-fields { display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 16px; margin-bottom: 16px; }
+.task-fields .field { margin-top: 0; }
+.file-type { margin-left: 5px; padding: 1px 5px; border-radius: 4px; color: #475569; background: #e8edf4; font-size: 11px; }
+.check-option { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 5px; cursor: pointer; }
+.check-option input { margin: 0 3px 0 0; }
+.secondary-option { font-size: 12px; color: #64748b; }
+.assembly-card { background: #f8fafc; }
+.assembly-actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; }
+.resource-options { display: flex; flex-direction: column; gap: 10px; }
+#btn-render { padding: 9px 20px; }
+.section-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+#params-area:empty::before { content: "装配配置后，在此查看和调整参数"; display: block;
+  padding: 20px; border: 1px dashed #cbd5e1; border-radius: 6px; color: #64748b; text-align: center; }
+#func-radios { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
 .row .lbl { white-space: nowrap; }
@@ -91,3 +136,31 @@ main { flex: 1; background: #fff; border: 1px solid #e2e5ea; border-radius: 4px;
 #result-files { max-height: 420px; overflow: auto; font-size: 12px; }
 #result-files div { padding: 2px 6px; border-bottom: 1px solid #f3f4f6;
   display: flex; justify-content: space-between; }
+
+@media (max-width: 1000px) {
+  aside { width: 220px; }
+  .layout { gap: 12px; padding: 12px; }
+  .tab { padding: 12px; }
+  .ptable td:first-child { width: 150px; overflow-wrap: anywhere; }
+}
+@media (max-width: 720px) {
+  header { padding: 12px; }
+  .header-main { gap: 10px; }
+  header .logo { width: 100%; }
+  header select { min-width: 0; max-width: 100%; }
+  .project-picker { min-width: 0; flex: 1; }
+  .project-picker select { width: 100%; }
+  .layout { flex-direction: column; }
+  aside, main { width: 100%; }
+  aside { flex-direction: row; flex-wrap: wrap; }
+  aside .panel { flex: 1 1 240px; min-width: 0; }
+  .task-fields { grid-template-columns: minmax(0, 1fr) 100px; gap: 12px; }
+  .setup-card { padding: 12px; }
+  .tabs { overflow-x: auto; }
+  .tabs button { white-space: nowrap; }
+  .ptable { table-layout: fixed; }
+  .ptable td { overflow-wrap: anywhere; }
+  .ptable td:first-child { width: 30%; }
+  .ptable input, .ptable select { min-width: 0; max-width: 100%; }
+  .cols2 { flex-direction: column; }
+}

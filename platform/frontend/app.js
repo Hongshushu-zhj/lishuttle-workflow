@@ -12,12 +12,18 @@ const S = {  // 全局状态
 };
 
 async function api(name, body, method) {
+  const writing = method !== "GET";
+  if (writing) S.pendingRequests = (S.pendingRequests || 0) + 1;
   const opt = method === "GET" ? {} : {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body || {}),
+    body: JSON.stringify({ ...(body || {}), _project: S.project }),
   };
-  const res = await fetch(`/api/${name}${method === "GET" ? body : ""}`, opt);
-  return await res.json();
+  try {
+    const res = await fetch(`/api/${name}${method === "GET" ? body : ""}`, opt);
+    return await res.json();
+  } finally {
+    if (writing) S.pendingRequests--;
+  }
 }
 
 const get = (name, qs) => api(name, qs ? `?${qs}` : "", "GET");
@@ -34,25 +40,79 @@ function toast(msg, ok = true) {
 
 async function init() {
   const st = await get("state");
+  if (st.error) return toast(st.error, false);
+  applyProjectState(st);
+
+  $("project").onchange = () => changeProject("select_project", $("project").value);
+  $("btn-project-add").onclick = () => {
+    const open = $("project-add-form").classList.contains("hidden");
+    $("project-add-form").classList.toggle("hidden", !open);
+    $("btn-project-add").setAttribute("aria-expanded", String(open));
+    if (open) $("project-path").focus();
+  };
+  $("project-add-form").onsubmit = async event => {
+    event.preventDefault();
+    await changeProject("add_project", $("project-path").value.trim());
+  };
+  bindActions();
+}
+
+function applyProjectState(st) {
+  S.project = st.project;
+  S.projectEpoch = (S.projectEpoch || 0) + 1;
+  S.job = null;
+  S.city = null;
+  invalidateSchemaPreview();
+  $("params-area").innerHTML = "";
+  $("render-output").textContent = "";
+  $("render-output").classList.add("hidden");
+  $("run-info").textContent = "尚未渲染";
+  $("run-console").textContent = "";
+  $("run-status").classList.add("hidden");
+  $("result-files").innerHTML = "";
+  $("result-log").textContent = "";
+  $("result-status").classList.add("hidden");
+  $("result-job").value = "";
+  lastResultsDir = "";
   S.functions = st.functions;
   S.functionInfo = {};
   (st.function_info || []).forEach(f => { S.functionInfo[f.name] = f; });
   renderFuncRadios(S.functions.includes("pl") ? "pl" : S.functions[0]);
   fillSelect($("project"), st.projects, st.project);
+  $("project").value = st.project;
   $("map-root").value = st.map_root;
   $("gongcan-root").value = st.gongcan_root;
   renderCities(st.cities);
   renderTasks(st.tasks);
   $("env-note").textContent = `预设 ${st.preset} · 输出根 ${st.out_root}`;
+}
 
-  $("project").onchange = async () => {
-    const st2 = await post("select_project", { path: $("project").value });
-    if (st2.error) return toast(st2.error, false);
-    toast("项目已切换：" + $("project").value);
-  };
+async function changeProject(action, path) {
+  if (S.pollTimer || S.pendingRequests) {
+    $("project").value = S.project;
+    return toast("当前操作结束后再切换项目", false);
+  }
+  $("project").disabled = true;
+  $("btn-project-add").disabled = true;
+  try {
+    const st = await post(action, {path});
+    if (st.error) { $("project").value = S.project; return toast(st.error, false); }
+    applyProjectState(st);
+    $("project-add-form").classList.add("hidden");
+    $("btn-project-add").setAttribute("aria-expanded", "false");
+    toast(`项目已切换：${st.project}` + ((st.project_warnings || []).length ? "；" + st.project_warnings.join("；") : ""));
+  } catch (error) {
+    $("project").value = S.project;
+    toast(`项目切换失败：${error.message}`, false);
+  } finally {
+    $("project").disabled = false;
+    $("btn-project-add").disabled = false;
+  }
+}
+
+function bindActions() {
   $("btn-doctor").onclick = () => toolkit("doctor");
   $("btn-build").onclick = () => toolkit("build");
-  $("btn-stage").onclick = () => toolkit("stage");
   $("btn-rescan-map").onclick = rescanMap;
   $("btn-rescan-task").onclick = rescanTasks;
   $("btn-render").onclick = doRender;
@@ -61,6 +121,11 @@ async function init() {
   $("btn-csv-load").onclick = loadCsv;
   $("engineering-path").onchange = () => selectEngineering($("engineering-path").value, true);
   $("csv-path").onchange = () => selectEngineering($("csv-path").value, true);
+  $("use-existing-schema").onchange = updateSchemaMode;
+  ["schema-source", "sync-engineering", "schema-polygon", "job-name", "task-id", "copy-antennas"].forEach(id => {
+    $(id).addEventListener("change", invalidateSchemaPreview);
+    $(id).addEventListener("input", invalidateSchemaPreview);
+  });
   $("btn-csv-save").onclick = saveCsv;
   $("btn-csv-col").onclick = setColumn;
   $("btn-results").onclick = loadResults;
@@ -77,7 +142,7 @@ function switchTab(btn) {
 
 function fillSelect(sel, items, current) {
   sel.innerHTML = items.map(p =>
-    `<option value="${p}" ${p === current ? "selected" : ""}>${p.split(/[\\/]/).pop()}</option>`).join("");
+    `<option value="${esc(p).replace(/"/g, "&quot;")}" ${p === current ? "selected" : ""}>${esc(p.split(/[\\/]/).pop())}</option>`).join("");
 }
 
 /* ---------------- 左侧：城市与任务 ---------------- */
@@ -146,6 +211,12 @@ function renderCities(cities) {
 function renderTasks(tasks) {
   S.tasks = tasks;
   S.task = null;
+  updateAntennaOption();
+  $("use-existing-schema").checked = false;
+  $("use-existing-schema").disabled = true;
+  $("schema-source").replaceChildren();
+  $("sync-engineering").checked = false;
+  updateSchemaMode();
   $("engineering-path").replaceChildren();
   $("engineering-path").disabled = true;
   $("engineering-reason").textContent = "先选择工参任务";
@@ -160,6 +231,7 @@ function renderTasks(tasks) {
     document.querySelectorAll("#task-list .task").forEach(e => e.classList.remove("sel"));
     el.classList.add("sel");
     S.task = tasks.find(t => t.name === el.dataset.name);
+    updateAntennaOption();
     const candidates = S.task.engineering_candidates || [];
     for (const id of ["engineering-path", "csv-path"]) {
       const sel = $(id);
@@ -168,8 +240,43 @@ function renderTasks(tasks) {
       sel.disabled = !candidates.length;
     }
     selectEngineering(S.task.engineering_file || "", false);
+    const schemas = S.task.schema_candidates || [];
+    $("use-existing-schema").checked = false;
+    $("use-existing-schema").disabled = !schemas.length;
+    $("sync-engineering").checked = false;
+    $("schema-source").replaceChildren(new Option(schemas.length ? "请选择运行配置 XML" : "未识别到运行配置 XML", ""));
+    schemas.forEach(c => $("schema-source").add(new Option(
+      `${c.path.slice(S.task.dir.length + 1)} · name=${c.name} · ${KIND_CN[c.kind]}`, c.path)));
+    if (schemas.length === 1) $("schema-source").value = schemas[0].path;
+    $("schema-polygon").replaceChildren(new Option("不使用区域（将 PolygonFilePath 设为空）", ""));
+    (S.task.txts || []).forEach(p => $("schema-polygon").add(new Option(p.slice(S.task.dir.length + 1), p)));
+    updateSchemaMode();
     if (!$("job-name").value) $("job-name").value = `${S.task.name}-${S.func}`;
   });
+}
+
+let schemaPreviewRevision = 0;
+function updateAntennaOption() {
+  const available = !!(S.task && S.task.has_antennas);
+  $("antenna-option").classList.toggle("hidden", !available);
+  $("copy-antennas").disabled = !available;
+  $("copy-antennas").checked = available;
+}
+
+function invalidateSchemaPreview() {
+  schemaPreviewRevision++;
+  $("schema-preview").classList.add("hidden");
+  $("btn-apply-schema").disabled = true;
+}
+
+function updateSchemaMode() {
+  const reuse = $("use-existing-schema").checked;
+  $("schema-source").disabled = !reuse;
+  $("sync-engineering").disabled = !reuse;
+  $("copy-files").disabled = reuse;
+  $("existing-schema-options").classList.toggle("hidden", !reuse);
+  $("btn-render").textContent = reuse ? "预览路径修改" : "装配并渲染";
+  invalidateSchemaPreview();
 }
 
 function clearCsvEditor() {
@@ -192,11 +299,12 @@ function selectEngineering(path, manual) {
 }
 
 function updateNote() {
+  invalidateSchemaPreview();
   const c = S.city ? `${S.city.kind === "indoor" ? "室内场景" : "城市"} ${S.city.name}` : "未选地图";
   const t = S.task ? `任务 ${S.task.name}（${KIND_CN[S.task.kind]}，${S.task.detect}）` : "未选任务";
   $("selection-note").textContent = `已选：${c} · ${t}`;
   if (S.job) $("run-info").textContent =
-    `${S.job.name}.xml · -f ${S.job.func} -t ${S.job.taskId}`;
+    `${S.job.name}.xml · -f ${S.job.func} -t ${S.job.taskId}${S.job.outDir ? ` · 实际输出：${S.job.outDir}` : ""}`;
 }
 
 /* ---------------- 功能选择 ---------------- */
@@ -230,17 +338,49 @@ function showFuncHint(f) {
 async function doRender() {
   if (!S.city) return toast("先在左侧选择城市/场景", false);
   if (!S.task) return toast("先在左侧选择工参任务", false);
-  if (!S.task.engineering_file) return toast(S.task.engineering_reason || "请选择装配工参", false);
+  const reuse = $("use-existing-schema").checked;
+  if ((!reuse || $("sync-engineering").checked) && !S.task.engineering_file)
+    return toast(S.task.engineering_reason || "请选择装配工参", false);
+  if (reuse && !$("schema-source").value) return toast("请选择已有运行配置 XML", false);
   const jobName = $("job-name").value.trim();
   if (!jobName) return toast("先填任务名", false);
   const body = {
     job_name: jobName, func: S.func, task_id: $("task-id").value || "1",
     task: S.task, city: S.city.name, city_kind: S.city.kind,
     engineering_file: S.task.engineering_file,
-    max_calc_height: $("max-h").value, floor_height: $("floor-h").value,
-    copy_files: $("copy-files").checked,
+    copy_files: !reuse && $("copy-files").checked,
+    copy_antennas: !!S.task.has_antennas && $("copy-antennas").checked,
+    use_existing_schema: reuse, schema_source: $("schema-source").value,
+    sync_engineering: $("sync-engineering").checked, polygon_file: $("schema-polygon").value,
   };
+  if (reuse) {
+    invalidateSchemaPreview();
+    const revision = schemaPreviewRevision;
+    const p = await post("preview_render", body);
+    if (revision !== schemaPreviewRevision) return;
+    if (p.error) return toast(p.error, false);
+    $("schema-preview-text").textContent =
+      `源文件：${p.source}\n目标文件：${p.destination}\n保留 name：${p.runtime_name}\n实际输出目录：${p.out_dir}\n` +
+      `覆盖已有目标前备份为 .bak。源文件保持不变。\n\n` +
+      (body.copy_antennas ? `另装配任务天线：${S.task.antenna_dir || S.task.antenna || "无任务天线，将按现有规则恢复项目默认天线 XML"}\n\n` : "不装配天线，保留项目现有天线文件。\n\n") +
+      p.changes.map(c => `${c.tag}\n  原：${c.old || "（空）"}\n  新：${c.new || "（空）"}`).join("\n") +
+      (p.warnings.length ? "\n\n提示：\n" + p.warnings.join("\n") : "");
+    $("schema-preview").classList.remove("hidden");
+    $("btn-apply-schema").disabled = false;
+    $("btn-apply-schema").onclick = async () => {
+      $("btn-apply-schema").disabled = true;
+      await submitRender({ ...body, preview_token: p.token });
+    };
+    return;
+  }
+  await submitRender(body);
+}
+
+async function submitRender(body) {
+  const epoch = S.projectEpoch;
+  const jobName = body.job_name;
   const r = await post("render", body);
+  if (epoch !== S.projectEpoch) return;
   if (r.error) return toast(r.error, false);
   const ro = $("render-output");
   ro.classList.remove("hidden");
@@ -253,7 +393,7 @@ async function doRender() {
     toast("运行单已生成，但有输入文件缺失（下方标 [缺失]）——参数面板仍可改路径", false);
   }
 
-  S.job = { name: jobName, schema: r.schema_name, func: r.func, taskId: r.task_id };
+  S.job = { name: jobName, schema: r.schema_name, func: r.func, taskId: r.task_id, outDir: r.out_dir };
   const copied = (r.copied || []).map(c => `${c.file} → ${c.to} ${c.backup}`).join("\n");
   toast(`渲染完成：${r.schema_name}${copied ? "\n已替换：" + copied : ""}`);
   updateNote();
@@ -262,7 +402,9 @@ async function doRender() {
 }
 
 async function loadParams() {
+  const job = S.job;
   const r = await get("params", `schema=${encodeURIComponent(S.job.schema)}&func=${S.job.func}&all=0`);
+  if (job !== S.job) return;
   if (r.error) return toast(r.error, false);
   renderParams(r);
 }
@@ -276,13 +418,17 @@ function renderParams(r) {
     div.innerHTML = `<h4>${g.group}</h4><table class="ptable"></table>`;
     const tb = div.querySelector("table");
     for (const p of g.rows) {
+      const d = (r.thirdpart_defaults || {})[p.name];
+      const available = d && d.available && r.values[p.name] !== undefined;
+      const reason = r.values[p.name] === undefined ? "当前 XML 没有此字段" : d ? (d.reason || `恢复为：${d.value || "（空）"}；来源：${d.source}`) : "当前项目 ThirdPart 样例没有此参数默认值";
+      const defaultButton = `<button type="button" class="mini param-default" data-default-tag="${p.name}" ${available ? "" : "disabled"} title="${esc(reason).replace(/"/g, "&quot;")}">ThirdPart 默认</button>`;
       const v = r.values[p.name] !== undefined ? r.values[p.name] : (p.default || "");
       const tr = document.createElement("tr");
       const input = p.type === "bool"
         ? `<select data-tag="${p.name}"><option ${v === "true" ? "selected" : ""}>true</option><option ${v !== "true" ? "selected" : ""}>false</option></select>`
-        : `<input data-tag="${p.name}" value="${String(v).replace(/"/g, "&quot;")}">`;
+        : `<input data-tag="${p.name}" value="${esc(v).replace(/"/g, "&quot;")}">`;
       tr.innerHTML = `<td title="${(p.desc || "").replace(/"/g, "&quot;")}">${p.label}<br><span class="muted" style="font-size:11px">${p.name}</span></td>
-                      <td>${input}</td>
+                      <td><div class="param-control">${input}${defaultButton}</div></td>
                       <td>${p.desc || ""}</td>`;
       tb.appendChild(tr);
     }
@@ -298,6 +444,21 @@ function renderParams(r) {
       toast(`${tag} 已写入 ${S.job.schema}（原文件备份 .bak）`);
     });
     el.addEventListener("focus", () => { /* hint 由 title 承担 */ });
+  });
+  area.querySelectorAll("button[data-default-tag]").forEach(button => {
+    button.onclick = async () => {
+      const job = S.job;
+      const tag = button.dataset.defaultTag;
+      button.disabled = true;
+      try {
+        const res = await post("param_default", {schema: job.schema, tag});
+        if (S.job !== job) return;
+        if (!res.ok) return toast(res.message || res.error, false);
+        await loadParams();
+        toast(`${tag} 已写入 ThirdPart 默认值（原文件备份 .bak）`);
+      } catch (error) { toast(error.message, false); }
+      finally { button.disabled = false; }
+    };
   });
 }
 
@@ -387,6 +548,7 @@ function attachConsole(sid, title) {
     }
     if (r.status === "done") {
       clearInterval(S.pollTimer);
+      S.pollTimer = null;
       const b = $("run-status");
       b.classList.remove("hidden");
       b.className = "badge " + (r.exit === 0 ? "ok" : "fail");
@@ -401,9 +563,11 @@ function attachConsole(sid, title) {
 let lastResultsDir = "";
 
 async function loadResults() {
+  const epoch = S.projectEpoch;
   const job = $("result-job").value.trim() || (S.job && S.job.name);
   if (!job) return toast("填任务名", false);
   const r = await get("results", `job=${encodeURIComponent(job)}`);
+  if (epoch !== S.projectEpoch) return;
   lastResultsDir = r.dir || "";
   const b = $("result-status");
   if (!r.exists) {

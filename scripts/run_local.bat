@@ -50,7 +50,9 @@ rem ---- 取运行参数 ----
 rem 和渲染走的是同一个解析逻辑，所以"渲染用的路径"和"运行用的路径"必然一致。
 rem RENDER_BEFORE_RUN 也在这里取，避免批处理去解析含中文注释的任务单文件。
 set "FUNC="
-for /f "usebackq tokens=1,* delims==" %%a in (`python scripts\render_schema.py "%JOBFILE%" local-win --print-run`) do set "%%a=%%b"
+set "PRINTMODE=--prepare-render"
+if /i "%NORENDER%"=="--no-render" set "PRINTMODE="
+for /f "usebackq tokens=1,* delims==" %%a in (`python scripts\render_schema.py "%JOBFILE%" local-win --print-run !PRINTMODE!`) do set "%%a=%%b"
 
 if "!FUNC!"=="" (
 	echo [错误] 取运行参数失败。先手动验证一下：
@@ -78,6 +80,9 @@ if /i "%NORENDER%"=="--no-render" (
 )
 
 rem ---- 前置检查 ----
+rem Refresh paths from the generated XML after rendering (or manual edits).
+for /f "usebackq tokens=1,* delims==" %%a in (`python scripts\render_schema.py "%JOBFILE%" local-win --print-run`) do set "%%a=%%b"
+
 set "EXEDIR=!EXE_DIR:/=\!"
 if not exist "!EXE_PATH:/=\!" (
 	echo [错误] 找不到可执行文件：!EXE_PATH!

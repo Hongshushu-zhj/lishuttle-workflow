@@ -70,8 +70,11 @@ class EngineeringSelectionTests(unittest.TestCase):
         task = self.scan()
         task['engineering_file'] = core.validate_engineering(task, expected)
         with patch.object(core, 'load_env', return_value=self.env), patch.object(core, 'JOBS_DIR', str(self.root)):
-            job = core.build_job_env('test', 'cali', '1', task, 'city', 'outdoor', '3', '3')
+            job = core.build_job_env('test', 'cali', '1', task, 'city', 'outdoor')
         self.assertIn(f'ENGINEERING_FILE="{expected}"', Path(job).read_text(encoding='utf-8'))
+        saved = Path(job).read_text(encoding='utf-8')
+        self.assertNotIn('MAX_CALC_HEIGHT=', saved)
+        self.assertNotIn('DEFAULT_FLOOR_HEIGHT=', saved)
 
     def test_missing_candidates_do_not_fall_back_to_first_csv(self):
         self.write('CALI.csv', 'cellID,Lon,Lat,RSRP\na,1,2,-80\n')

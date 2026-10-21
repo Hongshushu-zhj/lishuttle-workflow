@@ -18,17 +18,22 @@ import shutil
 import subprocess
 import sys
 import threading
+import hashlib
+import html
+import xml.etree.ElementTree as ET
 from engineering import identify_engineering, validate_engineering
 
 HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
 ROOT = os.path.dirname(os.path.dirname(HERE))          # 工作流根目录
 SCRIPTS = os.path.join(ROOT, "scripts")
 ENV_FILE = os.path.join(ROOT, "env", "local-win.env")
+PROJECTS_FILE = os.path.join(ROOT, "env", "projects.json")
 JOBS_DIR = os.path.join(ROOT, "jobs")
 SPEC_FILE = os.path.join(HERE, "params_spec.json")
 
 sys.path.insert(0, SCRIPTS)
-from render_schema import read_env_file  # noqa: E402  复用已验证的解析
+from render_schema import read_env_file, build_table  # noqa: E402
+from task_schema import schema_candidates, render_existing, runtime_details
 
 TAG_RE = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>([^<]*)</\1>")
 CSV_ENCODINGS = ("utf-8-sig", "gb18030", "gbk")
@@ -65,18 +70,86 @@ def save_env_keys(**kwargs):
 # ----------------------------------------------------------------------
 
 def scan_projects():
-    """扫描当前配置项目的同级 Lab* 目录（含 CMakePresets.json 的）。"""
+    """仅列出明确添加的项目，以及升级前已配置的当前项目。"""
     env = load_env()
-    lab_root = os.path.dirname(os.path.abspath(to_native(env["PROJECT_DIR"])))
     found = []
-    for entry in sorted(os.listdir(lab_root)):
-        full = os.path.join(lab_root, entry)
-        if entry.startswith("Lab") and os.path.isfile(os.path.join(full, "CMakePresets.json")):
-            found.append(to_slash(full))
-    current = to_slash(env["PROJECT_DIR"])
-    if current not in found:
-        found.insert(0, current)
-    return found, current
+    if os.path.isfile(PROJECTS_FILE):
+        with open(PROJECTS_FILE, encoding='utf-8') as fh:
+            found = json.load(fh).get('projects', [])
+    current = to_slash(env.get("PROJECT_DIR", ""))
+    unique, seen = [], set()
+    for path in ([current] if current else []) + found:
+        key = os.path.normcase(os.path.abspath(to_native(path)))
+        if key not in seen:
+            seen.add(key)
+            unique.append(to_slash(path))
+    return unique, current
+
+
+def validate_project(path):
+    path = os.path.abspath(os.path.expanduser(path.strip().strip('"')))
+    required = [('CMakeLists.txt', os.path.isfile), ('LiShuttle', os.path.isdir),
+                ('SwanUtility/incl/LiShuttleTypes.h', os.path.isfile)]
+    missing = [name for name, check in required if not check(os.path.join(path, name))]
+    warnings = [f'缺少 {name}，请检查对应构建或装配配置' for name in
+                ('CMakePresets.json', 'ThirdPart/Config/runtimelibrary/runtimeschema.xml')
+                if not os.path.isfile(os.path.join(path, name))]
+    return dict(ok=not missing, path=to_slash(path), warnings=warnings,
+                error='不是可识别的 LiShuttle 项目，缺少：' + '、'.join(missing) if missing else '')
+
+
+def add_project(path):
+    if not path.strip():
+        return dict(ok=False, error='请输入项目根目录')
+    result = validate_project(path)
+    if not result['ok']:
+        return result
+    projects, _ = scan_projects()
+    if not any(os.path.normcase(os.path.abspath(p)) == os.path.normcase(result['path']) for p in projects):
+        projects.append(result['path'])
+    os.makedirs(os.path.dirname(PROJECTS_FILE), exist_ok=True)
+    with open(PROJECTS_FILE + '.tmp', 'w', encoding='utf-8') as fh:
+        json.dump({'projects': projects}, fh, ensure_ascii=False, indent=2)
+    os.replace(PROJECTS_FILE + '.tmp', PROJECTS_FILE)
+    return result
+
+
+def thirdpart_defaults():
+    """默认值源于当前项目样例；路径必须落在真实存在的配置源内。"""
+    env = load_env()
+    config = os.path.realpath(os.path.join(env['PROJECT_DIR'], env.get('CONFIG_SRC', 'ThirdPart/Config')))
+    sample = os.path.join(config, 'runtimelibrary', 'runtimeschema.xml')
+    try:
+        root = ET.parse(sample).getroot()
+    except (OSError, ET.ParseError):
+        return {}
+    if root.tag != 'RuntimeSchema':
+        return {}
+    path_tags = {p['name'] for p in load_spec()['params'] if p.get('type') == 'path'}
+    path_tags.update(('BuildingPenetration', 'RoadsToBeRecorded', 'PredictedCells'))
+    known = {'SceneSettingsPath': 'config/scenesettings.xml',
+             'ClutterMatchPath': 'config/cluttermatchsettings.xml'}
+    result = {}
+    for node in root:
+        value = node.text or ''
+        item = dict(available=True, value=value, source=to_slash(sample), reason='')
+        if node.tag in path_tags or node.tag.endswith(('Path', 'Directory')):
+            item.update(available=False, value='', reason='ThirdPart 中没有可确认的默认资源，请选择任务数据路径')
+            candidates = [os.path.join(config, known[node.tag])] if node.tag in known else []
+            if value.strip():
+                native = to_native(value.strip())
+                candidates += [os.path.join(os.path.dirname(sample), native), os.path.join(config, native)]
+            for candidate in candidates:
+                candidate = os.path.realpath(candidate)
+                try:
+                    inside = os.path.commonpath([config, candidate]) == config
+                except ValueError:
+                    inside = False
+                if inside and os.path.exists(candidate):
+                    item.update(available=True, value=to_slash(candidate), source=to_slash(candidate), reason='')
+                    break
+        result[node.tag] = item
+    return result
 
 
 def _check(paths_labels):
@@ -162,7 +235,7 @@ def scan_tasks():
             for base, dirs, files in os.walk(full):
                 dirs.sort()
                 base_name = os.path.basename(base).lower()
-                if base_name == "antennas" and not antenna_dir:
+                if base_name in ("antenna", "antennas") and not antenna_dir:
                     antenna_dir = base
                 elif base_name == "models" and not model_dir:
                     model_dir = base
@@ -181,6 +254,9 @@ def scan_tasks():
                         model = p
                     elif lf == "scenesettings.xml":
                         scene = p
+            # 有多份资源目录时，使用已识别 antenna.xml 所在的目录，避免 XML/方向图错配。
+            if antenna and os.path.basename(os.path.dirname(antenna)).lower() in ('antenna', 'antennas'):
+                antenna_dir = os.path.dirname(antenna)
             kind, basis = 'unknown', ''
             tasks.append({
                 "name": name, "kind": kind, "detect": basis, "dir": to_slash(full),
@@ -202,6 +278,11 @@ def scan_tasks():
             })
     for task in tasks:
         identify_engineering(task)
+        task['schema_candidates'] = schema_candidates(task.get('xmls', []))
+        task['has_antennas'] = bool(task.get('antenna')) or bool(task.get('antenna_dir')) and any(
+            any(not f.lower().endswith('.bak') for f in files)
+            for _, _, files in os.walk(task['antenna_dir'])
+        )
     return tasks, to_slash(gongcan)
 
 
@@ -224,7 +305,49 @@ def pick_region(txts, csv_path):
     return same_dir[0] if same_dir else ""
 
 
-def build_job_env(job_name, func, task_id, task, city_name, city_kind, max_height, floor_height):
+def preview_task_schema(body, task, city_kind):
+    """Validate selected local files and build the same path table used by CLI rendering."""
+    requested = body.get('schema_source', '')
+    candidates = task.get('schema_candidates', [])
+    source = next((c['path'] for c in candidates if os.path.normcase(os.path.realpath(c['path']))
+                   == os.path.normcase(os.path.realpath(requested))), None) if requested else None
+    if not source:
+        raise ValueError('请选择当前任务中有效的运行配置 XML，请重新扫描后选择')
+    polygon = body.get('polygon_file', '')
+    if polygon:
+        polygon = next((p for p in task.get('txts', [])
+                        if os.path.normcase(os.path.realpath(p)) == os.path.normcase(os.path.realpath(polygon))), None)
+        if not polygon:
+            raise ValueError('区域文件不属于当前任务，请重新选择')
+    env = load_env()
+    city = body.get('city', '')
+    if not city:
+        raise ValueError('请选择地图')
+    job = dict(JOB_NAME=body['job_name'], SCHEMA_NAME=body['job_name'] + '.xml',
+               FUNC=body.get('func', 'pl'), CITY=city,
+               SCHEMA_SOURCE=source, SYNC_ENGINEERING='1' if body.get('sync_engineering') else '0',
+               ENGINEERING_FILE=task.get('engineering_file', ''), POLYGON_FILE=polygon)
+    if city_kind == 'indoor':
+        job.update(TEMPLATE='runtimeschema-indoor.xml.tpl', MAP_PATH=env['MAP_ROOT'].rstrip('/') + '/' + city)
+    table = build_table(env, job)
+    preview = render_existing(table)
+    destination = schema_path(job['SCHEMA_NAME'])
+    if os.path.normcase(os.path.realpath(source)) == os.path.normcase(os.path.realpath(destination)):
+        raise ValueError('源 XML 与目标文件相同，不能覆盖原始配置')
+    task.update(schema_source=source, sync_engineering=bool(body.get('sync_engineering')), polygon_file=polygon)
+    preview['destination'] = destination
+    preview['token'] = hashlib.sha256((preview['token'] + '\0' + destination).encode('utf-8')).hexdigest()
+    preview['warnings'] = []
+    if not task['sync_engineering'] and preview['engineering_file']:
+        engineering_path = preview['engineering_file'].replace('\\', '/')
+        if not os.path.isabs(engineering_path):
+            engineering_path = os.path.join(os.path.dirname(os.path.dirname(destination)), engineering_path)
+        if not os.path.isfile(engineering_path):
+            preview['warnings'].append('原 XML 的工参路径在当前运行位置不存在；可勾选“同步为当前工参”，或复制后手动调整')
+    return {k: v for k, v in preview.items() if k != 'text'}
+
+
+def build_job_env(job_name, func, task_id, task, city_name, city_kind):
     env = load_env()
     lines = [
         f'JOB_NAME="{job_name}"',
@@ -233,11 +356,10 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind, max_heigh
         f'TASK_ID="{task_id}"',
         f'RENDER_BEFORE_RUN="1"',
         f'SERVER_BACKGROUND="0"',
-        f'MAX_CALC_HEIGHT="{max_height}"',
-        f'DEFAULT_FLOOR_HEIGHT="{floor_height}"',
     ]
     txts = task.get("txts") if task else []
-    csv_file = to_slash(validate_engineering(task))
+    csv_file = (task.get('engineering_file', '') if task.get('schema_source') and not task.get('sync_engineering')
+                else to_slash(validate_engineering(task)))
     region = pick_region([to_slash(t) for t in txts], csv_file)
     if city_kind == "indoor":
         lines += [
@@ -253,6 +375,12 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind, max_heigh
             f'POLYGON_FILE="{region}"',
         ]
     job_file = os.path.join(JOBS_DIR, f"web-{job_name}.env")
+    if task.get('schema_source'):
+        lines += [f'SCHEMA_SOURCE="{task["schema_source"]}"',
+                  f'SYNC_ENGINEERING="{1 if task.get("sync_engineering") else 0}"']
+        # 区域由用户明确选择，不再猜测任务包的 index/WrongSites 等 TXT。
+        lines = [f'POLYGON_FILE="{task.get("polygon_file", "")}"'
+                 if line.startswith('POLYGON_FILE=') else line for line in lines]
     with open(job_file, "w", encoding="utf-8") as fh:
         fh.write("# 由平台生成，可手工编辑后用脚本复跑\n" + "\n".join(lines) + "\n")
     return to_slash(job_file)
@@ -274,12 +402,12 @@ def run_render(job_file):
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
 
 
-def assemble_files(task, project_env):
+def assemble_files(task, project_env, groups=('antenna', 'model')):
     """任务包共用文件 → 替换进 exe 目录（先备份）。返回动作清单。
 
     规则（对 antenna/models 两组一致）：
     - 任务有 <name>.xml → 复制它（原文件备份 .bak）
-    - 任务有 antennas/ 或 models/ 子文件夹 → 整夹内容同步（antenna.xml 引用的
+    - 任务有 antenna/、antennas/ 或 models/ 子文件夹 → 整夹内容同步（antenna.xml 引用的
       方向图就住在这种文件夹里，缺了会报 Load3DGainFile 错误并回退默认方向图）
     - 只有文件夹没有 xml → 同步整夹 + 恢复项目默认 xml
     - 什么都没有 → 恢复项目默认 xml（撤销上一个任务的替换——否则上一个室外
@@ -289,6 +417,8 @@ def assemble_files(task, project_env):
     exe_dir = f"{to_slash(project_env['PROJECT_DIR'])}/{project_env['BUILD_SUBDIR']}/Bin"
     actions = []
     for key, sub in (("antenna", "antennas"), ("model", "models")):
+        if key not in groups:
+            continue
         src = task.get(key) if task else ""
         dst_dir = os.path.join(exe_dir, sub)
         os.makedirs(dst_dir, exist_ok=True)
@@ -365,16 +495,20 @@ def read_schema(schema_name):
     path = schema_path(schema_name)
     if not os.path.isfile(path):
         return None, {}, path
-    text = open(path, "r", encoding="utf-8").read()
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
     m = re.search(r'<RuntimeSchema\s+name="([^"]*)"', text)
     values = {}
     for tag, val in TAG_RE.findall(text):
-        values.setdefault(tag, val)
+        values.setdefault(tag, html.unescape(val))
+    for tag in re.findall(r'<([A-Za-z_][A-Za-z0-9_]*)\s*/>', text):
+        values.setdefault(tag, '')
     return to_slash(path), values, (m.group(1) if m else "")
 
 
 def load_spec():
-    return json.load(open(SPEC_FILE, encoding="utf-8"))
+    with open(SPEC_FILE, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 # 真正的 -f 运行功能（这些宏对应的才注册了引擎）。
@@ -437,13 +571,20 @@ def write_schema_param(schema_name, tag, value):
     path = schema_path(schema_name)
     if not os.path.isfile(path):
         return False, f"找不到运行单：{path}"
-    text = open(path, "r", encoding="utf-8").read()
+    with open(path, 'rb') as fh:
+        text = fh.read().decode('utf-8')
     pat = re.compile(rf"(<{re.escape(tag)}>)([^<]*)(</{re.escape(tag)}>)")
-    if not pat.search(text):
+    empty_pat = re.compile(rf'<{re.escape(tag)}\s*/>')
+    if not pat.search(text) and not empty_pat.search(text):
         return False, f"运行单里没有字段 <{tag}>"
     shutil.copy2(path, path + ".bak")
-    new_text = pat.sub(lambda m: m.group(1) + value + m.group(3), text, count=1)
-    open(path, "w", encoding="utf-8", newline="\n").write(new_text)
+    escaped = html.escape(value, quote=False)
+    if pat.search(text):
+        new_text = pat.sub(lambda m: m.group(1) + escaped + m.group(3), text, count=1)
+    else:
+        new_text = empty_pat.sub(lambda m: f'<{tag}>{escaped}</{tag}>', text, count=1)
+    with open(path, 'wb') as fh:
+        fh.write(new_text.encode('utf-8'))
     return True, f"{tag} -> {value}（原文件已备份 .bak）"
 
 
@@ -593,6 +734,13 @@ def start_toolkit(step):
 def results(job_name):
     env = load_env()
     out_dir = os.path.join(env["OUT_ROOT"].replace("/", os.sep), job_name)
+    manifest_path = schema_path(job_name + '.xml') + '.manifest.json'
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, encoding='utf-8') as fh:
+            manifest = json.load(fh)
+        if manifest.get('schema_mode') == 'existing':
+            out_dir = runtime_details(schema_path(job_name + '.xml'),
+                                      os.path.dirname(os.path.dirname(manifest_path)))['out_dir']
     exe_dir = os.path.join(env["PROJECT_DIR"].replace("/", os.sep),
                            *env["BUILD_SUBDIR"].split("/"), "Bin")
     info = {"dir": to_slash(out_dir), "exists": os.path.isdir(out_dir),
