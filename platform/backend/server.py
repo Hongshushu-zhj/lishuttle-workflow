@@ -153,12 +153,16 @@ class Api:
                 return preview
             if body.get('preview_token') != preview['token']:
                 return {'error': '配置或路径选择已变化，请重新预览后确认装配'}
+        try:
+            base_resources = core.ensure_runtime_resources(core.load_env())
+        except (OSError, ValueError) as exc:
+            return {'error': f'基础运行资源装配失败：{exc}'}
         job_file = core.build_job_env(job_name, func, task_id, task,
                                       city_name, city_kind)
         rc, output = core.run_render(job_file)
         result = {"job_file": job_file, "render_exit": rc, "render_output": output,
                   "schema_name": f"{job_name}.xml", "func": func, "task_id": task_id,
-                  "copied": []}
+                  "copied": [], "base_resources": base_resources}
         if preview:
             result.update(runtime_name=preview['runtime_name'], out_dir=preview['out_dir'],
                           path_changes=preview['changes'], warnings=preview['warnings'])

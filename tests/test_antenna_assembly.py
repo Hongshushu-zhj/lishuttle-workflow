@@ -70,6 +70,7 @@ class AntennaAssemblyTests(unittest.TestCase):
                 patch.object(core, 'preview_task_schema', return_value=preview), \
                 patch.object(core, 'build_job_env', return_value='job.env'), \
                 patch.object(core, 'run_render', return_value=(0, '')), \
+                patch.object(core, 'ensure_runtime_resources', return_value={}), \
                 patch.object(core, 'schema_path', return_value=__file__), \
                 patch.object(core, 'load_env', return_value=self.env), \
                 patch.object(core, 'assemble_files', return_value=[]) as assemble:

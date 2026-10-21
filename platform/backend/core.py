@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import hashlib
+import tempfile
 import html
 import xml.etree.ElementTree as ET
 from engineering import identify_engineering, validate_engineering
@@ -400,6 +401,87 @@ def run_render(job_file):
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         cwd=ROOT, env=child_env)
     return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+
+
+def ensure_runtime_resources(project_env):
+    """补齐基础运行文件；现有运行配置、任务资源及 DLL 均不覆盖。"""
+    project = os.path.realpath(to_native(project_env['PROJECT_DIR']))
+    exe_dir = os.path.realpath(os.path.join(project, to_native(project_env['BUILD_SUBDIR']), 'Bin'))
+    sources = [('基础配置', project_env.get('CONFIG_SRC', 'ThirdPart/Config')),
+               ('动态库', project_env.get('DLL_SRC', 'ThirdPart/Dll/Release'))]
+    roots = []
+    for label, relative in sources:
+        if not relative:
+            raise ValueError(f'{label}源目录未配置')
+        source = os.path.realpath(os.path.join(project, to_native(relative)))
+        if not os.path.isdir(source):
+            raise ValueError(f'找不到{label}源目录：{source}')
+        try:
+            overlap = os.path.commonpath([source, exe_dir]) in (source, exe_dir)
+        except ValueError:
+            overlap = False
+        if overlap:
+            raise ValueError(f'{label}源目录与 Bin 不能互相包含：{source}')
+        roots.append(source)
+
+    # 与 stage_local.bat 顺序一致：Config → DLL → config/*.xml 平铺。
+    # 同名文件在内存中先确定最终来源，不在磁盘上反复覆盖。
+    plan = {}
+    def walk_error(error):
+        raise error
+    for (label, _), source in zip(sources, roots):
+        file_count = 0
+        for base, dirs, files in os.walk(source, onerror=walk_error):
+            dirs.sort()
+            for name in sorted(files):
+                if name.lower().endswith(('.bak', '.tmp', '.task-bak')):
+                    continue
+                path = os.path.join(base, name)
+                if os.path.islink(path):
+                    raise ValueError(f'基础资源不支持符号链接：{path}')
+                plan[os.path.relpath(path, source)] = path
+                file_count += 1
+        if not file_count:
+            raise ValueError(f'{label}源目录没有可装配文件：{source}')
+    config_dir = os.path.join(roots[0], 'config')
+    if os.path.isdir(config_dir):
+        for name in sorted(os.listdir(config_dir)):
+            path = os.path.join(config_dir, name)
+            if name.lower().endswith('.xml') and os.path.isfile(path):
+                plan[name] = path
+    if not plan:
+        raise ValueError('基础运行资源源目录为空，未执行装配')
+
+    pending, kept = [], 0
+    for relative, source in plan.items():
+        destination = os.path.join(exe_dir, relative)
+        if os.path.isfile(destination):
+            kept += 1
+            continue
+        if os.path.lexists(destination):
+            raise ValueError(f'基础文件目标被目录或链接占用：{destination}')
+        parent = os.path.dirname(destination)
+        while parent != os.path.dirname(parent):
+            if os.path.exists(parent) and not os.path.isdir(parent):
+                raise ValueError(f'基础资源目标目录被文件占用：{parent}')
+            parent = os.path.dirname(parent)
+        pending.append((source, destination, relative))
+
+    copied = []
+    for source, destination, relative in pending:
+        os.makedirs(os.path.dirname(destination), exist_ok=True)
+        handle, temporary = tempfile.mkstemp(prefix='.stage-', suffix='.tmp', dir=os.path.dirname(destination))
+        os.close(handle)
+        try:
+            shutil.copy2(source, temporary)
+            os.replace(temporary, destination)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+        copied.append(dict(file=relative, **{'from': to_slash(source)},
+                           to=to_slash(destination), backup='补齐缺失基础文件'))
+    return dict(copied=copied, kept_count=kept, exe_dir=to_slash(exe_dir),
+                config_source=to_slash(roots[0]), dll_source=to_slash(roots[1]))
 
 
 def assemble_files(task, project_env, groups=('antenna', 'model')):

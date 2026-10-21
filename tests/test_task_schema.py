@@ -144,6 +144,7 @@ class TaskSchemaTests(unittest.TestCase):
         with patch.object(core, 'load_env', return_value=self.env), \
                 patch.object(core, 'JOBS_DIR', str(self.root)), \
                 patch.object(core, 'run_render', side_effect=render_job), \
+                patch.object(core, 'ensure_runtime_resources', return_value={}), \
                 patch.object(core, 'assemble_files') as assemble:
             preview = Api.preview_render(body)
             result = Api.render(dict(body, preview_token=preview['token']))

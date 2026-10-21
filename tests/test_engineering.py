@@ -112,6 +112,7 @@ class EngineeringSelectionTests(unittest.TestCase):
         with patch.object(core, 'load_env', return_value=self.env), \
                 patch.object(core, 'build_job_env', return_value='job.env') as build, \
                 patch.object(core, 'run_render', return_value=(0, '')), \
+                patch.object(core, 'ensure_runtime_resources', return_value={}), \
                 patch.object(core, 'schema_path', return_value=str(self.root / 'test.xml')):
             result = Api.render({'job_name': 'test', 'task': stale, 'engineering_file': selected})
         self.assertNotIn('error', result)

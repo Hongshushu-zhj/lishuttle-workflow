@@ -362,6 +362,7 @@ async function doRender() {
     $("schema-preview-text").textContent =
       `源文件：${p.source}\n目标文件：${p.destination}\n保留 name：${p.runtime_name}\n实际输出目录：${p.out_dir}\n` +
       `覆盖已有目标前备份为 .bak。源文件保持不变。\n\n` +
+      `确认后自动补齐当前项目 ThirdPart 基础运行资源，保留已存在文件。\n\n` +
       (body.copy_antennas ? `另装配任务天线：${S.task.antenna_dir || S.task.antenna || "无任务天线，将按现有规则恢复项目默认天线 XML"}\n\n` : "不装配天线，保留项目现有天线文件。\n\n") +
       p.changes.map(c => `${c.tag}\n  原：${c.old || "（空）"}\n  新：${c.new || "（空）"}`).join("\n") +
       (p.warnings.length ? "\n\n提示：\n" + p.warnings.join("\n") : "");
@@ -384,7 +385,11 @@ async function submitRender(body) {
   if (r.error) return toast(r.error, false);
   const ro = $("render-output");
   ro.classList.remove("hidden");
-  ro.textContent = r.render_output || "(无输出)";
+  const base = r.base_resources;
+  const baseLog = base ? `基础运行资源：补齐 ${base.copied.length} 个文件，保留 ${base.kept_count} 个已有文件\n` +
+    `配置来源：${base.config_source}\n动态库来源：${base.dll_source}\n目标：${base.exe_dir}\n` +
+    base.copied.map(c => `${c.from} → ${c.to}`).join("\n") + "\n\n" : "";
+  ro.textContent = baseLog + (r.render_output || "(无输出)");
   if (!r.schema_ok) {
     toast("渲染失败：没生成运行单，看下方输出", false);
     return;
