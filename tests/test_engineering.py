@@ -41,6 +41,19 @@ class EngineeringSelectionTests(unittest.TestCase):
         self.assertEqual(task['engineering_candidates'], [expected])
         self.assertEqual(task['kind'], 'outdoor')
 
+    def test_nested_runtime_packages_are_independent_tasks(self):
+        for name in ('JobA', 'JobB'):
+            self.write(f'{name}/engineering.csv', HEADER)
+            self.write(f'{name}/run.xml', f'<RuntimeSchema name="{name}"><EngineeringFilePath>engineering.csv</EngineeringFilePath></RuntimeSchema>')
+            self.write(f'{name}/antenna.xml', '<Antennas/>')
+        with patch.object(core, 'load_env', return_value=self.env):
+            tasks = core.scan_tasks()[0]
+        self.assertEqual(len(tasks), 2)
+        for task in tasks:
+            self.assertEqual(len(task['engineering_candidates']), 1)
+            self.assertTrue(task['antenna'].startswith(task['dir'] + '/'))
+            self.assertEqual(len(task['schema_candidates']), 1)
+
     def test_xml_old_absolute_reference_disambiguates_valid_candidates(self):
         self.write('other.csv', HEADER)
         expected = self.write('LiJobID002600.csv', HEADER)

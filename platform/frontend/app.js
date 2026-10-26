@@ -16,10 +16,12 @@ async function api(name, body, method) {
   if (writing) S.pendingRequests = (S.pendingRequests || 0) + 1;
   const opt = method === "GET" ? {} : {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...(body || {}), _project: S.project }),
+    body: JSON.stringify({ ...(body || {}), _project: S.project, _revision: S.profileRevision }),
   };
   try {
-    const res = await fetch(`/api/${name}${method === "GET" ? body : ""}`, opt);
+    const suffix = method === 'GET' && S.project && name !== 'output' && name !== 'state'
+      ? `${body ? '&' : '?'}_project=${encodeURIComponent(S.project)}&_revision=${encodeURIComponent(S.profileRevision || '')}` : '';
+    const res = await fetch(`/api/${name}${method === "GET" ? body + suffix : ""}`, opt);
     return await res.json();
   } finally {
     if (writing) S.pendingRequests--;
@@ -55,10 +57,34 @@ async function init() {
     await changeProject("add_project", $("project-path").value.trim());
   };
   bindActions();
+  $("btn-project-config").onclick = () => {
+    const open = $("project-config-form").classList.contains("hidden");
+    $("project-config-form").classList.toggle("hidden", !open);
+    $("btn-project-config").setAttribute("aria-expanded", String(open));
+  };
+  $("project-config-form").onsubmit = async event => {
+    event.preventDefault();
+    if (S.pollTimer || S.pendingRequests) return toast('当前操作结束后再修改项目配置', false);
+    const values = {};
+    $("project-config-fields").querySelectorAll('[data-config-key]').forEach(input => {
+      values[input.dataset.configKey] = input.value.trim();
+    });
+    const st = await post('save_project_config', {values});
+    if (st.error) return toast(st.error, false);
+    applyProjectState(st);
+    $("project-config-note").textContent = '当前项目配置已保存，任务选择与旧预览已清理。';
+    toast('当前项目配置已保存');
+  };
 }
 
 function applyProjectState(st) {
   S.project = st.project;
+  S.profileId = st.profile_id;
+  S.profileRevision = st.profile_revision;
+  S.projectConfig = st.project_config || {};
+  renderProjectConfig();
+  $("local-path-fields").innerHTML = '';
+  $("task-binding-note").textContent = '选择工参及地图后可保存；对应关系仅在当前项目生效。';
   S.projectEpoch = (S.projectEpoch || 0) + 1;
   S.job = null;
   S.city = null;
@@ -87,6 +113,20 @@ function applyProjectState(st) {
   renderCities(st.cities);
   renderTasks(st.tasks);
   $("env-note").textContent = `预设 ${st.preset} · 输出根 ${st.out_root}`;
+}
+
+const PROFILE_LABELS = {
+  PRESET:'构建预设', BUILD_SUBDIR:'构建目录（相对项目）', INSTALL_SUBDIR:'安装目录（相对项目）',
+  EXE_NAME:'程序文件名', VS_ROOT:'Visual Studio 目录', CMAKE:'CMake 程序', NINJA:'Ninja 程序',
+  VCVARS:'MSVC 环境脚本', CONFIG_SRC:'基础配置源目录', DLL_SRC:'动态库源目录',
+  MAP_ROOT:'地图根目录', CASE_ROOT:'CLI 工参目录', OUT_ROOT:'结果根目录', DT_ROOT:'路测根目录',
+  GONGCAN_ROOT:'工参任务根目录',
+};
+const attr = value => esc(value || '').replace(/"/g, '&quot;');
+function renderProjectConfig() {
+  $("project-config-fields").innerHTML = Object.entries(PROFILE_LABELS).map(([key, label]) =>
+    `<label>${label} · ${key}<input class="txt" data-config-key="${key}" value="${attr(S.projectConfig[key])}"></label>`).join('');
+  $("project-config-note").textContent = '';
 }
 
 async function changeProject(action, path) {
@@ -125,7 +165,9 @@ function bindActions() {
   $("engineering-path").onchange = () => selectEngineering($("engineering-path").value, true);
   $("csv-path").onchange = () => selectEngineering($("csv-path").value, true);
   $("use-existing-schema").onchange = updateSchemaMode;
-  ["schema-source", "sync-engineering", "schema-polygon", "job-name", "task-id", "copy-antennas"].forEach(id => {
+  $("schema-source").onchange = () => { renderLocalPaths(); invalidateSchemaPreview(); restoreTaskBinding(); };
+  $("btn-save-task-binding").onclick = saveTaskBinding;
+  ["sync-engineering", "schema-polygon", "job-name", "task-id", "copy-antennas"].forEach(id => {
     $(id).addEventListener("change", invalidateSchemaPreview);
     $(id).addEventListener("input", invalidateSchemaPreview);
   });
@@ -153,14 +195,24 @@ function fillSelect(sel, items, current) {
 async function rescanMap() {
   const r = await post("set_map_root", { path: $("map-root").value });
   if (r.error) return toast(r.error, false);
+  S.profileRevision = r.profile_revision || S.profileRevision;
+  S.projectConfig.MAP_ROOT = $("map-root").value;
+  renderProjectConfig();
   renderCities(r.cities);
+  S.city = null;
+  S.job = null;
+  updateNote();
   toast(`识别到 ${r.cities.length} 个城市/场景`);
 }
 
 async function rescanTasks() {
   const r = await post("set_gongcan_root", { path: $("gongcan-root").value });
   if (r.error) return toast(r.error, false);
+  S.profileRevision = r.profile_revision || S.profileRevision;
+  S.projectConfig.GONGCAN_ROOT = $("gongcan-root").value;
+  renderProjectConfig();
   renderTasks(r.tasks);
+  S.job = null;
   toast(`识别到 ${r.tasks.length} 个任务`);
 }
 
@@ -254,6 +306,8 @@ function renderTasks(tasks) {
     $("schema-polygon").replaceChildren(new Option("不使用区域（将 PolygonFilePath 设为空）", ""));
     (S.task.txts || []).forEach(p => $("schema-polygon").add(new Option(p.slice(S.task.dir.length + 1), p)));
     updateSchemaMode();
+    renderLocalPaths();
+    restoreTaskBinding();
     if (!$("job-name").value) $("job-name").value = `${S.task.name}-${S.func}`;
   });
 }
@@ -268,6 +322,7 @@ function updateAntennaOption() {
 
 function invalidateSchemaPreview() {
   schemaPreviewRevision++;
+  bindingRevision++;
   $("schema-preview").classList.add("hidden");
   $("btn-apply-schema").disabled = true;
 }
@@ -299,6 +354,67 @@ function selectEngineering(path, manual) {
     ? `${S.task.detect} · ${path}` : S.task.engineering_reason;
   clearCsvEditor();
   updateNote();
+  if (manual) { renderLocalPaths(); restoreTaskBinding(); }
+}
+
+const LOCAL_PATH_LABELS = {
+  SceneSettingsPath:'场景配置', DriverTestFileDictionaryPath:'路测目录',
+  ClutterMatchPath:'杂波匹配配置', BulidVectorIndexPath:'建筑矢量索引（支持特殊索引）',
+  ProjectionFilePath:'投影文件', HeightIndexPath:'高程索引', ClutterIndexPath:'杂波索引',
+  ClutterMenuPath:'杂波菜单', BuildingIndexPath:'建筑索引', MapPath:'室内地图目录',
+  PathlossDirectory:'输出根目录', PolygonFilePath:'区域文件',
+};
+function renderLocalPaths(saved = {}) {
+  const schema = (S.task?.schema_candidates || []).find(item => item.path === $("schema-source").value);
+  const originals = schema?.path_values || {};
+  $("local-path-fields").innerHTML = Object.entries(LOCAL_PATH_LABELS)
+    .filter(([tag]) => tag in originals || tag in saved).map(([tag, label]) =>
+      `<label>${label}<span class="field-help">原：${esc(originals[tag] || '（空）')}</span>` +
+      `<input class="path" data-local-path-tag="${tag}" value="${attr(saved[tag])}" placeholder="填写本机路径以明确覆盖"></label>`).join('');
+  $("local-path-fields").querySelectorAll?.('input').forEach(input => input.oninput = invalidateSchemaPreview);
+}
+function collectLocalPaths() {
+  const values = {};
+  $("local-path-fields").querySelectorAll?.('[data-local-path-tag]').forEach(input => {
+    if (input.dataset.localPathTag && input.value.trim()) values[input.dataset.localPathTag] = input.value.trim();
+  });
+  return values;
+}
+function bindingBody() {
+  return {task:S.task, engineering_file:S.task?.engineering_file || '',
+    schema_source:$("schema-source").value, city:S.city?.name || '',
+    path_overrides:collectLocalPaths(), sync_engineering:$("sync-engineering").checked,
+    polygon_file:$("schema-polygon").value};
+}
+let bindingRevision = 0;
+async function restoreTaskBinding() {
+  if (!S.profileId || !S.task) return;
+  const epoch = S.projectEpoch, task = S.task, revision = ++bindingRevision;
+  const body = bindingBody();
+  const r = await post('task_binding', body);
+  if (epoch !== S.projectEpoch || task !== S.task || revision !== bindingRevision) return;
+  if (body.engineering_file !== S.task.engineering_file || body.schema_source !== $("schema-source").value) return;
+  if (r.error) { $("task-binding-note").textContent = r.error; return; }
+  const binding = r.binding;
+  if (!binding) { $("task-binding-note").textContent = '当前工参尚未保存地图对应关系，请选择地图后保存。'; return; }
+  const city = S.cities.find(c => c.name === binding.city);
+  if (!city) { S.city = null; updateNote(); $("task-binding-note").textContent = '已保存的地图不存在，请重新选择并保存对应关系。'; return; }
+  S.city = city;
+  document.querySelectorAll('#city-list .city').forEach(node => node.classList.toggle('sel', node.dataset.name === city.name));
+  $("sync-engineering").checked = !!binding.sync_engineering;
+  $("schema-polygon").value = binding.polygon_file || '';
+  renderLocalPaths(binding.path_overrides || {});
+  updateNote();
+  $("task-binding-note").textContent = `已恢复当前项目对应关系：${city.name}；路径将在渲染前重新检查。`;
+}
+async function saveTaskBinding() {
+  if (!S.task?.engineering_file || !S.city) return toast('请先选择有效工参及对应地图', false);
+  const epoch = S.projectEpoch;
+  const r = await post('save_task_binding', bindingBody());
+  if (epoch !== S.projectEpoch) return;
+  if (r.error) return toast(r.error, false);
+  $("task-binding-note").textContent = '当前项目的工参、地图和本地路径对应关系已保存。';
+  toast('工参与地图对应关系已保存');
 }
 
 function updateNote() {
@@ -355,6 +471,7 @@ async function doRender() {
     copy_antennas: !!S.task.has_antennas && $("copy-antennas").checked,
     use_existing_schema: reuse, schema_source: $("schema-source").value,
     sync_engineering: $("sync-engineering").checked, polygon_file: $("schema-polygon").value,
+    path_overrides: collectLocalPaths(),
   };
   if (reuse) {
     invalidateSchemaPreview();

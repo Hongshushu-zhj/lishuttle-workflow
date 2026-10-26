@@ -35,7 +35,8 @@ import os
 import re
 import sys
 import shutil
-from task_schema import render_existing, runtime_details
+from project_config import load_local, validate_operation
+from task_schema import render_existing, runtime_details, LOCAL_PATHS
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
@@ -141,6 +142,18 @@ def to_slash(path):
 
 def build_table(env, job):
     """把环境变量和任务单合成最终的变量表，并补上派生变量。"""
+    for key in ('PROJECT_DIR', 'PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME',
+                'VS_ROOT', 'CMAKE', 'NINJA', 'VCVARS', 'CONFIG_SRC', 'DLL_SRC',
+                'PROJECT_PROFILE_ID', 'PROJECT_PROFILE_REVISION'):
+        if key in job and job[key] != env.get(key):
+            raise ValueError(f'任务单不能覆盖项目配置 {key}，请选择对应项目后重试')
+    if env.get('PROJECT_PROFILE_ID'):
+        required = ['PROJECT_DIR', 'BUILD_SUBDIR', 'EXE_NAME', 'OUT_ROOT']
+        if job.get('CITY'):
+            required.append('MAP_ROOT')
+        missing = [key for key in required if not env.get(key)]
+        if missing:
+            raise ValueError('当前项目配置未完成，请先填写：' + '、'.join(missing))
     table = resolve_job(job, env)
 
     for key, value in table.items():
@@ -215,7 +228,20 @@ def manifest_path_for(table):
     return f"{table['RUNTIME_SCHEMA_DIR']}/{table['SCHEMA_NAME']}.manifest.json"
 
 
-def do_print_env(target, env_path):
+def apply_xml_paths(table, paths):
+    for tag, key in {'EngineeringFilePath': 'ENGINEERING_FILE', 'MapPath': 'MAP_PATH',
+                     'SceneSettingsPath': 'SCENE_SETTINGS_FILE', 'PolygonFilePath': 'POLYGON_FILE',
+                     'ClutterMatchPath': 'CLUTTER_MATCH_FILE', 'DriverTestFileDictionaryPath': 'DT_ROOT'}.items():
+        if tag in paths:
+            table[key] = paths[tag]
+
+
+def validate_batch_values(values):
+    if any('!' in str(value) for value in values.values()):
+        raise ValueError('本地批处理不支持路径或配置中的 ! 字符；请调整路径，或使用 Python 入口。未加载配置或启动引擎。')
+
+
+def do_print_env(target, env_path, project=None, batch=False, operation=None):
     """输出环境文件里的全部键值，供 .bat / .sh 加载。
 
     为什么不让批处理自己逐行解析环境文件：环境文件是 UTF-8（带中文注释），
@@ -223,13 +249,20 @@ def do_print_env(target, env_path):
     会把行结构解析乱掉，导致前半段键被整个跳过——这个坑很难查。
     交给 Python 读就没有编码问题。
     """
-    env = read_env_file(env_path, "环境文件")
+    env = load_local(env_path, project=project) if target == 'local-win' else read_env_file(env_path, "环境文件")
+    if operation:
+        validate_operation(env, operation)
+    if batch:
+        validate_batch_values(env)
+        for key in ('CONFIG', 'DLL'):
+            source = env.get(key + '_SRC', '')
+            env[key + '_SOURCE_DIR'] = to_slash(os.path.join(env['PROJECT_DIR'], source)) if source else ''
     for key, value in env.items():
         print(f"{key}={value}")
     return 0
 
 
-def do_print_run(table, prepare_render=False):
+def do_print_run(table, prepare_render=False, batch=False):
     """输出运行参数，供 run_*.bat / run_*.sh 解析。
 
     和渲染走的是同一个 build_table()，所以"渲染时用的路径"和
@@ -255,6 +288,8 @@ def do_print_run(table, prepare_render=False):
         "SERVER_BACKGROUND": table.get("SERVER_BACKGROUND", "0"),
         "RENDER_BEFORE_RUN": table.get("RENDER_BEFORE_RUN", "1"),
     }
+    if batch:
+        validate_batch_values(values)
     for key, value in values.items():
         print(f"{key}={value}")
     return 0
@@ -349,6 +384,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
     # 而 name 就是模板里的 ${JOB_NAME}，所以最终目录是 OUT_ROOT/JOB_NAME。
     out_dir = f"{to_slash(table['OUT_ROOT'])}/{table['JOB_NAME']}"
     written = []
+    actual_paths = {}
 
     if write_output:
         # 默认室内外入口均从当前项目完整样例复制。显式指定其他模板仍兼容。
@@ -374,6 +410,9 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
                 rendered = expand(fh.read(), table, "模板")
             source = to_slash(tpl_path)
 
+        actual = ET.fromstring(rendered)
+        actual_paths = {tag: actual.findtext(tag) or '' for tag in LOCAL_PATHS if actual.find(tag) is not None}
+        apply_xml_paths(table, actual_paths)
         os.makedirs(table["RUNTIME_SCHEMA_DIR"], exist_ok=True)
         if existing:
             for name in schema_names:
@@ -393,6 +432,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
             "schema_source": source,
             "schema_mode": 'existing' if existing else 'sample',
             "path_changes": existing['changes'] if existing else [],
+            "project_config": dict(env),
             "target": target,
             "env_file": to_slash(os.path.relpath(env_path, ROOT)),
             "job_file": to_slash(os.path.relpath(job_path, ROOT)),
@@ -409,6 +449,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
                 "server_background": table.get("SERVER_BACKGROUND", "0"),
             },
             "resolved_paths": {
+                "xml_paths": actual_paths,
                 "engineering_file": to_slash(table["ENGINEERING_FILE"]),
                 "polygon_file": to_slash(table.get("POLYGON_FILE", "")),
                 "map_root": to_slash(table.get("MAP_ROOT", "")),
@@ -429,10 +470,12 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
         out_dir = details['out_dir']
         table['ENGINEERING_FILE'] = details['engineering_file']
         table['SCENE_SETTINGS_FILE'] = details['scene_settings_file']
+        actual_paths = details['paths']
+        apply_xml_paths(table, actual_paths)
 
     # 已有 XML 的相对路径由引擎相对 exe 工作目录解释；只改变检查位置，不改 XML。
     if table.get('SCHEMA_SOURCE'):
-        for key in ('ENGINEERING_FILE', 'SCENE_SETTINGS_FILE'):
+        for key in ('ENGINEERING_FILE', 'SCENE_SETTINGS_FILE', 'MAP_PATH', 'POLYGON_FILE', 'CLUTTER_MATCH_FILE'):
             path = table.get(key, '').replace('\\', '/')
             if path and not os.path.isabs(path):
                 table[key] = os.path.join(table['EXE_DIR'], path)
@@ -444,6 +487,9 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
     city = table.get("CITY", "")
     is_indoor = (table.get("MAP_FORMAT", "").strip().lower() == "indoor"
                  or "indoor" in (table.get("TEMPLATE") or "").lower())
+    def input_path(tag, default):
+        value = actual_paths.get(tag, default).replace('\\', '/')
+        return os.path.join(table['EXE_DIR'], value) if value and not os.path.isabs(value) else value
     if is_indoor:
         map_path = table.get("MAP_PATH", "")
         checks = [
@@ -456,12 +502,12 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
         checks = [
             ("工参 CSV", table["ENGINEERING_FILE"], True),
             ("区域多边形", table["POLYGON_FILE"], True),
-            ("地图投影", f"{map_root}/{city}/heights/projection.txt", True),
-            ("高程索引", f"{map_root}/{city}/heights/index.txt", True),
-            ("杂波索引", f"{map_root}/{city}/clutter/index.txt", True),
-            ("杂波菜单", f"{map_root}/{city}/clutter/menu.txt", True),
-            ("建筑索引", f"{map_root}/{city}/buildings/index.txt", True),
-            ("建筑矢量索引", f"{map_root}/{city}/buildvector/index.txt", True),
+            ("地图投影", input_path('ProjectionFilePath', f"{map_root}/{city}/heights/projection.txt"), True),
+            ("高程索引", input_path('HeightIndexPath', f"{map_root}/{city}/heights/index.txt"), True),
+            ("杂波索引", input_path('ClutterIndexPath', f"{map_root}/{city}/clutter/index.txt"), True),
+            ("杂波菜单", input_path('ClutterMenuPath', f"{map_root}/{city}/clutter/menu.txt"), True),
+            ("建筑索引", input_path('BuildingIndexPath', f"{map_root}/{city}/buildings/index.txt"), True),
+            ("建筑矢量索引", input_path('BulidVectorIndexPath', f"{map_root}/{city}/buildvector/index.txt"), True),
             ("杂波匹配配置", table["CLUTTER_MATCH_FILE"], True),
             ("场景配置", table["SCENE_SETTINGS_FILE"], False),
         ]
@@ -509,15 +555,24 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
-    flags = {a for a in sys.argv[1:] if a.startswith("--")}
+    raw = list(sys.argv[1:])
+    project = None
+    if '--project' in raw:
+        index = raw.index('--project')
+        if index + 1 >= len(raw):
+            raise ValueError('--project 需要本地项目目录')
+        project = raw[index + 1]
+        del raw[index:index + 2]
+    args = [a for a in raw if not a.startswith("--")]
+    flags = {a for a in raw if a.startswith("--")}
 
     # --print-env 只需要目标环境名，不需要任务单
     if "--print-env" in flags:
         if len(args) != 1:
             sys.exit("用法：render_schema.py --print-env <目标环境>")
         target = args[0]
-        return do_print_env(target, os.path.join(ROOT, "env", f"{target}.env"))
+        operation = next((op for op in ('doctor', 'build', 'stage', 'run') if '--check-' + op in flags), None)
+        return do_print_env(target, os.path.join(ROOT, "env", f"{target}.env"), project, '--batch' in flags, operation)
 
     if len(args) != 2:
         print(__doc__)
@@ -529,14 +584,16 @@ def main():
     job_path = job_arg if os.path.isabs(job_arg) else os.path.join(ROOT, job_arg)
     env_path = os.path.join(ROOT, "env", f"{target}.env")
 
-    env = read_env_file(env_path, "环境文件")
+    env = load_local(env_path, project=project) if target == 'local-win' else read_env_file(env_path, "环境文件")
     job = read_env_file(job_path, "任务单")
 
     if "--print-run" in flags:
         table = build_table(env, job)
+        if '--batch' in flags:
+            validate_batch_values(table)
         prepare = ('--prepare-render' in flags and '--no-render' not in flags
                    and table.get('RENDER_BEFORE_RUN', '1') != '0')
-        return do_print_run(table, prepare_render=prepare)
+        return do_print_run(table, prepare_render=prepare, batch='--batch' in flags)
 
     return do_render(env, job, target, job_path, env_path,
                      write_output="--no-render" not in flags)

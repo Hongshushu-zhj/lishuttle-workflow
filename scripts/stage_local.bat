@@ -19,7 +19,8 @@ if errorlevel 1 (
 	exit /b 1
 )
 
-for /f "usebackq tokens=1,* delims==" %%a in (`python scripts\render_schema.py --print-env local-win`) do set "%%a=%%b"
+call scripts\load_local_env.bat stage
+if errorlevel 1 exit /b 1
 
 if "!PROJECT_DIR!"=="" (
 	echo [错误] 环境变量加载失败。先手动验证一下：
@@ -29,8 +30,8 @@ if "!PROJECT_DIR!"=="" (
 
 set "PROJ=!PROJECT_DIR:/=\!"
 set "BUILD=!BUILD_SUBDIR:/=\!"
-set "CONFIGSRC=!PROJ!\!CONFIG_SRC:/=\!"
-set "DLLSRC=!PROJ!\!DLL_SRC:/=\!"
+set "CONFIGSRC=!CONFIG_SOURCE_DIR:/=\!"
+set "DLLSRC=!DLL_SOURCE_DIR:/=\!"
 set "EXEDIR=!PROJ!\!BUILD!\Bin"
 
 echo ============================================================

@@ -42,10 +42,22 @@ def project_operation(fn):
     @wraps(fn)
     def wrapped(payload):
         with PROJECT_LOCK:
+            env = core.load_env()
             expected = payload.get('_project') if isinstance(payload, dict) else None
-            if expected and expected != core.load_env().get('PROJECT_DIR', '').replace('\\', '/'):
+            if isinstance(expected, list):
+                expected = expected[0]
+            if expected and expected != env.get('PROJECT_DIR', '').replace('\\', '/'):
                 return {'ok': False, 'error': '项目已切换，请刷新后重试', 'message': '项目已切换，请刷新后重试'}
-            return fn(payload)
+            revision = payload.get('_revision') if isinstance(payload, dict) else None
+            if isinstance(revision, list):
+                revision = revision[0]
+            if revision and str(revision) != env.get('PROJECT_PROFILE_REVISION'):
+                return {'ok': False, 'error': '项目配置已变化，请刷新后重试', 'message': '项目配置已变化，请刷新后重试'}
+            token = core.PROJECT_CONTEXT.set(env)
+            try:
+                return fn(payload)
+            finally:
+                core.PROJECT_CONTEXT.reset(token)
     return wrapped
 
 
@@ -59,11 +71,14 @@ class Api:
         cities, map_root = core.scan_cities()
         tasks, gongcan_root = core.scan_tasks()
         env = core.load_env()
-        funcs = core.ordered_functions()      # 按当前项目源码实际支持的功能
+        funcs = core.ordered_functions() if current_project else []
         return {"projects": projects, "project": current_project,
                 "map_root": map_root, "cities": cities,
                 "gongcan_root": gongcan_root, "tasks": tasks,
                 "out_root": env.get("OUT_ROOT", ""), "preset": env.get("PRESET", ""),
+                "project_config": {k: env.get(k, '') for k in core.FIELDS},
+                "profile_id": env.get('PROJECT_PROFILE_ID', ''),
+                "profile_revision": env.get('PROJECT_PROFILE_REVISION', ''),
                 "function_info": funcs,
                 "functions": [f["name"] for f in funcs],
                 "func_source": "来自 " + current_project + "/SwanUtility/incl/LiShuttleTypes.h"}
@@ -84,13 +99,75 @@ class Api:
 
     @staticmethod
     @project_operation
+    def save_project_config(body):
+        try:
+            env = core.ProjectStore(core.ENV_FILE).save(body.get('values', {}),
+                body.get('_revision'), project=core.load_env()['PROJECT_DIR'])
+            core.PROJECT_CONTEXT.set(env)
+            return Api.state(None)
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    def _binding_task(body):
+        requested = body.get('task') or {}
+        tasks, _ = core.scan_tasks()
+        task = next((t for t in tasks if t['name'] == requested.get('name')
+            and os.path.normcase(os.path.realpath(t['dir'])) == os.path.normcase(os.path.realpath(requested.get('dir', '')))), None)
+        if task is None:
+            raise ValueError('任务不存在，请重新扫描')
+        engineering = body.get('engineering_file') or ''
+        if engineering:
+            engineering = core.validate_engineering(task, engineering)
+        schema = body.get('schema_source') or ''
+        if schema and schema not in [s['path'] for s in task.get('schema_candidates', [])]:
+            raise ValueError('运行配置不属于当前任务，请重新选择')
+        key = json.dumps([os.path.normcase(os.path.realpath(task['dir'])), engineering, schema], ensure_ascii=False)
+        return task, key, engineering, schema
+
+    @staticmethod
+    @project_operation
+    def task_binding(body):
+        try:
+            _, key, _, _ = Api._binding_task(body)
+            env = core.load_env()
+            binding = core.ProjectStore(core.ENV_FILE).binding(key, project=env['PROJECT_DIR'])
+            return {'binding': binding}
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @project_operation
+    def save_task_binding(body):
+        try:
+            _, key, engineering, schema = Api._binding_task(body)
+            cities, _ = core.scan_cities()
+            city = next((c for c in cities if c['name'] == body.get('city')), None)
+            if city is None:
+                raise ValueError('对应地图不存在，请重新选择地图')
+            if not engineering:
+                raise ValueError('请明确选择工参，再保存地图对应关系')
+            overrides = core.path_overrides(body.get('path_overrides', {}))
+            if 'EngineeringFilePath' in overrides:
+                raise ValueError('工参路径由工参选择决定')
+            binding = {k: body.get(k) for k in ('polygon_file', 'sync_engineering')}
+            binding.update(city=city['name'], city_kind=city['kind'], engineering_file=engineering,
+                           schema_source=schema, path_overrides=overrides)
+            env = core.load_env()
+            core.ProjectStore(core.ENV_FILE).binding(key, binding, project=env['PROJECT_DIR'])
+            return {'ok': True, 'binding': binding}
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @project_operation
     def set_map_root(body):
         path = body.get("path", "").replace("\\", "/")
         if not os.path.isdir(path):
             return {"error": f"目录不存在：{path}"}
         core.save_env_keys(MAP_ROOT=path)
         cities, map_root = core.scan_cities()
-        return {"map_root": map_root, "cities": cities}
+        return {"map_root": map_root, "cities": cities, "profile_revision": core.load_env().get('PROJECT_PROFILE_REVISION', '')}
 
     @staticmethod
     @project_operation
@@ -100,7 +177,7 @@ class Api:
             return {"error": f"目录不存在：{path}"}
         core.save_env_keys(GONGCAN_ROOT=path)
         tasks, gongcan_root = core.scan_tasks()
-        return {"gongcan_root": gongcan_root, "tasks": tasks}
+        return {"gongcan_root": gongcan_root, "tasks": tasks, "profile_revision": core.load_env().get('PROJECT_PROFILE_REVISION', '')}
 
     @staticmethod
     @project_operation
@@ -276,6 +353,8 @@ class Api:
     @project_operation
     def toolkit(body):
         sid, bat = core.start_toolkit(body.get("step", "doctor"))
+        if sid is None:
+            return {'error': bat}
         return {"sid": sid, "bat": bat}
 
     @staticmethod
@@ -306,6 +385,9 @@ ROUTES = {
     ("GET", "state"): Api.state,
     ("POST", "select_project"): Api.select_project,
     ("POST", "add_project"): Api.add_project,
+    ("POST", "save_project_config"): Api.save_project_config,
+    ("POST", "task_binding"): Api.task_binding,
+    ("POST", "save_task_binding"): Api.save_task_binding,
     ("POST", "set_map_root"): Api.set_map_root,
     ("POST", "set_gongcan_root"): Api.set_gongcan_root,
     ("POST", "render"): Api.render,

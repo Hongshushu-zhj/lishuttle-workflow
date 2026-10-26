@@ -71,6 +71,49 @@ class TaskSchemaTests(unittest.TestCase):
         self.assertIn('<EngineeringFilePath>selected.csv</EngineeringFilePath>',
                       self.render().read_text(encoding='utf-8-sig'))
 
+    def test_local_path_overrides_preserve_parameters_and_original(self):
+        self.job['PATH_OVERRIDES'] = json.dumps({'SceneSettingsPath': 'D:/local/scene & settings.xml'})
+        preview = render_existing(renderer.build_table(self.env, self.job))
+        self.assertEqual(preview['scene_settings_file'], 'D:/local/scene & settings.xml')
+        self.assertIn('scene &amp; settings.xml', preview['text'])
+        self.assertIn('<MaxCalcHeight>123</MaxCalcHeight>', preview['text'])
+        self.assertEqual(self.source.read_bytes().decode('utf-8'), self.text)
+
+    def test_non_path_override_is_rejected(self):
+        self.job['PATH_OVERRIDES'] = json.dumps({'MaxCalcHeight': '1'})
+        with self.assertRaisesRegex(ValueError, '路径'):
+            render_existing(renderer.build_table(self.env, self.job))
+
+    def test_changing_local_path_invalidates_preview(self):
+        body = self.preview_body()
+        with patch.object(core, 'load_env', return_value=self.env):
+            first = Api.preview_render(body)
+            second = Api.preview_render(dict(body, path_overrides={'SceneSettingsPath': 'new.xml'}))
+        self.assertNotEqual(first['token'], second['token'])
+        self.assertEqual(second['scene_settings_file'], 'new.xml')
+
+    def test_path_override_is_saved_in_generated_job(self):
+        task = dict(txts=[], engineering_file='', schema_source=self.source.as_posix(),
+                    sync_engineering=False, polygon_file='',
+                    path_overrides={'SceneSettingsPath': 'D:/new/scene.xml'})
+        with patch.object(core, 'load_env', return_value=self.env), patch.object(core, 'JOBS_DIR', str(self.root)):
+            job = core.build_job_env('local', 'plindoor', '1', task, 'indoor', 'indoor')
+        self.assertEqual(json.loads(renderer.read_env_file(job, 'job')['PATH_OVERRIDES']), task['path_overrides'])
+
+    def test_input_checks_and_manifest_use_overridden_map(self):
+        exe = self.root / 'build/Bin'
+        exe.mkdir(parents=True)
+        (exe / 'old.csv').write_text('input')
+        localmap = self.root / 'special-indoor-map'
+        localmap.mkdir()
+        (localmap / 'building.das').write_text('map')
+        self.job['PATH_OVERRIDES'] = json.dumps({'MapPath': localmap.as_posix()})
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = renderer.do_render(self.env, self.job, 'test', 'job.env', 'env.env')
+        self.assertEqual(rc, 0)
+        manifest = json.loads((exe / 'runtimelibrary/new-file.xml.manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['resolved_paths']['map_path'], localmap.as_posix())
+
     def test_missing_required_tag_fails_without_writing_destination(self):
         self.source.write_bytes(self.text.replace('<MapPath>old-map</MapPath>', '').encode('utf-8'))
         with self.assertRaisesRegex((SystemExit, ValueError), 'MapPath'):
@@ -114,6 +157,17 @@ class TaskSchemaTests(unittest.TestCase):
             return ''.join(parts)
         self.assertEqual(mask(self.text), mask(result['text']))
         self.assertEqual({c['tag'] for c in result['changes']}, allowed)
+
+    def test_unresolved_special_map_index_requires_explicit_local_path(self):
+        self.test_outdoor_only_allowed_paths_change()
+        self.source.write_text(self.text.replace('old/buildvector/index.txt',
+            'X:/old-local-map/buildvector/special-index.txt'), encoding='utf-8')
+        table = renderer.build_table(self.env, self.job)
+        with self.assertRaisesRegex(ValueError, '自定义.*索引|自定义.*路径'):
+            render_existing(table)
+        table['PATH_OVERRIDES'] = json.dumps({'BulidVectorIndexPath': 'D:/local/special-index.txt'})
+        result = render_existing(table)
+        self.assertIn('D:/local/special-index.txt', result['text'])
 
     def preview_body(self):
         with patch.object(core, 'load_env', return_value=self.env):

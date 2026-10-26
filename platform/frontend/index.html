@@ -12,6 +12,7 @@
     <span class="logo">lishuttle <span>本地运行平台</span></span>
     <label class="project-picker" for="project">当前项目 <select id="project"></select></label>
     <button id="btn-project-add" aria-expanded="false" aria-controls="project-add-form">添加项目</button>
+    <button id="btn-project-config" aria-expanded="false" aria-controls="project-config-form">项目配置</button>
     <div class="header-tools" aria-label="项目工具">
       <button id="btn-doctor">体检</button>
       <button id="btn-build">编译</button>
@@ -24,6 +25,12 @@
     <span class="field-help">按目录内容识别，不限制项目名称。添加后保存在本机列表。</span>
   </form>
   <span id="env-note" class="muted"></span>
+  <form id="project-config-form" class="hidden">
+    <p class="field-help">配置仅保存到当前项目。新项目需单独填写，不继承其他项目的路径；路径可粘贴本机完整路径。</p>
+    <div id="project-config-fields" class="profile-fields"></div>
+    <button type="submit" class="primary">保存当前项目配置</button>
+    <span id="project-config-note" role="status"></span>
+  </form>
 </header>
 
 <div id="hint" class="hint">把鼠标放到参数上，这里显示说明</div>
@@ -90,7 +97,16 @@
         <div id="existing-schema-options" class="field hidden">
           <label for="schema-polygon">区域文件</label>
           <select id="schema-polygon" class="path"></select>
-          <span class="field-help">仅替换地图、区域和路损目录；原 name、其他参数及注释保持不变。</span>
+          <span class="field-help">选择对应地图后生成本地路径；原 name、计算参数及注释保持不变。特殊索引、场景和路测等路径可在下方明确修改，预览后确认。</span>
+          <details>
+            <summary>修改本地资源路径</summary>
+            <p class="field-help">原路径只供核对。填写本地路径可覆盖本次配置；留空使用上方地图及项目设置。不会修改源 XML。</p>
+            <div id="local-path-fields"></div>
+          </details>
+        </div>
+        <div class="field">
+          <button id="btn-save-task-binding" type="button">保存当前工参与地图对应关系</button>
+          <span id="task-binding-note" class="field-help" role="status">选择工参及地图后可保存；对应关系仅在当前项目生效。</span>
         </div>
       </section>
 

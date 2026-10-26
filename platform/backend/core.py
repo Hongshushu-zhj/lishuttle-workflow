@@ -10,6 +10,7 @@ lishuttle 本地平台核心逻辑：识别器 / 文件读写 / 渲染调用 / �
 """
 
 import csv
+from contextvars import ContextVar
 import io
 import json
 import os
@@ -35,7 +36,10 @@ SPEC_FILE = os.path.join(HERE, "params_spec.json")
 
 sys.path.insert(0, SCRIPTS)
 from render_schema import read_env_file, build_table  # noqa: E402
-from task_schema import schema_candidates, render_existing, runtime_details
+from task_schema import schema_candidates, render_existing, runtime_details, path_overrides
+from project_config import ProjectStore, FIELDS, write_snapshot, validate_operation
+
+PROJECT_CONTEXT = ContextVar('project_config', default=None)
 
 TAG_RE = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>([^<]*)</\1>")
 CSV_ENCODINGS = ("utf-8-sig", "gb18030", "gbk")
@@ -46,25 +50,21 @@ CSV_ENCODINGS = ("utf-8-sig", "gb18030", "gbk")
 # ----------------------------------------------------------------------
 
 def load_env():
-    return read_env_file(ENV_FILE, "环境文件")
+    return dict(PROJECT_CONTEXT.get() or ProjectStore(ENV_FILE).load(allow_empty=True))
 
 
 def save_env_keys(**kwargs):
-    """把平台的选择写回 env 文件（只改对应 KEY 行，注释原样保留）。"""
-    with open(ENV_FILE, "r", encoding="utf-8") as fh:
-        lines = fh.readlines()
-    for key, value in kwargs.items():
-        pat = re.compile(rf"^(\s*){re.escape(key)}=.*$")
-        replaced = False
-        for i, line in enumerate(lines):
-            if pat.match(line):
-                lines[i] = f"{key}=\"{value}\"\n"
-                replaced = True
-                break
-        if not replaced:
-            lines.append(f"\n{key}=\"{value}\"\n")
-    with open(ENV_FILE, "w", encoding="utf-8") as fh:
-        fh.writelines(lines)
+    """只写当前项目档案；legacy env 仅用作首次导入。"""
+    store = ProjectStore(ENV_FILE)
+    if 'PROJECT_DIR' in kwargs:
+        env = store.select(kwargs.pop('PROJECT_DIR'))
+        if kwargs:
+            env = store.save(kwargs, project=env['PROJECT_DIR'])
+    else:
+        env = store.save(kwargs, project=load_env()['PROJECT_DIR'])
+    if PROJECT_CONTEXT.get() is not None:
+        PROJECT_CONTEXT.set(env)
+    return env
 
 
 # ----------------------------------------------------------------------
@@ -79,6 +79,8 @@ def scan_projects():
         with open(PROJECTS_FILE, encoding='utf-8') as fh:
             found = json.load(fh).get('projects', [])
     current = to_slash(env.get("PROJECT_DIR", ""))
+    if env.get('PROJECT_PROFILE_ID'):
+        found = found + ProjectStore(ENV_FILE).paths()
     unique, seen = [], set()
     for path in ([current] if current else []) + found:
         key = os.path.normcase(os.path.abspath(to_native(path)))
@@ -161,7 +163,7 @@ def _check(paths_labels):
 def scan_cities():
     """地图目录 → 室外城市（heights/index.txt）/ 室内场景（building.das）。"""
     env = load_env()
-    map_root = env["MAP_ROOT"]
+    map_root = env.get("MAP_ROOT", "")
     cities = []
     if not os.path.isdir(map_root):
         return cities, to_slash(map_root)
@@ -278,6 +280,28 @@ def scan_tasks():
                 "dir": to_slash(gongcan), "csvs": [to_slash(full)],
                 "txts": [], "xmls": [], "antenna": "", "model": "", "scene": "",
             })
+    # A container with several independent XML packages is not one task.
+    # Keep each package's CSV, antenna and model resources in its own scope.
+    expanded = []
+    for task in tasks:
+        candidates = schema_candidates(task.get('xmls', []))
+        folders = sorted({os.path.dirname(c['path']) for c in candidates})
+        if len(folders) > 1 and all(folder != task['dir'] for folder in folders):
+            for folder in folders:
+                child = dict(task, name=task['name'] + '/' + to_slash(os.path.relpath(folder, task['dir'])), dir=folder)
+                for key in ('csvs', 'txts', 'xmls'):
+                    child[key] = [p for p in task[key] if os.path.commonpath([p, folder]) == os.path.normpath(folder)]
+                for key, filename in (('antenna', 'antenna.xml'), ('model', 'lishuttlemodel.xml'), ('scene', 'scenesettings.xml')):
+                    matches = [p for p in child['xmls'] if os.path.basename(p).lower() == filename]
+                    child[key] = matches[0] if len(matches) == 1 else ''
+                for key, names in (('antenna_dir', ('antenna', 'antennas')), ('model_dir', ('models',))):
+                    matches = [os.path.join(base, name) for base, dirs, _ in os.walk(folder)
+                               for name in dirs if name.lower() in names]
+                    child[key] = to_slash(matches[0]) if len(matches) == 1 else ''
+                expanded.append(child)
+        else:
+            expanded.append(task)
+    tasks = expanded
     for task in tasks:
         identify_engineering(task)
         task['schema_candidates'] = schema_candidates(task.get('xmls', []))
@@ -329,6 +353,10 @@ def preview_task_schema(body, task, city_kind):
                FUNC=body.get('func', 'pl'), CITY=city,
                SCHEMA_SOURCE=source, SYNC_ENGINEERING='1' if body.get('sync_engineering') else '0',
                ENGINEERING_FILE=task.get('engineering_file', ''), POLYGON_FILE=polygon)
+    overrides = path_overrides(body.get('path_overrides', {}))
+    if 'EngineeringFilePath' in overrides:
+        raise ValueError('请通过工参选择和“同步工参路径”修改工参，不允许另外覆盖')
+    job['PATH_OVERRIDES'] = json.dumps(overrides, ensure_ascii=False)
     if city_kind == 'indoor':
         job.update(TEMPLATE='runtimeschema-indoor.xml.tpl', MAP_PATH=env['MAP_ROOT'].rstrip('/') + '/' + city)
     table = build_table(env, job)
@@ -336,10 +364,16 @@ def preview_task_schema(body, task, city_kind):
     destination = schema_path(job['SCHEMA_NAME'])
     if os.path.normcase(os.path.realpath(source)) == os.path.normcase(os.path.realpath(destination)):
         raise ValueError('源 XML 与目标文件相同，不能覆盖原始配置')
-    task.update(schema_source=source, sync_engineering=bool(body.get('sync_engineering')), polygon_file=polygon)
+    task.update(schema_source=source, sync_engineering=bool(body.get('sync_engineering')), polygon_file=polygon,
+                path_overrides=overrides)
     preview['destination'] = destination
-    preview['token'] = hashlib.sha256((preview['token'] + '\0' + destination).encode('utf-8')).hexdigest()
+    preview['token'] = hashlib.sha256((preview['token'] + '\0' + destination + '\0'
+        + json.dumps(env, sort_keys=True)).encode('utf-8')).hexdigest()
     preview['warnings'] = []
+    for label, path in [('场景配置', preview['scene_settings_file']), ('路测目录', preview['drivetest_dir'])]:
+        native = to_native(path)
+        if path and not os.path.exists(native if os.path.isabs(native) else os.path.join(os.path.dirname(os.path.dirname(destination)), native)):
+            preview['warnings'].append(f'{label}路径在本机不存在：{path}；请在本地路径中修改')
     if not task['sync_engineering'] and preview['engineering_file']:
         engineering_path = preview['engineering_file'].replace('\\', '/')
         if not os.path.isabs(engineering_path):
@@ -377,9 +411,15 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind):
             f'POLYGON_FILE="{region}"',
         ]
     job_file = os.path.join(JOBS_DIR, f"web-{job_name}.env")
+    if env.get('PROJECT_PROFILE_ID'):
+        directory = os.path.join(JOBS_DIR, env['PROJECT_PROFILE_ID'])
+        os.makedirs(directory, exist_ok=True)
+        job_file = os.path.join(directory, f'web-{job_name}.env')
+        lines += [f'PROJECT_PROFILE_ID="{env["PROJECT_PROFILE_ID"]}"']
     if task.get('schema_source'):
         lines += [f'SCHEMA_SOURCE="{task["schema_source"]}"',
-                  f'SYNC_ENGINEERING="{1 if task.get("sync_engineering") else 0}"']
+                  f'SYNC_ENGINEERING="{1 if task.get("sync_engineering") else 0}"',
+                  'PATH_OVERRIDES="' + json.dumps(task.get('path_overrides', {}), ensure_ascii=False) + '"']
         # 区域由用户明确选择，不再猜测任务包的 index/WrongSites 等 TXT。
         lines = [f'POLYGON_FILE="{task.get("polygon_file", "")}"'
                  if line.startswith('POLYGON_FILE=') else line for line in lines]
@@ -397,6 +437,7 @@ def run_render(job_file):
     """
     child_env = dict(os.environ)
     child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env['LISHUTTLE_CONFIG_SNAPSHOT'] = write_snapshot(load_env())
     proc = subprocess.run(
         [sys.executable, os.path.join(SCRIPTS, "render_schema.py"), job_file, "local-win"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -618,7 +659,8 @@ def scan_functions(project_dir=None):
     header = os.path.join(to_native(proj), "SwanUtility", "incl", "LiShuttleTypes.h")
     names = []
     if os.path.isfile(header):
-        raw = open(header, "rb").read()
+        with open(header, "rb") as stream:
+            raw = stream.read()
         text = ""
         for enc in ("gb18030", "utf-8"):
             try:
@@ -747,13 +789,13 @@ class Runner:
         self.lock = threading.Lock()
         self.counter = 0
 
-    def start(self, cmd, cwd, label):
+    def start(self, cmd, cwd, label, env=None):
         with self.lock:
             self.counter += 1
             sid = self.counter
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="gbk", errors="replace", shell=False)
+            text=True, encoding="gbk", errors="replace", shell=False, env=env)
         self.sessions[sid] = {"proc": proc, "lines": [], "status": "running",
                               "label": label, "exit": None}
 
@@ -797,6 +839,10 @@ def sync_vs_launch(project_env, schema_name, func, task_id, city_kind):
 def start_lishuttle(schema_name, func, task_id):
     """直接起 lishuttle.exe（工作目录=exe 目录），不经 bat。"""
     env = load_env()
+    try:
+        validate_operation(env, 'run')
+    except ValueError as exc:
+        return None, str(exc)
     exe = os.path.join(env["PROJECT_DIR"].replace("/", os.sep),
                        *env["BUILD_SUBDIR"].split("/"), "Bin", env["EXE_NAME"])
     if not os.path.isfile(exe):
@@ -809,9 +855,14 @@ def start_lishuttle(schema_name, func, task_id):
 def start_toolkit(step):
     """doctor/build/stage：批处理封装。"""
     env = load_env()
+    try:
+        validate_operation(env, step)
+    except ValueError as exc:
+        return None, str(exc)
     bat = os.path.join(SCRIPTS, {"doctor": "doctor_local.bat", "build": "build_local.bat",
                                  "stage": "stage_local.bat"}[step])
-    sid = RUNNER.start(["cmd", "/c", bat], ROOT, step)
+    child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env))
+    sid = RUNNER.start(["cmd", "/c", bat], ROOT, step, env=child_env)
     return sid, to_slash(bat)
 
 

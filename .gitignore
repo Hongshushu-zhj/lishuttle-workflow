@@ -8,6 +8,8 @@
 /env/*.env.*
 /env/projects.json
 /env/projects.json.tmp
+/env/project-profiles.json*
+/env/snapshots/
 !/env/local-win.env.example
 
 # Local platform adjustment notes.

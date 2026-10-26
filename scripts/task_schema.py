@@ -1,5 +1,6 @@
 """Copy an existing RuntimeSchema while changing only explicitly allowed paths."""
 import hashlib
+import json
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -14,6 +15,23 @@ OUTDOOR_PATHS = {
     'BuildingIndexPath': 'buildings/index.txt',
     'BulidVectorIndexPath': 'buildvector/index.txt',
 }
+LOCAL_PATHS = set(OUTDOOR_PATHS) | {
+    'EngineeringFilePath', 'PolygonFilePath', 'PathlossDirectory', 'MapPath',
+    'ClutterMatchPath', 'SceneSettingsPath', 'DriverTestFileDictionaryPath',
+}
+
+
+def path_overrides(value):
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or '{}')
+        except json.JSONDecodeError as exc:
+            raise ValueError('本地路径配置不是有效 JSON') from exc
+    if not isinstance(value, dict) or set(value) - LOCAL_PATHS:
+        raise ValueError('只允许修改明确支持的本地路径字段')
+    if any(not isinstance(v, str) or any(c in v for c in '\r\n\0') for v in value.values()):
+        raise ValueError('本地路径必须为单行文本')
+    return value
 
 
 def read_runtime(path):
@@ -36,6 +54,7 @@ def schema_candidates(paths):
         except ValueError:
             continue
         candidates.append({'path': path, 'name': root.get('name', ''),
+                           'path_values': {tag: root.findtext(tag) or '' for tag in sorted(LOCAL_PATHS) if root.find(tag) is not None},
                            'kind': 'indoor' if (root.findtext('MapFormat') or '').lower() == 'indoor' else 'outdoor'})
     return candidates
 
@@ -50,6 +69,7 @@ def runtime_details(path, exe_dir):
     if not os.path.isabs(output_root):
         output_root = os.path.join(exe_dir, output_root)
     return {'out_dir': os.path.join(output_root, name).replace('\\', '/'),
+            'paths': {tag: root.findtext(tag) or '' for tag in LOCAL_PATHS if root.find(tag) is not None},
             'engineering_file': root.findtext('EngineeringFilePath') or '',
             'scene_settings_file': root.findtext('SceneSettingsPath') or '',
             'drivetest_dir': root.findtext('DriverTestFileDictionaryPath') or ''}
@@ -57,6 +77,7 @@ def runtime_details(path, exe_dir):
 
 def render_existing(table):
     source = table['SCHEMA_SOURCE']
+    overrides = path_overrides(table.get('PATH_OVERRIDES', '{}'))
     text, root = read_runtime(source)
     schema_name = root.get('name', '')
     if not schema_name:
@@ -73,9 +94,21 @@ def render_existing(table):
     else:
         city_dir = f"{table['MAP_ROOT'].replace(chr(92), '/')}/{table.get('CITY', '')}"
         values.update({tag: f'{city_dir}/{rel}' for tag, rel in OUTDOOR_PATHS.items()})
+        # Preserve a task's special local index if it belongs to this selected map.
+        for tag in OUTDOOR_PATHS:
+            original = (root.findtext(tag) or '').replace('\\', '/')
+            try:
+                inside = os.path.commonpath([os.path.realpath(original), os.path.realpath(city_dir)]) == os.path.realpath(city_dir)
+            except ValueError:
+                inside = False
+            if inside and os.path.isfile(original):
+                values[tag] = original
+            elif original and os.path.basename(original).lower() != os.path.basename(OUTDOOR_PATHS[tag]).lower() and tag not in overrides:
+                raise ValueError(f'自定义地图路径 {tag} 无法确认：{original}；请在“修改本地资源路径”中明确填写，避免替换成普通索引')
         values['ClutterMatchPath'] = table['CLUTTER_MATCH_FILE']
     if table.get('SYNC_ENGINEERING') == '1':
         values['EngineeringFilePath'] = table['ENGINEERING_FILE']
+    values.update(overrides)
     parts = re.split(r'(<!--.*?-->)', text, flags=re.S)
     changes = []
     for tag, value in values.items():
@@ -100,11 +133,13 @@ def render_existing(table):
         changes.append({'tag': tag, 'old': old, 'new': value})
     rendered = ''.join(parts)
     ET.fromstring(rendered)
-    output = table['OUT_ROOT'].replace('\\', '/').rstrip('/') + '/' + schema_name
+    output_root = values['PathlossDirectory'].replace('\\', '/')
+    if not os.path.isabs(output_root):
+        output_root = os.path.join(table['EXE_DIR'], output_root)
+    output = os.path.join(output_root, schema_name).replace('\\', '/')
     return {'text': rendered, 'source': source.replace('\\', '/'),
             'changes': changes, 'runtime_name': schema_name, 'out_dir': output,
-            'engineering_file': (values.get('EngineeringFilePath')
-                                 if table.get('SYNC_ENGINEERING') == '1' else root.findtext('EngineeringFilePath') or ''),
-            'scene_settings_file': root.findtext('SceneSettingsPath') or '',
-            'drivetest_dir': root.findtext('DriverTestFileDictionaryPath') or '',
+            'engineering_file': values.get('EngineeringFilePath', root.findtext('EngineeringFilePath') or ''),
+            'scene_settings_file': values.get('SceneSettingsPath', root.findtext('SceneSettingsPath') or ''),
+            'drivetest_dir': values.get('DriverTestFileDictionaryPath', root.findtext('DriverTestFileDictionaryPath') or ''),
             'token': hashlib.sha256((os.path.abspath(source) + '\0' + rendered).encode('utf-8')).hexdigest()}
