@@ -16,6 +16,7 @@ function element(id) {
     },
     replaceChildren(...options) { this.options = options; this.value = options[0]?.value || ''; },
     add(option) { this.options.push(option); },
+    querySelectorAll() { return []; },
   });
   return nodes.get(id);
 }

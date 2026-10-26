@@ -1,9 +1,12 @@
 import contextlib
 import io
+import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import render_schema as renderer
@@ -93,6 +96,18 @@ class SampleRenderingTests(unittest.TestCase):
             renderer.do_render(self.env, self.job, 'test', 'job.env', 'env.env',
                                write_output=False)
         self.assertEqual(output.read_bytes(), before)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows drive-letter paths')
+    def test_manifest_accepts_project_configuration_on_another_drive(self):
+        other_drive = 'Z:' if self.root.drive.upper() != 'Z:' else 'Y:'
+        job_path = str(self.root / 'jobs/test.env')
+        env_path = str(self.root / 'env/test.env')
+        with patch.object(renderer, 'ROOT', other_drive + '/workflow'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            renderer.do_render(self.env, self.job, 'test', job_path, env_path)
+        manifest = json.loads((self.root / 'build/Bin/runtimelibrary/new-job.xml.manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['job_file'], Path(job_path).as_posix())
+        self.assertEqual(manifest['env_file'], Path(env_path).as_posix())
 
 
 if __name__ == '__main__':

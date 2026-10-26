@@ -75,13 +75,9 @@ def runtime_details(path, exe_dir):
             'drivetest_dir': root.findtext('DriverTestFileDictionaryPath') or ''}
 
 
-def render_existing(table):
-    source = table['SCHEMA_SOURCE']
+def local_path_values(table, root, strict=True):
+    """Resolve local defaults once for the form, preview and CLI copy."""
     overrides = path_overrides(table.get('PATH_OVERRIDES', '{}'))
-    text, root = read_runtime(source)
-    schema_name = root.get('name', '')
-    if not schema_name:
-        raise ValueError('已有配置缺少 RuntimeSchema name，无法确定真实输出目录')
     indoor = (table.get('MAP_FORMAT', '').lower() == 'indoor'
               or table.get('TEMPLATE') == 'runtimeschema-indoor.xml.tpl')
     source_indoor = (root.findtext('MapFormat') or '').lower() == 'indoor'
@@ -89,6 +85,10 @@ def render_existing(table):
         raise ValueError('所选地图与已有 XML 的室内外类型不一致，请选择匹配的配置')
     values = {'PolygonFilePath': table.get('POLYGON_FILE', ''),
               'PathlossDirectory': table['OUT_ROOT']}
+    for tag, key in (('SceneSettingsPath', 'SCENE_SETTINGS_FILE'),
+                     ('DriverTestFileDictionaryPath', 'DT_ROOT')):
+        if root.find(tag) is not None:
+            values[tag] = table.get(key, '')
     if indoor:
         values['MapPath'] = table.get('MAP_PATH', '')
     else:
@@ -103,12 +103,28 @@ def render_existing(table):
                 inside = False
             if inside and os.path.isfile(original):
                 values[tag] = original
-            elif original and os.path.basename(original).lower() != os.path.basename(OUTDOOR_PATHS[tag]).lower() and tag not in overrides:
-                raise ValueError(f'自定义地图路径 {tag} 无法确认：{original}；请在“修改本地资源路径”中明确填写，避免替换成普通索引')
+            elif original and os.path.basename(original).lower() != os.path.basename(OUTDOOR_PATHS[tag]).lower():
+                relocated = f'{city_dir}/{os.path.dirname(OUTDOOR_PATHS[tag])}/{os.path.basename(original)}'
+                if os.path.isfile(relocated):
+                    values[tag] = relocated
+                elif tag not in overrides:
+                    if strict:
+                        raise ValueError(f'自定义地图路径 {tag} 无法确认：{original}；请在“修改本地资源路径”中明确填写，避免替换成普通索引')
+                    values[tag] = ''
         values['ClutterMatchPath'] = table['CLUTTER_MATCH_FILE']
     if table.get('SYNC_ENGINEERING') == '1':
         values['EngineeringFilePath'] = table['ENGINEERING_FILE']
     values.update(overrides)
+    return values
+
+
+def render_existing(table):
+    source = table['SCHEMA_SOURCE']
+    text, root = read_runtime(source)
+    schema_name = root.get('name', '')
+    if not schema_name:
+        raise ValueError('已有配置缺少 RuntimeSchema name，无法确定真实输出目录')
+    values = local_path_values(table, root)
     parts = re.split(r'(<!--.*?-->)', text, flags=re.S)
     changes = []
     for tag, value in values.items():

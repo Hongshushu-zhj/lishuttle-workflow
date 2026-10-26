@@ -78,12 +78,7 @@ echo.
 echo [数据根]
 call :chkdir  "地图数据根"                "!MAPROOT!"
 call :chkdir  "结果输出根"                "!OUT_ROOT!"
-if exist "!CASE_ROOT:/=\!" (
-	echo   [OK  ] 任务包根目录
-) else (
-	echo   [警告] 任务包根目录不存在：!CASE_ROOT!
-	echo          渲染脚本会自动创建它。请把工参 CSV 和区域多边形放进去。
-)
+call :chkdir  "工参任务根目录"              "!GONGCAN_ROOT:/=\!"
 
 echo.
 echo [构建产物]

@@ -62,7 +62,8 @@ class TaskSchemaTests(unittest.TestCase):
     def test_reuse_changes_only_requested_paths_byte_for_byte(self):
         output = self.render().read_bytes().decode('utf-8')
         expected = self.text.replace('>old-map<', '>new &amp; map<').replace(
-            '>old-output<', '>' + self.env['OUT_ROOT'] + '<')
+            '>old-output<', '>' + self.env['OUT_ROOT'] + '<').replace(
+            '>old-scene.xml<', '>' + (self.root / 'build/Bin/runtimelibrary/scenesettings.xml').as_posix() + '<')
         self.assertEqual(output, expected)
         self.assertEqual(self.source.read_bytes().decode('utf-8'), self.text)
 
@@ -148,7 +149,7 @@ class TaskSchemaTests(unittest.TestCase):
         table = renderer.build_table(self.env, self.job)
         result = render_existing(table)
         import re
-        allowed = set(OUTDOOR_PATHS) | {'ClutterMatchPath', 'PolygonFilePath', 'PathlossDirectory'}
+        allowed = set(OUTDOOR_PATHS) | {'ClutterMatchPath', 'PolygonFilePath', 'PathlossDirectory', 'SceneSettingsPath'}
         def mask(text):
             parts = re.split(r'(<!--.*?-->)', text, flags=re.S)
             for i in range(0, len(parts), 2):

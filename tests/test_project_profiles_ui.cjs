@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const nodes = new Map();
 const el = id => {
   if (!nodes.has(id)) nodes.set(id, {value:'',textContent:'',innerHTML:'',style:{},listeners:{},
+    setAttribute(){},
     addEventListener(event, handler){(this.listeners[event] ||= []).push(handler);},
     classList:{add(){},remove(){},toggle(){}}, querySelectorAll(){return [];}});
   return nodes.get(id);
@@ -19,8 +20,9 @@ applyProjectState({project:'/A',projects:['/A'],functions:[],cities:[{name:'city
  project_config:{PRESET:'preset-A',CMAKE:'/A/cmake.exe'}});
 `, context);
 assert.equal(vm.runInContext('S.profileRevision',context), '7');
-assert.ok(el('project-config-fields').innerHTML.includes('preset-A'));
-assert.ok(el('project-config-fields').innerHTML.includes('CMAKE'));
+assert.ok(el('build-summary').textContent.includes('preset-A'));
+assert.ok(!el('project-config-fields').innerHTML.includes('data-config-key="CMAKE"'));
+assert.ok(el('machine-config-fields').innerHTML.includes('/A/cmake.exe'));
 el('local-path-fields').querySelectorAll = () => [{dataset:{localPathTag:'SceneSettingsPath'},value:'/local/scene.xml'},
   {dataset:{localPathTag:'DriverTestFileDictionaryPath'},value:''}];
 assert.equal(vm.runInContext('collectLocalPaths().SceneSettingsPath',context), '/local/scene.xml');

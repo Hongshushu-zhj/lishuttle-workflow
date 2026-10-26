@@ -1,4 +1,4 @@
-"""Local profiles must never inherit another project's configuration."""
+"""Project resources stay isolated; installed tools are shared machine settings."""
 import json
 import os
 from pathlib import Path

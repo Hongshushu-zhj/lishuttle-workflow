@@ -130,12 +130,12 @@
   },
   {
    "name": "DefaultCalcRadius",
-   "label": "计算半径(米)",
+   "label": "小区计算半径(米，CSV)",
    "group": "计算范围与精度",
    "type": "int",
    "applies": "both",
    "default": "800",
-   "desc": "每小区/AP周边的计算范围半径"
+   "desc": "优先使用工参 CSV 的 CalcRadius 列；参数面板修改写入 CSV，逐小区半径在工参编辑中修改。RuntimeSchema 的 DefaultCalcRadius 仅保留为默认值。"
   },
   {
    "name": "DefaultCalcResolution",
@@ -1163,7 +1163,7 @@
    "type": "path",
    "applies": "outdoor",
    "func": "commsensing",
-   "desc": "通感监视区栅格路径，留空=不监视"
+   "desc": "ACP 监控栅格清单；有值时优先于监控多边形。"
   },
   {
    "name": "MonitorPolygonFilePath",
@@ -1172,7 +1172,7 @@
    "type": "path",
    "applies": "outdoor",
    "func": "commsensing",
-   "desc": "通感监视区多边形路径，留空=不监视"
+   "desc": "ACP 监控多边形；监控栅格文件为空时使用。"
   },
   {
    "name": "IndoorDistFilePath",
@@ -1191,7 +1191,7 @@
    "applies": "outdoor",
    "func": "commsensing",
    "default": "4",
-   "desc": "室外接收功率缩放系数"
+   "desc": "室外覆盖预测、ACP 与通感计算使用的接收功率修正量。"
   },
   {
    "name": "SinrSF",
@@ -1201,7 +1201,7 @@
    "applies": "outdoor",
    "func": "commsensing",
    "default": "1",
-   "desc": "室外信噪比缩放系数"
+   "desc": "室外覆盖预测、ACP 与通感指标使用的 SINR 修正量。"
   },
   {
    "name": "BsInterf",
@@ -1277,7 +1277,7 @@
    "type": "text",
    "applies": "both",
    "default": "-110",
-   "desc": "室内覆盖评估门限"
+   "desc": "ACP 室内覆盖目标的 RSRP 阈值，不是独立室内预测的输入参数。"
   },
   {
    "name": "IndoorSINRThreshold",
@@ -1286,7 +1286,7 @@
    "type": "text",
    "applies": "both",
    "default": "-3",
-   "desc": "室内质量评估门限"
+   "desc": "ACP 室内覆盖目标的 SINR 阈值，不是独立室内预测的输入参数。"
   },
   {
    "name": "IndoorWeight",
@@ -1296,6 +1296,370 @@
    "applies": "both",
    "default": "0.5",
    "desc": "室内目标在联合评估中的权重"
+  },
+  {
+   "name": "CityCode",
+   "label": "城市代码",
+   "group": "路径与数据",
+   "type": "text",
+   "applies": "both",
+   "desc": "运行配置中的城市标识。",
+   "source": "LiShuttle/src/ServiceHelper.cpp"
+  },
+  {
+   "name": "CpuLoad",
+   "label": "CPU 负载比例(%)",
+   "group": "计算范围与精度",
+   "type": "int",
+   "applies": "both",
+   "desc": "用于按硬件线程数设置并行度；当前引擎将取值限制在 0–500。",
+   "source": "LiShuttle/src/ServiceHelper.cpp"
+  },
+  {
+   "name": "DefaultFloorLoss",
+   "label": "默认楼层损耗(dB)",
+   "group": "传播与阈值",
+   "type": "float",
+   "applies": "both",
+   "desc": "缺少具体建筑场景配置时使用的默认楼层损耗。",
+   "source": "LiShuttle/src/ServiceHelper.cpp"
+  },
+  {
+   "name": "EngineeringDistanceError",
+   "label": "工参位置误差(米)",
+   "group": "天线与增益",
+   "type": "float",
+   "applies": "both",
+   "desc": "工参位置调整使用的距离误差；受 AdjustAntMount 开关影响。",
+   "source": "NetEntity/src/CellLoader.cpp"
+  },
+  {
+   "name": "EngineeringHeightErrorRatio",
+   "label": "工参高度误差比例",
+   "group": "天线与增益",
+   "type": "float",
+   "applies": "both",
+   "desc": "小区加载器读取的天线高度误差比例。",
+   "source": "NetEntity/src/CellLoader.cpp"
+  },
+  {
+   "name": "VertFourierScale",
+   "label": "垂直方向图平滑系数",
+   "group": "天线与增益",
+   "type": "float",
+   "applies": "both",
+   "desc": "与 FourierScale 一起设置天线二维/三维方向图平滑。",
+   "source": "Antenna/src/AntSubSys.cpp"
+  },
+  {
+   "name": "AllowedErrorOfGrid",
+   "label": "栅格允许误差(dB)",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "desc": "传播模型校正使用的栅格误差门限。",
+   "source": "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp",
+   "func": "cali"
+  },
+  {
+   "name": "IsLosCalibrated",
+   "label": "校正视距传播模型",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "desc": "是否参与视距传播模型校正。",
+   "source": "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp",
+   "func": "cali"
+  },
+  {
+   "name": "IsNLosCalibrated",
+   "label": "校正非视距传播模型",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "desc": "是否参与非视距传播模型校正。",
+   "source": "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp",
+   "func": "cali"
+  },
+  {
+   "name": "IsCorrectExclusiveModel",
+   "label": "校正独占模型",
+   "group": "模型校正",
+   "type": "bool",
+   "applies": "both",
+   "desc": "传播模型校正器读取的独占模型校正开关。",
+   "source": "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp",
+   "func": "cali"
+  },
+  {
+   "name": "EleTiltSensitivity",
+   "label": "电下倾角调整灵敏度",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "ACP 电下倾角调整灵敏度。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp",
+   "func": "acp"
+  },
+  {
+   "name": "AzimuthSensitivity",
+   "label": "方位角调整灵敏度",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "ACP 方位角调整灵敏度。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp",
+   "func": "acp"
+  },
+  {
+   "name": "RSPowerSensitivity",
+   "label": "参考信号功率调整灵敏度",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "ACP 参考信号功率调整灵敏度。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp",
+   "func": "acp"
+  },
+  {
+   "name": "MecTiltSensitivity",
+   "label": "机械下倾角调整灵敏度",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "ACP 机械下倾角调整灵敏度。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp",
+   "func": "acp"
+  },
+  {
+   "name": "MonitorWeight",
+   "label": "监控区域权重",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "ACP 监控栅格或多边形区域的评估权重。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp",
+   "func": "acp"
+  },
+  {
+   "name": "FocusedCells",
+   "label": "关注小区清单文件",
+   "group": "参数优化",
+   "type": "path",
+   "applies": "both",
+   "desc": "ACP 读取的小区筛选清单文件；路径必须在本机可用。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp",
+   "func": "acp"
+  },
+  {
+   "name": "PredictedCells",
+   "label": "预测小区清单文件",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "outdoor",
+   "desc": "覆盖预测/通感预测读取的小区筛选清单文件。",
+   "source": "Prediction/src/PredParams.cpp",
+   "func": "pred,commsensing"
+  },
+  {
+   "name": "FocusedARFCN",
+   "label": "关注频点列表",
+   "group": "计算范围与精度",
+   "type": "text",
+   "applies": "both",
+   "desc": "预测和 ACP 使用的频点筛选列表，以逗号分隔。",
+   "source": "Prediction/src/PredParams.cpp; ACP/Common/src/ACPCommonParams.cpp",
+   "func": "pred,commsensing,acp"
+  },
+  {
+   "name": "UavType",
+   "label": "无人机类型",
+   "group": "通感",
+   "type": "int",
+   "applies": "outdoor",
+   "desc": "当前项目枚举为 0=大型、1=小型；不同引擎版本请以项目源码为准。",
+   "source": "Prediction/src/PredParams.cpp; SwanUtility/incl/LiShuttleTypes.h",
+   "func": "pred,commsensing,acp"
+  },
+  {
+   "name": "DefaultLengthError",
+   "label": "几何长度误差(米)",
+   "group": "计算范围与精度",
+   "type": "float",
+   "applies": "both",
+   "desc": "室内路损使用的几何容差；由公共参数解析。",
+   "source": "LiShuttle/src/ServiceHelper.cpp:88"
+  },
+  {
+   "name": "ForcedFreq",
+   "label": "强制频率",
+   "group": "天线与增益",
+   "type": "int",
+   "applies": "both",
+   "desc": "工参加载器的频率覆盖值；0 保留工参频率。",
+   "source": "NetEntity/src/CellLoader.cpp:484; NetEntity/src/IndoorAPLoader.cpp:68"
+  },
+  {
+   "name": "AdjustAntMount",
+   "label": "自动调整天线安装",
+   "group": "天线与增益",
+   "type": "bool",
+   "applies": "both",
+   "desc": "启用工参安装位置/高度调整；影响工参距离及高度误差参数。",
+   "source": "NetEntity/src/CellLoader.cpp:487-490"
+  },
+  {
+   "name": "AntPosAdjustRadius",
+   "label": "天线位置调整半径",
+   "group": "天线与增益",
+   "type": "int",
+   "applies": "both",
+   "desc": "室外工参天线位置调整的搜索范围。",
+   "source": "NetEntity/src/CellLoader.cpp:483,986"
+  },
+  {
+   "name": "BuildingPenetration",
+   "label": "建筑穿透损耗文件",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "both",
+   "desc": "PLANET 地图加载时可选读取的建筑穿透文件。",
+   "source": "GIS/Data/src/GeoSubSys.cpp:204"
+  },
+  {
+   "name": "RoadsToBeRecorded",
+   "label": "射线记录道路文件",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "both",
+   "desc": "路损解析器读取；道路射线记录 Run 分支使用，不是覆盖/校正/ACP 的常规控制。",
+   "source": "Propagation/Interface/src/PathLossCalcParams.cpp:83"
+  },
+  {
+   "name": "BuildingsDebuged",
+   "label": "建筑调试清单",
+   "group": "路径与数据",
+   "type": "path",
+   "applies": "both",
+   "desc": "建筑调试模式的建筑清单路径，保留源码拼写。",
+   "source": "Propagation/Interface/src/PathLossCalcParams.cpp:84"
+  },
+  {
+   "name": "ClutterMatchName",
+   "label": "地物匹配名称",
+   "group": "路径与数据",
+   "type": "text",
+   "applies": "both",
+   "desc": "路损参数解析器读取的地物匹配名称。",
+   "source": "Propagation/Interface/src/PathLossCalcParams.cpp:61"
+  },
+  {
+   "name": "NoCheckRay",
+   "label": "跳过射线缓存校验",
+   "group": "射线记录",
+   "type": "bool",
+   "applies": "both",
+   "desc": "控制路损计算器的射线缓存哈希校验。",
+   "source": "Propagation/Plugins/src/LiShuttlePropagationCalculator.cpp:107"
+  },
+  {
+   "name": "NoCheckPathLoss",
+   "label": "跳过路损缓存校验",
+   "group": "射线记录",
+   "type": "bool",
+   "applies": "both",
+   "desc": "控制路损缓存校验，大小写以此字段为准。",
+   "source": "Propagation/Plugins/src/LiShuttlePropagationCalculator.cpp:141"
+  },
+  {
+   "name": "AveErrorTolerance",
+   "label": "平均误差容差",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "desc": "校正解析器使用的平均误差容差。",
+   "source": "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp:59"
+  },
+  {
+   "name": "MaxMeanJitter",
+   "label": "均值抖动上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "desc": "当前引擎实际读取 MaxMeanJitter；旧字典 Max_MeanError 不会自动映射。",
+   "source": "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp:60"
+  },
+  {
+   "name": "MaxVarJitter",
+   "label": "方差抖动上限",
+   "group": "模型校正",
+   "type": "float",
+   "applies": "both",
+   "desc": "当前引擎实际读取 MaxVarJitter；旧字典 Max_VarError 不会自动映射。",
+   "source": "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp:61"
+  },
+  {
+   "name": "RSRPandSINR_Weight",
+   "label": "RSRP 与 SINR 联合目标权重",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "大于 0 时启用联合覆盖目标及其未覆盖率阈值。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp:448-454"
+  },
+  {
+   "name": "RSRPandSINRUnCovRate",
+   "label": "联合目标未覆盖率",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "RSRPandSINR_Weight>0 时使用。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp:451"
+  },
+  {
+   "name": "RSRPUnCovRate",
+   "label": "RSRP 目标未覆盖率",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "RSRP_Weight>0 时使用。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp:460"
+  },
+  {
+   "name": "SINRUnCovRate",
+   "label": "SINR 目标未覆盖率",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "SINR_Weight>0 时使用。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp:470"
+  },
+  {
+   "name": "Azimuth_Diff_Weight",
+   "label": "同站方位角差目标权重",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "启用方位角优化后可启用的目标权重。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp:476-481"
+  },
+  {
+   "name": "AzimuthDiffThreshold",
+   "label": "同站方位角差阈值",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "方位角差目标的判定阈值。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp:491"
+  },
+  {
+   "name": "AzimuthSmallRate",
+   "label": "方位角差目标比例",
+   "group": "参数优化",
+   "type": "float",
+   "applies": "both",
+   "desc": "IsOptAzimuth=true 且 Azimuth_Diff_Weight>0 时使用。",
+   "source": "ACP/Common/src/ACPCommonParams.cpp:481"
   }
  ],
  "function_info": [

@@ -67,6 +67,10 @@ class Api:
     @staticmethod
     @project_operation
     def state(_):
+        store = core.ProjectStore(core.ENV_FILE)
+        machine = store.setup_machine()
+        # setup may persist tool discovery and invalidate the request's initial revision.
+        core.PROJECT_CONTEXT.set(store.load(allow_empty=True))
         projects, current_project = core.scan_projects()
         cities, map_root = core.scan_cities()
         tasks, gongcan_root = core.scan_tasks()
@@ -77,6 +81,10 @@ class Api:
                 "gongcan_root": gongcan_root, "tasks": tasks,
                 "out_root": env.get("OUT_ROOT", ""), "preset": env.get("PRESET", ""),
                 "project_config": {k: env.get(k, '') for k in core.FIELDS},
+                "machine_config": {k: env.get(k, '') for k in core.MACHINE_FIELDS},
+                "machine_revision": env.get('MACHINE_CONFIG_REVISION', ''),
+                "machine_detection": machine,
+                "build_workflow": core.describe_build(env),
                 "profile_id": env.get('PROJECT_PROFILE_ID', ''),
                 "profile_revision": env.get('PROJECT_PROFILE_REVISION', ''),
                 "function_info": funcs,
@@ -105,6 +113,52 @@ class Api:
                 body.get('_revision'), project=core.load_env()['PROJECT_DIR'])
             core.PROJECT_CONTEXT.set(env)
             return Api.state(None)
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @project_operation
+    def detect_project_config(body):
+        try:
+            return core.detect_project_config(core.load_env())
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @project_operation
+    def validate_setup(body):
+        issues = core.required_issues(core.load_env(), body.get('operation', 'render'))
+        return {'ok': not issues, 'issues': issues}
+
+    @staticmethod
+    @project_operation
+    def build_status(body):
+        try:
+            env = core.sync_executable(core.ProjectStore(core.ENV_FILE), core.load_env())
+            core.PROJECT_CONTEXT.set(env)
+            return {'build_workflow': core.describe_build(env),
+                    'build_values': {key:env.get(key,'') for key in core.BUILD_FIELDS},
+                    'profile_revision': env['PROJECT_PROFILE_REVISION']}
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @project_operation
+    def save_machine_config(body):
+        try:
+            store = core.ProjectStore(core.ENV_FILE)
+            store.save_machine(body.get('values', {}), body.get('_machine_revision'))
+            return Api.state(None)
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @project_operation
+    def detect_machine_config(body):
+        try:
+            store = core.ProjectStore(core.ENV_FILE)
+            machine = store.setup_machine(force=True)
+            return dict(Api.state(None), machine_detection=machine)
         except (ValueError, OSError) as exc:
             return {'error': str(exc)}
 
@@ -138,6 +192,43 @@ class Api:
 
     @staticmethod
     @project_operation
+    def local_paths(body):
+        """Return actual defaults from the same resolver used by rendering."""
+        try:
+            task, _, engineering, source = Api._binding_task(body)
+            cities, _ = core.scan_cities()
+            city = next((c for c in cities if c['name'] == body.get('city')), None)
+            if not city:
+                raise ValueError('请选择当前项目的地图')
+            if not source:
+                return {'values': {}, 'warnings': []}
+            env = core.load_env()
+            job = dict(JOB_NAME='local-path-preview', CITY=city['name'], SCHEMA_SOURCE=source,
+                       ENGINEERING_FILE=engineering, SYNC_ENGINEERING='1')
+            if task.get('scene'):
+                job['SCENE_SETTINGS_FILE'] = task['scene']
+            if city['kind'] == 'indoor':
+                job.update(TEMPLATE='runtimeschema-indoor.xml.tpl', MAP_PATH=env['MAP_ROOT'].rstrip('/\\') + '/' + city['name'])
+            _, root = core.read_runtime(source)
+            values = core.local_path_values(core.build_table(env, job, require_complete=False), root, strict=False)
+            values.pop('PolygonFilePath', None)
+            values.pop('EngineeringFilePath', None)
+            warnings = [f'{tag} 的自定义文件未在所选地图中找到，请填写本机路径' for tag, value in values.items()
+                        if not value and tag in core.OUTDOOR_PATHS]
+            unresolved = {}
+            for tag, reason in {
+                'PathlossDirectory': '当前项目未配置结果根目录 OUT_ROOT，请在顶部“项目配置”中填写。',
+                'SceneSettingsPath': '未找到当前项目的场景配置，请填写 CONFIG_SRC / BUILD_SUBDIR，或指定本机场景文件。',
+                'DriverTestFileDictionaryPath': '当前项目未配置路测目录 DT_ROOT；不使用路测时可留空。',
+            }.items():
+                if tag in values and not values[tag]:
+                    unresolved[tag] = reason
+            return {'values': values, 'warnings': warnings, 'unresolved': unresolved}
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @project_operation
     def save_task_binding(body):
         try:
             _, key, engineering, schema = Api._binding_task(body)
@@ -148,8 +239,8 @@ class Api:
             if not engineering:
                 raise ValueError('请明确选择工参，再保存地图对应关系')
             overrides = core.path_overrides(body.get('path_overrides', {}))
-            if 'EngineeringFilePath' in overrides:
-                raise ValueError('工参路径由工参选择决定')
+            if set(overrides) & {'EngineeringFilePath', 'PolygonFilePath'}:
+                raise ValueError('工参及区域路径由上方文件选择决定')
             binding = {k: body.get(k) for k in ('polygon_file', 'sync_engineering')}
             binding.update(city=city['name'], city_kind=city['kind'], engineering_file=engineering,
                            schema_source=schema, path_overrides=overrides)
@@ -183,6 +274,11 @@ class Api:
     @project_operation
     def render(body):
         """装配并渲染：写 web-*.env → 调渲染脚本 → 可选复制共用文件。"""
+        env = core.load_env()
+        if env.get('PROJECT_PROFILE_ID'):
+            issues = core.required_issues(env, 'render')
+            if issues:
+                return {'error': issues[0]['message'], 'issues': issues}
         job_name = body.get("job_name") or ""
         func = body.get("func") or "pl"
         task_id = str(body.get("task_id", "1"))
@@ -217,6 +313,7 @@ class Api:
                         if not reuse or body.get('sync_engineering') or body.get('engineering_file') else '')
         except ValueError as exc:
             return {"error": str(exc)}
+
         current['engineering_file'] = selected
         task = current
         copy_antennas = copy_antennas and bool(task.get('has_antennas'))
@@ -266,48 +363,27 @@ class Api:
     def params(query):
         schema = query.get("schema", [""])[0]
         func = query.get("func", [""])[0]
-        show_all = query.get("all", ["0"])[0] == "1"
-        path, values, name = core.read_schema(schema)
-        if not values:
+        show_all = query.get("all", ["1"])[0] == "1"
+        try:
+            path, document = core.read_schema_document(schema)
+        except (ValueError, OSError) as exc:
+            return {'error':str(exc)}
+        if document is None:
             return {"error": f"读不到运行单 {schema}，先渲染一次"}
-        spec = core.load_spec()
-        groups = spec["groups"]
-        rows_by_name = {p["name"]: p for p in spec["params"]}
-
-        def func_match(p):
-            f = p.get("func", "")
-            return (not f) or (func in f.split(","))
-
-        is_indoor = "MapPath" in values or values.get("MapFormat", "").lower() == "indoor"
-
-        def applies_match(p):
-            ap = p.get("applies", "both")
-            return ap == "both" or ap == ("indoor" if is_indoor else "outdoor")
-
-        out_groups = []
-        seen = set()
-        for g in groups:
-            rows = []
-            for p in spec["params"]:
-                if p["group"] != g or not func_match(p) or not applies_match(p):
-                    continue
-                rows.append(p)
-                seen.add(p["name"])
-            if rows:
-                out_groups.append({"group": g, "rows": rows})
-        if show_all:
-            extra = [{"name": k, "label": k, "group": "高级(字典未收录)", "type": "text",
-                      "applies": "both", "desc": "运行单里有、参数字典未收录的字段"}
-                     for k in values if k not in seen]
-            if extra:
-                out_groups.append({"group": "高级(字典未收录)", "rows": extra})
-        return {"file": path, "schema_name": name, "values": values, "groups": out_groups,
+        catalog = core.build_catalog(document, core.load_spec(), func, show_all)
+        if catalog['profile'].get('reviewed'):
+            from function_profiles import source_review
+            catalog['profile']['source_review'] = source_review(func, core.load_env().get('PROJECT_DIR', ''))
+        return {**catalog, "file": path, "schema_name": document['name'], "values": document['values'],
+                "param_sources": {'DefaultCalcRadius': core.radius_source(schema)},
                 "thirdpart_defaults": core.thirdpart_defaults()}
 
     @staticmethod
     @project_operation
     def param_default(body):
         tag = body.get('tag', '')
+        if tag == 'DefaultCalcRadius':
+            return {'ok': False, 'message': '小区计算半径以 CSV 为准，请修改工参半径；XML 仅提供默认值'}
         default = core.thirdpart_defaults().get(tag)
         if not default or not default['available']:
             return {'ok': False, 'message': (default or {}).get('reason', '当前项目样例没有此参数的默认值')}
@@ -320,8 +396,13 @@ class Api:
         schema = body.get("schema", "")
         tag = body.get("tag", "")
         value = str(body.get("value", ""))
-        ok, msg = core.write_schema_param(schema, tag, value)
-        return {"ok": ok, "message": msg, "values": core.read_schema(schema)[1]}
+        try:
+            ok, msg = core.write_schema_param(schema, tag, value)
+            values = core.read_schema(schema)[1]
+        except (ValueError, OSError) as exc:
+            ok, msg, values = False, str(exc), {}
+        return {"ok": ok, "message": msg, "values": values,
+                "target": 'engineering_csv' if tag == 'DefaultCalcRadius' else 'schema'}
 
     @staticmethod
     def csv_get(query):
@@ -352,6 +433,23 @@ class Api:
     @staticmethod
     @project_operation
     def toolkit(body):
+        if body.get('step') == 'build':
+            try:
+                env = core.load_env()
+                values = core.prepare_build(env, body.get('preset') or env.get('PRESET',''))
+                issues = core.required_issues(dict(env, **values), 'build')
+                if issues:
+                    return {'error': issues[0]['message'], 'issues': issues}
+                if any(env.get(key, '') != value for key,value in values.items()):
+                    env = core.ProjectStore(core.ENV_FILE).save(values, env.get('PROJECT_PROFILE_REVISION'), env['PROJECT_DIR'])
+                core.PROJECT_CONTEXT.set(env)
+                sid, bat = core.start_toolkit('build')
+                if sid is None:
+                    return {'error': bat}
+                return {'sid':sid, 'bat':bat, 'build_values':values,
+                        'profile_revision':env.get('PROJECT_PROFILE_REVISION'), 'build_workflow':core.describe_build(env)}
+            except (ValueError, OSError) as exc:
+                return {'error':str(exc), 'issues':[{'key':'PRESET','target':'build-mode','section':'build','message':str(exc)}]}
         sid, bat = core.start_toolkit(body.get("step", "doctor"))
         if sid is None:
             return {'error': bat}
@@ -386,7 +484,13 @@ ROUTES = {
     ("POST", "select_project"): Api.select_project,
     ("POST", "add_project"): Api.add_project,
     ("POST", "save_project_config"): Api.save_project_config,
+    ("POST", "detect_project_config"): Api.detect_project_config,
+    ("POST", "validate_setup"): Api.validate_setup,
+    ("POST", "build_status"): Api.build_status,
+    ("POST", "save_machine_config"): Api.save_machine_config,
+    ("POST", "detect_machine_config"): Api.detect_machine_config,
     ("POST", "task_binding"): Api.task_binding,
+    ("POST", "local_paths"): Api.local_paths,
     ("POST", "save_task_binding"): Api.save_task_binding,
     ("POST", "set_map_root"): Api.set_map_root,
     ("POST", "set_gongcan_root"): Api.set_gongcan_root,

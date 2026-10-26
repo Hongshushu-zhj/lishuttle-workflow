@@ -21,9 +21,9 @@ import sys
 import threading
 import hashlib
 import tempfile
-import html
+import math
 import xml.etree.ElementTree as ET
-from engineering import identify_engineering, validate_engineering
+from engineering import identify_engineering, validate_engineering, normalized
 from vs_launch import sync_launch
 
 HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
@@ -36,12 +36,14 @@ SPEC_FILE = os.path.join(HERE, "params_spec.json")
 
 sys.path.insert(0, SCRIPTS)
 from render_schema import read_env_file, build_table  # noqa: E402
-from task_schema import schema_candidates, render_existing, runtime_details, path_overrides
-from project_config import ProjectStore, FIELDS, write_snapshot, validate_operation
+from task_schema import schema_candidates, render_existing, runtime_details, path_overrides, read_runtime, local_path_values, OUTDOOR_PATHS
+from project_config import ProjectStore, FIELDS, MACHINE_FIELDS, write_snapshot, validate_operation
+from project_detection import detect_project_config
+from project_workflow import describe_build, prepare_build, required_issues, sync_executable, BUILD_FIELDS
+from parameter_catalog import parse_document, build_catalog, replace_scalar
 
 PROJECT_CONTEXT = ContextVar('project_config', default=None)
 
-TAG_RE = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>([^<]*)</\1>")
 CSV_ENCODINGS = ("utf-8-sig", "gb18030", "gbk")
 
 
@@ -353,9 +355,11 @@ def preview_task_schema(body, task, city_kind):
                FUNC=body.get('func', 'pl'), CITY=city,
                SCHEMA_SOURCE=source, SYNC_ENGINEERING='1' if body.get('sync_engineering') else '0',
                ENGINEERING_FILE=task.get('engineering_file', ''), POLYGON_FILE=polygon)
+    if task.get('scene'):
+        job['SCENE_SETTINGS_FILE'] = task['scene']
     overrides = path_overrides(body.get('path_overrides', {}))
-    if 'EngineeringFilePath' in overrides:
-        raise ValueError('请通过工参选择和“同步工参路径”修改工参，不允许另外覆盖')
+    if set(overrides) & {'EngineeringFilePath', 'PolygonFilePath'}:
+        raise ValueError('请通过上方工参及区域文件选择修改路径，不允许另外覆盖')
     job['PATH_OVERRIDES'] = json.dumps(overrides, ensure_ascii=False)
     if city_kind == 'indoor':
         job.update(TEMPLATE='runtimeschema-indoor.xml.tpl', MAP_PATH=env['MAP_ROOT'].rstrip('/') + '/' + city)
@@ -423,6 +427,8 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind):
         # 区域由用户明确选择，不再猜测任务包的 index/WrongSites 等 TXT。
         lines = [f'POLYGON_FILE="{task.get("polygon_file", "")}"'
                  if line.startswith('POLYGON_FILE=') else line for line in lines]
+    if task.get('scene'):
+        lines.append(f'SCENE_SETTINGS_FILE="{task["scene"]}"')
     with open(job_file, "w", encoding="utf-8") as fh:
         fh.write("# 由平台生成，可手工编辑后用脚本复跑\n" + "\n".join(lines) + "\n")
     return to_slash(job_file)
@@ -616,18 +622,19 @@ def schema_path(schema_name):
 
 
 def read_schema(schema_name):
+    path, document = read_schema_document(schema_name)
+    if document is None:
+        return None, {}, path
+    return path, document['values'], document['name']
+
+
+def read_schema_document(schema_name):
     path = schema_path(schema_name)
     if not os.path.isfile(path):
-        return None, {}, path
-    with open(path, "r", encoding="utf-8") as fh:
-        text = fh.read()
-    m = re.search(r'<RuntimeSchema\s+name="([^"]*)"', text)
-    values = {}
-    for tag, val in TAG_RE.findall(text):
-        values.setdefault(tag, html.unescape(val))
-    for tag in re.findall(r'<([A-Za-z_][A-Za-z0-9_]*)\s*/>', text):
-        values.setdefault(tag, '')
-    return to_slash(path), values, (m.group(1) if m else "")
+        return path, None
+    with open(path, 'rb') as fh:
+        document = parse_document(fh.read())
+    return to_slash(path), document
 
 
 def load_spec():
@@ -691,25 +698,63 @@ def ordered_functions():
     return out
 
 
+def radius_source(schema_name):
+    """The running XML selects the CSV; its default radius stays a fallback."""
+    path, values, _ = read_schema(schema_name)
+    result = dict(kind='engineering_csv', fallback=values.get('DefaultCalcRadius', ''),
+                  path='', column='', values=[], editable=False)
+    selected = values.get('EngineeringFilePath', '')
+    if not path or not selected:
+        return dict(result, reason='运行配置没有有效工参路径，请先选择并同步工参')
+    if not os.path.isabs(selected):
+        selected = os.path.join(os.path.dirname(os.path.dirname(path)), selected)
+    result['path'] = to_slash(os.path.normpath(selected))
+    grid = read_csv_grid(selected)
+    if 'error' in grid:
+        return dict(result, reason=grid['error'])
+    aliases = {normalized(s) for s in ('CalcRadius', 'Calc Radius (m)', 'Main Calculation Radius (m)',
+                                      'Calculation Radius (m)', '计算半径', '计算半径(m)', '计算半径(米)',
+                                      '小区计算半径', '小区计算半径(m)', '小区计算半径(米)')}
+    for header in (grid['header_en'], grid['header_zh']):
+        for index, name in enumerate(header):
+            if normalized(name) in aliases:
+                radii = list(dict.fromkeys(row[index] if len(row) > index else '' for row in grid['rows'] if any(row)))
+                return dict(result, column=name, values=radii, editable=bool(radii),
+                            reason='' if radii else '工参没有小区数据')
+    return dict(result, reason='工参没有 CalcRadius / 计算半径列，请在工参 CSV 中补充后再修改')
+
+
+def write_cell_radius(schema_name, value):
+    try:
+        radius = float(value)
+    except (ValueError, TypeError):
+        return False, '计算半径必须是有效的正数（米）'
+    if not math.isfinite(radius) or radius <= 0:
+        return False, '计算半径必须是有效的正数（米）'
+    source = radius_source(schema_name)
+    if not source['editable']:
+        return False, source['reason']
+    ok, message = set_csv_column(source['path'], source['column'], value)
+    return ok, f'工参 CSV：{source["path"]}；{message}；XML 默认半径保持不变'
+
+
 def write_schema_param(schema_name, tag, value):
     """把 <tag>old</tag> 定点替换为新值；其余内容逐字节保留。先备份 .bak。"""
+    if tag == 'DefaultCalcRadius':
+        return write_cell_radius(schema_name, value)
     path = schema_path(schema_name)
     if not os.path.isfile(path):
         return False, f"找不到运行单：{path}"
     with open(path, 'rb') as fh:
-        text = fh.read().decode('utf-8')
-    pat = re.compile(rf"(<{re.escape(tag)}>)([^<]*)(</{re.escape(tag)}>)")
-    empty_pat = re.compile(rf'<{re.escape(tag)}\s*/>')
-    if not pat.search(text) and not empty_pat.search(text):
-        return False, f"运行单里没有字段 <{tag}>"
+        raw = fh.read()
+    try:
+        replacement = replace_scalar(raw, tag, value)
+        parse_document(replacement)  # Reject invalid XML characters before writing or backing up.
+    except (ValueError, ET.ParseError) as exc:
+        return False, str(exc)
     shutil.copy2(path, path + ".bak")
-    escaped = html.escape(value, quote=False)
-    if pat.search(text):
-        new_text = pat.sub(lambda m: m.group(1) + escaped + m.group(3), text, count=1)
-    else:
-        new_text = empty_pat.sub(lambda m: f'<{tag}>{escaped}</{tag}>', text, count=1)
     with open(path, 'wb') as fh:
-        fh.write(new_text.encode('utf-8'))
+        fh.write(replacement)
     return True, f"{tag} -> {value}（原文件已备份 .bak）"
 
 
@@ -721,7 +766,8 @@ def read_csv_grid(path):
     if not os.path.isfile(path):
         return {"error": f"找不到文件：{path}"}
     enc = sniff_csv_encoding(path)
-    text = open(path, "r", encoding=enc, newline="").read()
+    with open(path, "r", encoding=enc, newline="") as fh:
+        text = fh.read()
     rows = list(csv.reader(io.StringIO(text)))
     return {
         "path": to_slash(path), "encoding": enc,
@@ -749,7 +795,8 @@ def save_csv_grid(path, header_zh, header_en, rows):
 def set_csv_column(path, column_key, value):
     """整列批量设置：column_key 按中英文列名匹配（大小写不敏感）。先备份。"""
     enc = sniff_csv_encoding(path)
-    text = open(path, "r", encoding=enc, newline="").read()
+    with open(path, "r", encoding=enc, newline="") as fh:
+        text = fh.read()
     newline = "\r\n" if "\r\n" in text else "\n"
     rows = list(csv.reader(io.StringIO(text)))
     if len(rows) < 3:
@@ -768,6 +815,8 @@ def set_csv_column(path, column_key, value):
     shutil.copy2(path, path + ".bak")
     changed = 0
     for r in range(2, len(rows)):
+        if not any(rows[r]):
+            continue
         while len(rows[r]) <= col:
             rows[r].append("")
         if rows[r][col] != value:
@@ -775,7 +824,8 @@ def set_csv_column(path, column_key, value):
             changed += 1
     buf = io.StringIO()
     csv.writer(buf, lineterminator=newline).writerows(rows)
-    open(path, "w", encoding=enc, newline="").write(buf.getvalue())
+    with open(path, "w", encoding=enc, newline="") as fh:
+        fh.write(buf.getvalue())
     return True, f"列[{column_key}] -> {value}，影响{changed}行（已备份）"
 
 

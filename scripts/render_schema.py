@@ -136,18 +136,26 @@ def to_slash(path):
     return path.replace("\\", "/")
 
 
+def manifest_source_path(path):
+    """Keep portable relative paths when possible; Windows drives may differ."""
+    try:
+        return to_slash(os.path.relpath(path, ROOT))
+    except ValueError:
+        return to_slash(os.path.abspath(path))
+
+
 # ----------------------------------------------------------------------
 # 主流程
 # ----------------------------------------------------------------------
 
-def build_table(env, job):
-    """把环境变量和任务单合成最终的变量表，并补上派生变量。"""
+def build_table(env, job, require_complete=True):
+    """合成变量；只读路径发现可返回部分值，真实渲染仍要求完整配置。"""
     for key in ('PROJECT_DIR', 'PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME',
                 'VS_ROOT', 'CMAKE', 'NINJA', 'VCVARS', 'CONFIG_SRC', 'DLL_SRC',
                 'PROJECT_PROFILE_ID', 'PROJECT_PROFILE_REVISION'):
         if key in job and job[key] != env.get(key):
             raise ValueError(f'任务单不能覆盖项目配置 {key}，请选择对应项目后重试')
-    if env.get('PROJECT_PROFILE_ID'):
+    if require_complete and env.get('PROJECT_PROFILE_ID'):
         required = ['PROJECT_DIR', 'BUILD_SUBDIR', 'EXE_NAME', 'OUT_ROOT']
         if job.get('CITY'):
             required.append('MAP_ROOT')
@@ -164,14 +172,15 @@ def build_table(env, job):
                      f"        请在 env/ 或 jobs/ 的对应文件里补上这些键。")
 
     # ---- 派生变量 ----
-    build_dir = f"{to_slash(env['PROJECT_DIR'])}/{env['BUILD_SUBDIR']}"
-    exe_dir = f"{build_dir}/Bin"
-    runtime_schema_dir = f"{exe_dir}/runtimelibrary"
+    build_dir = (f"{to_slash(env['PROJECT_DIR'])}/{env['BUILD_SUBDIR']}"
+                 if env.get('PROJECT_DIR') and env.get('BUILD_SUBDIR') else '')
+    exe_dir = f"{build_dir}/Bin" if build_dir else ''
+    runtime_schema_dir = f"{exe_dir}/runtimelibrary" if exe_dir else ''
 
     table["BUILD_DIR"] = build_dir
     table["EXE_DIR"] = exe_dir
     table["RUNTIME_SCHEMA_DIR"] = runtime_schema_dir
-    table["EXE_PATH"] = f"{exe_dir}/{env['EXE_NAME']}"
+    table["EXE_PATH"] = f"{exe_dir}/{env['EXE_NAME']}" if exe_dir and env.get('EXE_NAME') else ''
 
     # 留空的可选项填默认值
     # 室内任务没有 CITY/杂波匹配这些概念，跳过室外专用的默认值推导
@@ -180,10 +189,20 @@ def build_table(env, job):
     if not table.get("CLUTTER_MATCH_FILE"):
         table["CLUTTER_MATCH_FILE"] = ""
     if not table.get("SCENE_SETTINGS_FILE"):
-        table["SCENE_SETTINGS_FILE"] = f"{runtime_schema_dir}/scenesettings.xml"
+        table["SCENE_SETTINGS_FILE"] = f"{runtime_schema_dir}/scenesettings.xml" if runtime_schema_dir else ''
+        if not runtime_schema_dir:
+            # An incomplete new profile can still discover its own existing baseline.
+            # Never use another project's build directory or invent a /Bin path.
+            config = os.path.join(env.get('PROJECT_DIR', ''), env.get('CONFIG_SRC') or 'ThirdPart/Config')
+            for relative in ('runtimelibrary/scenesettings.xml', 'config/scenesettings.xml'):
+                candidate = os.path.join(config, relative)
+                if os.path.isfile(candidate):
+                    table['SCENE_SETTINGS_FILE'] = to_slash(candidate)
+                    break
     if not table.get("DRIVETEST_DIR"):
         table["DRIVETEST_DIR"] = to_slash(env.get("DT_ROOT", ""))
     table["DT_ROOT"] = table["DRIVETEST_DIR"]
+    table.setdefault('OUT_ROOT', '')
     # 高度分层：不填就是 3m 单层（与服务器任务单默认一致）
     if not table.get("MAX_CALC_HEIGHT"):
         table["MAX_CALC_HEIGHT"] = "3"
@@ -217,8 +236,8 @@ def derive_clutter_match(table, env):
         hits = []
     if hits:
         return to_slash(hits[0])
-    default = (f"{to_slash(env['PROJECT_DIR'])}/"
-               f"{env.get('CONFIG_SRC', 'ThirdPart/Config')}/config/cluttermatchsettings.xml")
+    default = to_slash(os.path.join(env['PROJECT_DIR'], env.get('CONFIG_SRC') or 'ThirdPart/Config',
+                                   'config', 'cluttermatchsettings.xml'))
     if os.path.isfile(default):
         return default
     return candidate
@@ -434,8 +453,8 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
             "path_changes": existing['changes'] if existing else [],
             "project_config": dict(env),
             "target": target,
-            "env_file": to_slash(os.path.relpath(env_path, ROOT)),
-            "job_file": to_slash(os.path.relpath(job_path, ROOT)),
+            "env_file": manifest_source_path(env_path),
+            "job_file": manifest_source_path(job_path),
             "run": {
                 "func": table["FUNC"],
                 "task_id": table.get("TASK_ID") or "0",
