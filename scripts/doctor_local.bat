@@ -20,7 +20,8 @@ rem ---- 加载环境变量 ----
 rem 刻意不自己逐行解析 env 文件：那是 UTF-8 带中文注释，而 cmd 按当前
 rem 代码页（中文 Windows 是 GBK）解码，中文注释的字节会把行结构解析乱掉，
 rem 导致前半段键被整个跳过。交给 python 输出才可靠。
-for /f "usebackq tokens=1,* delims==" %%a in (`python scripts\render_schema.py --print-env local-win`) do set "%%a=%%b"
+call scripts\load_local_env.bat doctor
+if errorlevel 1 exit /b 1
 
 if "!PROJECT_DIR!"=="" (
 	echo [错误] 环境变量加载失败。先手动验证一下：
@@ -33,8 +34,8 @@ set "PROJ=!PROJECT_DIR:/=\!"
 set "BUILD=!BUILD_SUBDIR:/=\!"
 set "EXEDIR=!PROJ!\!BUILD!\Bin"
 set "LIBDIR=!PROJ!\!BUILD!\Lib"
-set "CONFIGSRC=!PROJ!\!CONFIG_SRC:/=\!"
-set "DLLSRC=!PROJ!\!DLL_SRC:/=\!"
+set "CONFIGSRC=!CONFIG_SOURCE_DIR:/=\!"
+set "DLLSRC=!DLL_SOURCE_DIR:/=\!"
 set "MAPROOT=!MAP_ROOT:/=\!"
 
 set "FAIL=0"
@@ -77,12 +78,7 @@ echo.
 echo [数据根]
 call :chkdir  "地图数据根"                "!MAPROOT!"
 call :chkdir  "结果输出根"                "!OUT_ROOT!"
-if exist "!CASE_ROOT:/=\!" (
-	echo   [OK  ] 任务包根目录
-) else (
-	echo   [警告] 任务包根目录不存在：!CASE_ROOT!
-	echo          渲染脚本会自动创建它。请把工参 CSV 和区域多边形放进去。
-)
+call :chkdir  "工参任务根目录"              "!GONGCAN_ROOT:/=\!"
 
 echo.
 echo [构建产物]

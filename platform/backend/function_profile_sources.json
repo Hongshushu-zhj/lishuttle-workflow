@@ -1,0 +1,188 @@
+{
+  "reference": "2026-10-26: Lab20261013 / Lab20261020 local source review",
+  "functions": {
+    "cali": [
+      "LiShuttle/src/ServiceHelper.cpp",
+      "LiShuttle/src/main.cpp",
+      "LiShuttle/src/SceneInfoCollection.cpp",
+      "SwanUtility/incl/LiShuttleTypes.h",
+      "GIS/Data/src/GeoSubSys.cpp",
+      "Antenna/src/AntSubSys.cpp",
+      "NetEntity/src/CellLoader.cpp",
+      "NetEntity/src/NESubSys.cpp",
+      "Propagation/Interface/src/PathLossCalcParams.cpp",
+      "Propagation/Frame/src/PathLossCalcEngine.cpp",
+      "Propagation/Plugins/src/LiShuttlePropagationCalculator.cpp",
+      "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp",
+      "Propagation/Frame/src/PMCorrectionEngine.cpp",
+      "Propagation/PMCorrectionPlugins/src/CorrectCalculator.cpp"
+    ],
+    "pred": [
+      "LiShuttle/src/ServiceHelper.cpp",
+      "LiShuttle/src/main.cpp",
+      "LiShuttle/src/SceneInfoCollection.cpp",
+      "SwanUtility/incl/LiShuttleTypes.h",
+      "GIS/Data/src/GeoSubSys.cpp",
+      "Antenna/src/AntSubSys.cpp",
+      "NetEntity/src/CellLoader.cpp",
+      "NetEntity/src/NESubSys.cpp",
+      "Propagation/Interface/src/PathLossCalcParams.cpp",
+      "Propagation/Frame/src/PathLossCalcEngine.cpp",
+      "Propagation/Plugins/src/LiShuttlePropagationCalculator.cpp",
+      "Prediction/src/PredParams.cpp",
+      "Prediction/src/PredictionEngine.cpp",
+      "Prediction/src/CalcCaseFactory.cpp",
+      "Prediction/src/RsrpSinrCalculator.cpp"
+    ],
+    "predindoor": [
+      "LiShuttle/src/ServiceHelper.cpp",
+      "LiShuttle/src/main.cpp",
+      "LiShuttle/src/SceneInfoCollection.cpp",
+      "SwanUtility/incl/LiShuttleTypes.h",
+      "GIS/Data/src/GeoSubSys.cpp",
+      "Antenna/src/AntSubSys.cpp",
+      "NetEntity/src/IndoorAPLoader.cpp",
+      "NetEntity/src/NESubSys.cpp",
+      "Propagation/Interface/src/PathLossCalcParams.cpp",
+      "Prediction/src/PredParams.cpp",
+      "Prediction/src/IndoorPredictionEngine.cpp",
+      "GIS/Data/src/IndoorGeoInfo.cpp",
+      "Propagation/Frame/src/PathLossofIndoorEngine.cpp",
+      "Propagation/PropIndoorPlugins/src/IndoorEFieldCalculator.cpp"
+    ],
+    "acp": [
+      "LiShuttle/src/ServiceHelper.cpp",
+      "LiShuttle/src/main.cpp",
+      "LiShuttle/src/SceneInfoCollection.cpp",
+      "SwanUtility/incl/LiShuttleTypes.h",
+      "GIS/Data/src/GeoSubSys.cpp",
+      "Antenna/src/AntSubSys.cpp",
+      "NetEntity/src/CellLoader.cpp",
+      "NetEntity/src/NESubSys.cpp",
+      "Propagation/Interface/src/PathLossCalcParams.cpp",
+      "Propagation/Frame/src/PathLossCalcEngine.cpp",
+      "Propagation/Plugins/src/LiShuttlePropagationCalculator.cpp",
+      "ACP/Common/src/ACPCommonParams.cpp",
+      "ACP/Frame/src/ACPEngine.cpp",
+      "ACP/Pso/src/ParticleBase.cpp",
+      "ACP/Pso/src/ACPPsoCalculator.cpp"
+    ],
+    "commsensing": [
+      "LiShuttle/src/ServiceHelper.cpp",
+      "LiShuttle/src/main.cpp",
+      "LiShuttle/src/SceneInfoCollection.cpp",
+      "SwanUtility/incl/LiShuttleTypes.h",
+      "GIS/Data/src/GeoSubSys.cpp",
+      "Antenna/src/AntSubSys.cpp",
+      "NetEntity/src/CellLoader.cpp",
+      "NetEntity/src/NESubSys.cpp",
+      "Propagation/Interface/src/PathLossCalcParams.cpp",
+      "Propagation/Frame/src/PathLossCalcEngine.cpp",
+      "Propagation/Plugins/src/LiShuttlePropagationCalculator.cpp",
+      "Prediction/src/PredParams.cpp",
+      "Prediction/src/PredictionEngine.cpp",
+      "Prediction/src/EchoCalculator.cpp",
+      "Prediction/src/ScrCalculator.cpp",
+      "Prediction/src/BsIntfCalculator.cpp"
+    ]
+  },
+  "sha256": {
+    "ACP/Common/src/ACPCommonParams.cpp": [
+      "62341db2fba5a24c54c76ab4bc3f6e5ffd6fb62659222e71d0ae80b116714a8a"
+    ],
+    "ACP/Frame/src/ACPEngine.cpp": [
+      "b1d8b8d10e7a0b3067523cdf968002220b24eb513b4372127394e413897b2456"
+    ],
+    "ACP/Pso/src/ParticleBase.cpp": [
+      "65f8c52083f2b7833ab3d0f79b97bea673d1a7045b69edbf3544ba319fb74837"
+    ],
+    "Antenna/src/AntSubSys.cpp": [
+      "0b7d39278591b33eccfc8986d126e49cd7d1f6f2b0e44e20b9d05cc7a8d4c53c"
+    ],
+    "GIS/Data/src/GeoSubSys.cpp": [
+      "5ee077ff69d883cf685e299af7d7994d6ea8af8ca41e8d8015922cedeaf4aa38",
+      "8d0d17a4ed48dd3316107b7900288755602ddf8c7a3c0b33f3c3f8b4d376da50"
+    ],
+    "LiShuttle/src/SceneInfoCollection.cpp": [
+      "b15353b982bf1a9302d44d3f376bbea067ab807cd6744b36aa397a773681a8bc",
+      "b8b8043d768a0ef43fc6c055362ca3072d64af9ae357bf3a11661ee6782a7bb9"
+    ],
+    "LiShuttle/src/ServiceHelper.cpp": [
+      "ef54b5b6de44b3801c8a5774336d5caa3238dcb5c1ef086365fa45d9bdb2a770",
+      "fa433d8889623ad69826617ac3c6bec5e040cf98ceaa6aff8dfeca0170153b6d"
+    ],
+    "LiShuttle/src/main.cpp": [
+      "7f2567b2c19dc182b1190c2613e9955111a58c15d66e8e8aef4b365c9399a14b",
+      "f78bcaedd955ed14f6291dcecec7b30059ad0780e8990606df4d55356ecc3c09"
+    ],
+    "NetEntity/src/CellLoader.cpp": [
+      "3f983e165c90cb70a93dd5081aeda938fcbeef1518a5313ee623fca827dc30b0"
+    ],
+    "NetEntity/src/IndoorAPLoader.cpp": [
+      "81aba725e876d5a42a6c923194d0723ec0fec081297169ad9068693b99f187cc"
+    ],
+    "NetEntity/src/NESubSys.cpp": [
+      "152e1b87e59ce2c108b927fb8dc531ba80a7b04ae59991c1308e4d57db423435"
+    ],
+    "Prediction/src/BsIntfCalculator.cpp": [
+      "41f45eacb0574dea16104646802ebb04c90983bc5473543518963d89a6809772"
+    ],
+    "Prediction/src/CalcCaseFactory.cpp": [
+      "dc2a9c22577553cde22f0fbd41ecfbb7bde6c5a03b609b2d772f75b2ba91a5fd"
+    ],
+    "Prediction/src/EchoCalculator.cpp": [
+      "485e6f78852c1946b5bc7bf08edddbdfb5fd6f699e601f3065c42824a0d261d7"
+    ],
+    "Prediction/src/IndoorPredictionEngine.cpp": [
+      "89eeef5717af178717967bb6806309a480268eb6e537f8366e69bddaf1e0ee85"
+    ],
+    "Prediction/src/PredParams.cpp": [
+      "1044cd7c727d87b2cce03a173acdd8d845817d71021fc05d8bef1394333a5110"
+    ],
+    "Prediction/src/PredictionEngine.cpp": [
+      "6a6712fa75ee10c4093ac6d7ee7924408fbc59cc2d9a63917f4940b235f28e8d"
+    ],
+    "Prediction/src/RsrpSinrCalculator.cpp": [
+      "e8f996c7101f053950b8ed04426e3e64195bc4b7b3bcc1d987b2db958c44b525"
+    ],
+    "Prediction/src/ScrCalculator.cpp": [
+      "1ec8259a1e445b64ae649c419f55011f1d508dd633e44a58f9c692de8806f388"
+    ],
+    "Propagation/Frame/src/PMCorrectionEngine.cpp": [
+      "e6fb84c3c04065c6164d015d873b26291e6d61d2d6c403729e801a73fc653424"
+    ],
+    "Propagation/Frame/src/PathLossCalcEngine.cpp": [
+      "00e4d3f3b33cf20c16b02cd05f09b803bc42cc76ea58c79003e620bc2e5df73a",
+      "2b49c62255b814ecfe7ec35ef3d683fcf3d84a0b05990d8053b99e3c57a1f844"
+    ],
+    "Propagation/Interface/src/PathLossCalcParams.cpp": [
+      "4aee92d3ad411920f44d7de4c2ed6fe8c65a1a8ddfc5fa9aa6860955d0e08708"
+    ],
+    "Propagation/PMCorrectionPlugins/src/CalibrationParams.cpp": [
+      "51fb5d05236b8593eb8192c93155f1dd5443ea6c7bd56ae6692bcd7f377f8aed"
+    ],
+    "Propagation/PMCorrectionPlugins/src/CorrectCalculator.cpp": [
+      "bfc227b2f323bf7c00301efe43789d95b27fe50ebb142a778481ee51a9a57185"
+    ],
+    "Propagation/Plugins/src/LiShuttlePropagationCalculator.cpp": [
+      "ad9eed740472de0ddce77b51078ebe1e1711e109fb81dbd0295254ee975bef3e",
+      "bcaf10a9d36c4a64e12f0bd81443d80f09d9af6e91704a35489dc937b65d21ca"
+    ],
+    "SwanUtility/incl/LiShuttleTypes.h": [
+      "9fe4f548293453078e556cdbfa1c9b1ed53f09d14bd36daf9cc75981606c72f0",
+      "b563b2d04ab6ecef4bb824690a67f44efa417b92b7be8c5a03ec22fa32e4b94f"
+    ],
+    "ACP/Pso/src/ACPPsoCalculator.cpp": [
+      "9836488cca451732066d2bfda6a84c7da12228b6c76a5b2af528e06a3010b454"
+    ],
+    "GIS/Data/src/IndoorGeoInfo.cpp": [
+      "b6c0bfdd27d82d012a87cfc9f376a61b24513d3bcdcf4ff8c94ff931cf388cf8"
+    ],
+    "Propagation/Frame/src/PathLossofIndoorEngine.cpp": [
+      "3724453965a7b53f5bc61c872bf095e74a2fff5d67af127fbdaa0b51b9679a24"
+    ],
+    "Propagation/PropIndoorPlugins/src/IndoorEFieldCalculator.cpp": [
+      "b1cdc5f298419d3132b3338deafe60f349eb5e278083a1bf28a780aa8e61d4d0"
+    ]
+  }
+}

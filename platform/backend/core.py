@@ -10,6 +10,7 @@ lishuttle 本地平台核心逻辑：识别器 / 文件读写 / 渲染调用 / �
 """
 
 import csv
+from contextvars import ContextVar
 import io
 import json
 import os
@@ -20,9 +21,9 @@ import sys
 import threading
 import hashlib
 import tempfile
-import html
+import math
 import xml.etree.ElementTree as ET
-from engineering import identify_engineering, validate_engineering
+from engineering import identify_engineering, validate_engineering, normalized
 from vs_launch import sync_launch
 
 HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
@@ -35,9 +36,14 @@ SPEC_FILE = os.path.join(HERE, "params_spec.json")
 
 sys.path.insert(0, SCRIPTS)
 from render_schema import read_env_file, build_table  # noqa: E402
-from task_schema import schema_candidates, render_existing, runtime_details
+from task_schema import schema_candidates, render_existing, runtime_details, path_overrides, read_runtime, local_path_values, OUTDOOR_PATHS
+from project_config import ProjectStore, FIELDS, MACHINE_FIELDS, write_snapshot, validate_operation
+from project_detection import detect_project_config
+from project_workflow import describe_build, prepare_build, required_issues, sync_executable, BUILD_FIELDS
+from parameter_catalog import parse_document, build_catalog, replace_scalar
 
-TAG_RE = re.compile(r"<([A-Za-z_][A-Za-z0-9_]*)>([^<]*)</\1>")
+PROJECT_CONTEXT = ContextVar('project_config', default=None)
+
 CSV_ENCODINGS = ("utf-8-sig", "gb18030", "gbk")
 
 
@@ -46,25 +52,21 @@ CSV_ENCODINGS = ("utf-8-sig", "gb18030", "gbk")
 # ----------------------------------------------------------------------
 
 def load_env():
-    return read_env_file(ENV_FILE, "环境文件")
+    return dict(PROJECT_CONTEXT.get() or ProjectStore(ENV_FILE).load(allow_empty=True))
 
 
 def save_env_keys(**kwargs):
-    """把平台的选择写回 env 文件（只改对应 KEY 行，注释原样保留）。"""
-    with open(ENV_FILE, "r", encoding="utf-8") as fh:
-        lines = fh.readlines()
-    for key, value in kwargs.items():
-        pat = re.compile(rf"^(\s*){re.escape(key)}=.*$")
-        replaced = False
-        for i, line in enumerate(lines):
-            if pat.match(line):
-                lines[i] = f"{key}=\"{value}\"\n"
-                replaced = True
-                break
-        if not replaced:
-            lines.append(f"\n{key}=\"{value}\"\n")
-    with open(ENV_FILE, "w", encoding="utf-8") as fh:
-        fh.writelines(lines)
+    """只写当前项目档案；legacy env 仅用作首次导入。"""
+    store = ProjectStore(ENV_FILE)
+    if 'PROJECT_DIR' in kwargs:
+        env = store.select(kwargs.pop('PROJECT_DIR'))
+        if kwargs:
+            env = store.save(kwargs, project=env['PROJECT_DIR'])
+    else:
+        env = store.save(kwargs, project=load_env()['PROJECT_DIR'])
+    if PROJECT_CONTEXT.get() is not None:
+        PROJECT_CONTEXT.set(env)
+    return env
 
 
 # ----------------------------------------------------------------------
@@ -79,6 +81,8 @@ def scan_projects():
         with open(PROJECTS_FILE, encoding='utf-8') as fh:
             found = json.load(fh).get('projects', [])
     current = to_slash(env.get("PROJECT_DIR", ""))
+    if env.get('PROJECT_PROFILE_ID'):
+        found = found + ProjectStore(ENV_FILE).paths()
     unique, seen = [], set()
     for path in ([current] if current else []) + found:
         key = os.path.normcase(os.path.abspath(to_native(path)))
@@ -161,7 +165,7 @@ def _check(paths_labels):
 def scan_cities():
     """地图目录 → 室外城市（heights/index.txt）/ 室内场景（building.das）。"""
     env = load_env()
-    map_root = env["MAP_ROOT"]
+    map_root = env.get("MAP_ROOT", "")
     cities = []
     if not os.path.isdir(map_root):
         return cities, to_slash(map_root)
@@ -278,6 +282,28 @@ def scan_tasks():
                 "dir": to_slash(gongcan), "csvs": [to_slash(full)],
                 "txts": [], "xmls": [], "antenna": "", "model": "", "scene": "",
             })
+    # A container with several independent XML packages is not one task.
+    # Keep each package's CSV, antenna and model resources in its own scope.
+    expanded = []
+    for task in tasks:
+        candidates = schema_candidates(task.get('xmls', []))
+        folders = sorted({os.path.dirname(c['path']) for c in candidates})
+        if len(folders) > 1 and all(folder != task['dir'] for folder in folders):
+            for folder in folders:
+                child = dict(task, name=task['name'] + '/' + to_slash(os.path.relpath(folder, task['dir'])), dir=folder)
+                for key in ('csvs', 'txts', 'xmls'):
+                    child[key] = [p for p in task[key] if os.path.commonpath([p, folder]) == os.path.normpath(folder)]
+                for key, filename in (('antenna', 'antenna.xml'), ('model', 'lishuttlemodel.xml'), ('scene', 'scenesettings.xml')):
+                    matches = [p for p in child['xmls'] if os.path.basename(p).lower() == filename]
+                    child[key] = matches[0] if len(matches) == 1 else ''
+                for key, names in (('antenna_dir', ('antenna', 'antennas')), ('model_dir', ('models',))):
+                    matches = [os.path.join(base, name) for base, dirs, _ in os.walk(folder)
+                               for name in dirs if name.lower() in names]
+                    child[key] = to_slash(matches[0]) if len(matches) == 1 else ''
+                expanded.append(child)
+        else:
+            expanded.append(task)
+    tasks = expanded
     for task in tasks:
         identify_engineering(task)
         task['schema_candidates'] = schema_candidates(task.get('xmls', []))
@@ -326,9 +352,16 @@ def preview_task_schema(body, task, city_kind):
     if not city:
         raise ValueError('请选择地图')
     job = dict(JOB_NAME=body['job_name'], SCHEMA_NAME=body['job_name'] + '.xml',
+               SYNC_RUNTIME_NAME='1',
                FUNC=body.get('func', 'pl'), CITY=city,
                SCHEMA_SOURCE=source, SYNC_ENGINEERING='1' if body.get('sync_engineering') else '0',
                ENGINEERING_FILE=task.get('engineering_file', ''), POLYGON_FILE=polygon)
+    if task.get('scene'):
+        job['SCENE_SETTINGS_FILE'] = task['scene']
+    overrides = path_overrides(body.get('path_overrides', {}))
+    if set(overrides) & {'EngineeringFilePath', 'PolygonFilePath'}:
+        raise ValueError('请通过上方工参及区域文件选择修改路径，不允许另外覆盖')
+    job['PATH_OVERRIDES'] = json.dumps(overrides, ensure_ascii=False)
     if city_kind == 'indoor':
         job.update(TEMPLATE='runtimeschema-indoor.xml.tpl', MAP_PATH=env['MAP_ROOT'].rstrip('/') + '/' + city)
     table = build_table(env, job)
@@ -336,10 +369,16 @@ def preview_task_schema(body, task, city_kind):
     destination = schema_path(job['SCHEMA_NAME'])
     if os.path.normcase(os.path.realpath(source)) == os.path.normcase(os.path.realpath(destination)):
         raise ValueError('源 XML 与目标文件相同，不能覆盖原始配置')
-    task.update(schema_source=source, sync_engineering=bool(body.get('sync_engineering')), polygon_file=polygon)
+    task.update(schema_source=source, sync_engineering=bool(body.get('sync_engineering')), polygon_file=polygon,
+                path_overrides=overrides)
     preview['destination'] = destination
-    preview['token'] = hashlib.sha256((preview['token'] + '\0' + destination).encode('utf-8')).hexdigest()
+    preview['token'] = hashlib.sha256((preview['token'] + '\0' + destination + '\0'
+        + json.dumps(env, sort_keys=True)).encode('utf-8')).hexdigest()
     preview['warnings'] = []
+    for label, path in [('场景配置', preview['scene_settings_file']), ('路测目录', preview['drivetest_dir'])]:
+        native = to_native(path)
+        if path and not os.path.exists(native if os.path.isabs(native) else os.path.join(os.path.dirname(os.path.dirname(destination)), native)):
+            preview['warnings'].append(f'{label}路径在本机不存在：{path}；请在本地路径中修改')
     if not task['sync_engineering'] and preview['engineering_file']:
         engineering_path = preview['engineering_file'].replace('\\', '/')
         if not os.path.isabs(engineering_path):
@@ -353,6 +392,10 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind):
     env = load_env()
     lines = [
         f'JOB_NAME="{job_name}"',
+        'SYNC_RUNTIME_NAME="1"',
+        f'PLATFORM_PROJECT_DIR="{to_slash(env["PROJECT_DIR"])}"',
+        f'PLATFORM_BUILD_SUBDIR="{env["BUILD_SUBDIR"]}"',
+        'PLATFORM_JOB_SCOPE="build-v1"',
         f'SCHEMA_NAME="${{JOB_NAME}}.xml"',
         f'FUNC="{func}"',
         f'TASK_ID="{task_id}"',
@@ -376,13 +419,23 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind):
             f'ENGINEERING_FILE="{csv_file}"',
             f'POLYGON_FILE="{region}"',
         ]
-    job_file = os.path.join(JOBS_DIR, f"web-{job_name}.env")
+    from runtime_cleanup import build_scope
+    directory = os.path.join(JOBS_DIR, env.get('PROJECT_PROFILE_ID') or
+                             hashlib.sha256(os.path.realpath(env['PROJECT_DIR']).encode('utf-8')).hexdigest()[:20],
+                             build_scope(env))
+    os.makedirs(directory, exist_ok=True)
+    job_file = os.path.join(directory, f"web-{job_name}.env")
+    if env.get('PROJECT_PROFILE_ID'):
+        lines += [f'PROJECT_PROFILE_ID="{env["PROJECT_PROFILE_ID"]}"']
     if task.get('schema_source'):
         lines += [f'SCHEMA_SOURCE="{task["schema_source"]}"',
-                  f'SYNC_ENGINEERING="{1 if task.get("sync_engineering") else 0}"']
+                  f'SYNC_ENGINEERING="{1 if task.get("sync_engineering") else 0}"',
+                  'PATH_OVERRIDES="' + json.dumps(task.get('path_overrides', {}), ensure_ascii=False) + '"']
         # 区域由用户明确选择，不再猜测任务包的 index/WrongSites 等 TXT。
         lines = [f'POLYGON_FILE="{task.get("polygon_file", "")}"'
                  if line.startswith('POLYGON_FILE=') else line for line in lines]
+    if task.get('scene'):
+        lines.append(f'SCENE_SETTINGS_FILE="{task["scene"]}"')
     with open(job_file, "w", encoding="utf-8") as fh:
         fh.write("# 由平台生成，可手工编辑后用脚本复跑\n" + "\n".join(lines) + "\n")
     return to_slash(job_file)
@@ -397,6 +450,7 @@ def run_render(job_file):
     """
     child_env = dict(os.environ)
     child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env['LISHUTTLE_CONFIG_SNAPSHOT'] = write_snapshot(load_env())
     proc = subprocess.run(
         [sys.executable, os.path.join(SCRIPTS, "render_schema.py"), job_file, "local-win"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -575,18 +629,19 @@ def schema_path(schema_name):
 
 
 def read_schema(schema_name):
+    path, document = read_schema_document(schema_name)
+    if document is None:
+        return None, {}, path
+    return path, document['values'], document['name']
+
+
+def read_schema_document(schema_name):
     path = schema_path(schema_name)
     if not os.path.isfile(path):
-        return None, {}, path
-    with open(path, "r", encoding="utf-8") as fh:
-        text = fh.read()
-    m = re.search(r'<RuntimeSchema\s+name="([^"]*)"', text)
-    values = {}
-    for tag, val in TAG_RE.findall(text):
-        values.setdefault(tag, html.unescape(val))
-    for tag in re.findall(r'<([A-Za-z_][A-Za-z0-9_]*)\s*/>', text):
-        values.setdefault(tag, '')
-    return to_slash(path), values, (m.group(1) if m else "")
+        return path, None
+    with open(path, 'rb') as fh:
+        document = parse_document(fh.read())
+    return to_slash(path), document
 
 
 def load_spec():
@@ -618,7 +673,8 @@ def scan_functions(project_dir=None):
     header = os.path.join(to_native(proj), "SwanUtility", "incl", "LiShuttleTypes.h")
     names = []
     if os.path.isfile(header):
-        raw = open(header, "rb").read()
+        with open(header, "rb") as stream:
+            raw = stream.read()
         text = ""
         for enc in ("gb18030", "utf-8"):
             try:
@@ -649,25 +705,63 @@ def ordered_functions():
     return out
 
 
+def radius_source(schema_name):
+    """The running XML selects the CSV; its default radius stays a fallback."""
+    path, values, _ = read_schema(schema_name)
+    result = dict(kind='engineering_csv', fallback=values.get('DefaultCalcRadius', ''),
+                  path='', column='', values=[], editable=False)
+    selected = values.get('EngineeringFilePath', '')
+    if not path or not selected:
+        return dict(result, reason='运行配置没有有效工参路径，请先选择并同步工参')
+    if not os.path.isabs(selected):
+        selected = os.path.join(os.path.dirname(os.path.dirname(path)), selected)
+    result['path'] = to_slash(os.path.normpath(selected))
+    grid = read_csv_grid(selected)
+    if 'error' in grid:
+        return dict(result, reason=grid['error'])
+    aliases = {normalized(s) for s in ('CalcRadius', 'Calc Radius (m)', 'Main Calculation Radius (m)',
+                                      'Calculation Radius (m)', '计算半径', '计算半径(m)', '计算半径(米)',
+                                      '小区计算半径', '小区计算半径(m)', '小区计算半径(米)')}
+    for header in (grid['header_en'], grid['header_zh']):
+        for index, name in enumerate(header):
+            if normalized(name) in aliases:
+                radii = list(dict.fromkeys(row[index] if len(row) > index else '' for row in grid['rows'] if any(row)))
+                return dict(result, column=name, values=radii, editable=bool(radii),
+                            reason='' if radii else '工参没有小区数据')
+    return dict(result, reason='工参没有 CalcRadius / 计算半径列，请在工参 CSV 中补充后再修改')
+
+
+def write_cell_radius(schema_name, value):
+    try:
+        radius = float(value)
+    except (ValueError, TypeError):
+        return False, '计算半径必须是有效的正数（米）'
+    if not math.isfinite(radius) or radius <= 0:
+        return False, '计算半径必须是有效的正数（米）'
+    source = radius_source(schema_name)
+    if not source['editable']:
+        return False, source['reason']
+    ok, message = set_csv_column(source['path'], source['column'], value)
+    return ok, f'工参 CSV：{source["path"]}；{message}；XML 默认半径保持不变'
+
+
 def write_schema_param(schema_name, tag, value):
     """把 <tag>old</tag> 定点替换为新值；其余内容逐字节保留。先备份 .bak。"""
+    if tag == 'DefaultCalcRadius':
+        return write_cell_radius(schema_name, value)
     path = schema_path(schema_name)
     if not os.path.isfile(path):
         return False, f"找不到运行单：{path}"
     with open(path, 'rb') as fh:
-        text = fh.read().decode('utf-8')
-    pat = re.compile(rf"(<{re.escape(tag)}>)([^<]*)(</{re.escape(tag)}>)")
-    empty_pat = re.compile(rf'<{re.escape(tag)}\s*/>')
-    if not pat.search(text) and not empty_pat.search(text):
-        return False, f"运行单里没有字段 <{tag}>"
+        raw = fh.read()
+    try:
+        replacement = replace_scalar(raw, tag, value)
+        parse_document(replacement)  # Reject invalid XML characters before writing or backing up.
+    except (ValueError, ET.ParseError) as exc:
+        return False, str(exc)
     shutil.copy2(path, path + ".bak")
-    escaped = html.escape(value, quote=False)
-    if pat.search(text):
-        new_text = pat.sub(lambda m: m.group(1) + escaped + m.group(3), text, count=1)
-    else:
-        new_text = empty_pat.sub(lambda m: f'<{tag}>{escaped}</{tag}>', text, count=1)
     with open(path, 'wb') as fh:
-        fh.write(new_text.encode('utf-8'))
+        fh.write(replacement)
     return True, f"{tag} -> {value}（原文件已备份 .bak）"
 
 
@@ -679,7 +773,8 @@ def read_csv_grid(path):
     if not os.path.isfile(path):
         return {"error": f"找不到文件：{path}"}
     enc = sniff_csv_encoding(path)
-    text = open(path, "r", encoding=enc, newline="").read()
+    with open(path, "r", encoding=enc, newline="") as fh:
+        text = fh.read()
     rows = list(csv.reader(io.StringIO(text)))
     return {
         "path": to_slash(path), "encoding": enc,
@@ -707,7 +802,8 @@ def save_csv_grid(path, header_zh, header_en, rows):
 def set_csv_column(path, column_key, value):
     """整列批量设置：column_key 按中英文列名匹配（大小写不敏感）。先备份。"""
     enc = sniff_csv_encoding(path)
-    text = open(path, "r", encoding=enc, newline="").read()
+    with open(path, "r", encoding=enc, newline="") as fh:
+        text = fh.read()
     newline = "\r\n" if "\r\n" in text else "\n"
     rows = list(csv.reader(io.StringIO(text)))
     if len(rows) < 3:
@@ -726,6 +822,8 @@ def set_csv_column(path, column_key, value):
     shutil.copy2(path, path + ".bak")
     changed = 0
     for r in range(2, len(rows)):
+        if not any(rows[r]):
+            continue
         while len(rows[r]) <= col:
             rows[r].append("")
         if rows[r][col] != value:
@@ -733,7 +831,8 @@ def set_csv_column(path, column_key, value):
             changed += 1
     buf = io.StringIO()
     csv.writer(buf, lineterminator=newline).writerows(rows)
-    open(path, "w", encoding=enc, newline="").write(buf.getvalue())
+    with open(path, "w", encoding=enc, newline="") as fh:
+        fh.write(buf.getvalue())
     return True, f"列[{column_key}] -> {value}，影响{changed}行（已备份）"
 
 
@@ -747,13 +846,13 @@ class Runner:
         self.lock = threading.Lock()
         self.counter = 0
 
-    def start(self, cmd, cwd, label):
+    def start(self, cmd, cwd, label, env=None):
         with self.lock:
             self.counter += 1
             sid = self.counter
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="gbk", errors="replace", shell=False)
+            text=True, encoding="gbk", errors="replace", shell=False, env=env)
         self.sessions[sid] = {"proc": proc, "lines": [], "status": "running",
                               "label": label, "exit": None}
 
@@ -789,14 +888,18 @@ class Runner:
 RUNNER = Runner()
 
 
-def sync_vs_launch(project_env, schema_name, func, task_id, city_kind):
+def sync_vs_launch(project_env, schema_name, func, task_id, city_kind, previous_schema=''):
     return sync_launch(project_env, schema_name, func, task_id, city_kind,
-                       scan_functions(project_env['PROJECT_DIR']))
+                       scan_functions(project_env['PROJECT_DIR']), previous_schema=previous_schema)
 
 
 def start_lishuttle(schema_name, func, task_id):
     """直接起 lishuttle.exe（工作目录=exe 目录），不经 bat。"""
     env = load_env()
+    try:
+        validate_operation(env, 'run')
+    except ValueError as exc:
+        return None, str(exc)
     exe = os.path.join(env["PROJECT_DIR"].replace("/", os.sep),
                        *env["BUILD_SUBDIR"].split("/"), "Bin", env["EXE_NAME"])
     if not os.path.isfile(exe):
@@ -809,9 +912,14 @@ def start_lishuttle(schema_name, func, task_id):
 def start_toolkit(step):
     """doctor/build/stage：批处理封装。"""
     env = load_env()
+    try:
+        validate_operation(env, step)
+    except ValueError as exc:
+        return None, str(exc)
     bat = os.path.join(SCRIPTS, {"doctor": "doctor_local.bat", "build": "build_local.bat",
                                  "stage": "stage_local.bat"}[step])
-    sid = RUNNER.start(["cmd", "/c", bat], ROOT, step)
+    child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env))
+    sid = RUNNER.start(["cmd", "/c", bat], ROOT, step, env=child_env)
     return sid, to_slash(bat)
 
 

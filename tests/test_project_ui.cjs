@@ -3,7 +3,7 @@ const vm = require('node:vm');
 const assert = require('node:assert/strict');
 const nodes = new Map();
 const element = id => {
-  if (!nodes.has(id)) nodes.set(id, {value:'', innerHTML:'', textContent:'', style:{}, classList:{add(){},remove(){}}});
+  if (!nodes.has(id)) nodes.set(id, {value:'', innerHTML:'', textContent:'', style:{}, setAttribute(){}, querySelectorAll(){return [];}, classList:{add(){},remove(){}}});
   return nodes.get(id);
 };
 const context = vm.createContext({document:{getElementById:element}, setTimeout(){}});

@@ -62,7 +62,8 @@ class TaskSchemaTests(unittest.TestCase):
     def test_reuse_changes_only_requested_paths_byte_for_byte(self):
         output = self.render().read_bytes().decode('utf-8')
         expected = self.text.replace('>old-map<', '>new &amp; map<').replace(
-            '>old-output<', '>' + self.env['OUT_ROOT'] + '<')
+            '>old-output<', '>' + self.env['OUT_ROOT'] + '<').replace(
+            '>old-scene.xml<', '>' + (self.root / 'build/Bin/runtimelibrary/scenesettings.xml').as_posix() + '<')
         self.assertEqual(output, expected)
         self.assertEqual(self.source.read_bytes().decode('utf-8'), self.text)
 
@@ -70,6 +71,79 @@ class TaskSchemaTests(unittest.TestCase):
         self.job['SYNC_ENGINEERING'] = '1'
         self.assertIn('<EngineeringFilePath>selected.csv</EngineeringFilePath>',
                       self.render().read_text(encoding='utf-8-sig'))
+
+    def test_web_task_name_updates_generated_runtime_and_output_only(self):
+        self.job['SYNC_RUNTIME_NAME'] = '1'
+        output = self.render()
+        text = output.read_text(encoding='utf-8-sig')
+        self.assertIn('<RuntimeSchema name="new-file">', text)
+        self.assertEqual(self.source.read_bytes().decode('utf-8'), self.text)
+        manifest = json.loads(Path(str(output) + '.manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['run']['out_dir'], self.env['OUT_ROOT'] + '/new-file')
+
+    def test_web_rename_handles_quoted_angle_brackets_and_name_like_attribute_values(self):
+        self.source.write_text(self.text.replace('<RuntimeSchema name="original-name">',
+            '<RuntimeSchema description="a > b name=\'keep\'" name = \'original-name\'>'), encoding='utf-8')
+        self.job['SYNC_RUNTIME_NAME'] = '1'
+        result = render_existing(renderer.build_table(self.env, self.job))
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(result['text'].lstrip('\ufeff'))
+        self.assertEqual(root.get('name'), 'new-file')
+        self.assertEqual(next(iter(root.attrib)), 'name', '引擎按首属性读取任务名')
+        self.assertEqual(root.get('description'), "a > b name='keep'")
+
+    def test_web_preview_uses_job_name_and_invalidates_token_when_renamed(self):
+        body = self.preview_body()
+        with patch.object(core, 'load_env', return_value=self.env):
+            first = Api.preview_render(body)
+            second = Api.preview_render(dict(body, job_name='renamed'))
+        self.assertEqual(first['runtime_name'], body['job_name'])
+        self.assertEqual(second['runtime_name'], 'renamed')
+        self.assertTrue(any(c['tag'] == 'RuntimeSchema@name' for c in second['changes']))
+        self.assertNotEqual(first['token'], second['token'])
+
+    def test_local_path_overrides_preserve_parameters_and_original(self):
+        self.job['PATH_OVERRIDES'] = json.dumps({'SceneSettingsPath': 'D:/local/scene & settings.xml'})
+        preview = render_existing(renderer.build_table(self.env, self.job))
+        self.assertEqual(preview['scene_settings_file'], 'D:/local/scene & settings.xml')
+        self.assertIn('scene &amp; settings.xml', preview['text'])
+        self.assertIn('<MaxCalcHeight>123</MaxCalcHeight>', preview['text'])
+        self.assertEqual(self.source.read_bytes().decode('utf-8'), self.text)
+
+    def test_non_path_override_is_rejected(self):
+        self.job['PATH_OVERRIDES'] = json.dumps({'MaxCalcHeight': '1'})
+        with self.assertRaisesRegex(ValueError, '路径'):
+            render_existing(renderer.build_table(self.env, self.job))
+
+    def test_changing_local_path_invalidates_preview(self):
+        body = self.preview_body()
+        with patch.object(core, 'load_env', return_value=self.env):
+            first = Api.preview_render(body)
+            second = Api.preview_render(dict(body, path_overrides={'SceneSettingsPath': 'new.xml'}))
+        self.assertNotEqual(first['token'], second['token'])
+        self.assertEqual(second['scene_settings_file'], 'new.xml')
+
+    def test_path_override_is_saved_in_generated_job(self):
+        task = dict(txts=[], engineering_file='', schema_source=self.source.as_posix(),
+                    sync_engineering=False, polygon_file='',
+                    path_overrides={'SceneSettingsPath': 'D:/new/scene.xml'})
+        with patch.object(core, 'load_env', return_value=self.env), patch.object(core, 'JOBS_DIR', str(self.root)):
+            job = core.build_job_env('local', 'plindoor', '1', task, 'indoor', 'indoor')
+        self.assertEqual(json.loads(renderer.read_env_file(job, 'job')['PATH_OVERRIDES']), task['path_overrides'])
+
+    def test_input_checks_and_manifest_use_overridden_map(self):
+        exe = self.root / 'build/Bin'
+        exe.mkdir(parents=True)
+        (exe / 'old.csv').write_text('input')
+        localmap = self.root / 'special-indoor-map'
+        localmap.mkdir()
+        (localmap / 'building.das').write_text('map')
+        self.job['PATH_OVERRIDES'] = json.dumps({'MapPath': localmap.as_posix()})
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = renderer.do_render(self.env, self.job, 'test', 'job.env', 'env.env')
+        self.assertEqual(rc, 0)
+        manifest = json.loads((exe / 'runtimelibrary/new-file.xml.manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['resolved_paths']['map_path'], localmap.as_posix())
 
     def test_missing_required_tag_fails_without_writing_destination(self):
         self.source.write_bytes(self.text.replace('<MapPath>old-map</MapPath>', '').encode('utf-8'))
@@ -105,7 +179,7 @@ class TaskSchemaTests(unittest.TestCase):
         table = renderer.build_table(self.env, self.job)
         result = render_existing(table)
         import re
-        allowed = set(OUTDOOR_PATHS) | {'ClutterMatchPath', 'PolygonFilePath', 'PathlossDirectory'}
+        allowed = set(OUTDOOR_PATHS) | {'ClutterMatchPath', 'PolygonFilePath', 'PathlossDirectory', 'SceneSettingsPath'}
         def mask(text):
             parts = re.split(r'(<!--.*?-->)', text, flags=re.S)
             for i in range(0, len(parts), 2):
@@ -114,6 +188,17 @@ class TaskSchemaTests(unittest.TestCase):
             return ''.join(parts)
         self.assertEqual(mask(self.text), mask(result['text']))
         self.assertEqual({c['tag'] for c in result['changes']}, allowed)
+
+    def test_unresolved_special_map_index_requires_explicit_local_path(self):
+        self.test_outdoor_only_allowed_paths_change()
+        self.source.write_text(self.text.replace('old/buildvector/index.txt',
+            'X:/old-local-map/buildvector/special-index.txt'), encoding='utf-8')
+        table = renderer.build_table(self.env, self.job)
+        with self.assertRaisesRegex(ValueError, '自定义.*索引|自定义.*路径'):
+            render_existing(table)
+        table['PATH_OVERRIDES'] = json.dumps({'BulidVectorIndexPath': 'D:/local/special-index.txt'})
+        result = render_existing(table)
+        self.assertIn('D:/local/special-index.txt', result['text'])
 
     def preview_body(self):
         with patch.object(core, 'load_env', return_value=self.env):
@@ -150,8 +235,8 @@ class TaskSchemaTests(unittest.TestCase):
             result = Api.render(dict(body, preview_token=preview['token']))
             self.assertNotIn('error', result)
             self.assertTrue(result['schema_ok'])
-            self.assertEqual(result['out_dir'], self.env['OUT_ROOT'] + '/original-name')
-            saved_job = renderer.read_env_file(str(self.root / 'web-new-file.env'), 'job')
+            self.assertEqual(result['out_dir'], self.env['OUT_ROOT'] + '/new-file')
+            saved_job = renderer.read_env_file(result['job_file'], 'job')
             self.assertEqual(saved_job['SCHEMA_SOURCE'], self.source.as_posix())
             self.assertEqual(saved_job['SYNC_ENGINEERING'], '0')
             assemble.assert_not_called()

@@ -12,9 +12,11 @@
     <span class="logo">lishuttle <span>本地运行平台</span></span>
     <label class="project-picker" for="project">当前项目 <select id="project"></select></label>
     <button id="btn-project-add" aria-expanded="false" aria-controls="project-add-form">添加项目</button>
+    <button id="btn-project-config" aria-expanded="false" aria-controls="project-config-form">项目配置</button>
+    <button id="btn-machine-config" aria-expanded="false" aria-controls="machine-config-form">本机工具链（全局）</button>
     <div class="header-tools" aria-label="项目工具">
       <button id="btn-doctor">体检</button>
-      <button id="btn-build">编译</button>
+      <button id="btn-build">编译所选配置</button>
     </div>
   </div>
   <form id="project-add-form" class="project-add-form hidden">
@@ -24,6 +26,31 @@
     <span class="field-help">按目录内容识别，不限制项目名称。添加后保存在本机列表。</span>
   </form>
   <span id="env-note" class="muted"></span>
+  <section id="build-panel" class="setup-card build-panel" aria-label="项目编译">
+    <label for="build-mode">构建模式 <select id="build-mode"></select></label>
+    <label for="build-preset">项目预设 <select id="build-preset"></select></label>
+    <p id="build-summary" class="field-help" role="status"></p>
+    <p class="field-help">选择 Debug 或 Release 后点击上方「编译所选配置」。平台调用本机工具链生成构建目录，并自动识别程序文件名。</p>
+  </section>
+  <section class="project-guide" aria-label="项目操作指南">
+    <strong>新项目操作指南</strong>
+    <ol id="workflow-steps"></ol>
+    <p id="setup-validation" role="alert" aria-live="assertive"></p>
+  </section>
+  <form id="machine-config-form" class="hidden">
+    <p class="field-help">VS、CMake、Ninja 和 MSVC 环境脚本属于本机全局配置，所有项目和本地脚本共用。首次打开会自动搜索并保存空缺项；换项目无需重复配置。重新检测只补空缺，已有值可手动修改后保存。</p>
+    <div id="machine-config-fields" class="profile-fields"></div>
+    <button type="submit" class="primary">保存本机工具链</button>
+    <button type="button" id="btn-machine-detect">自动检测并保存本机工具链</button>
+    <span id="machine-config-note" role="status"></span>
+  </form>
+  <form id="project-config-form" class="hidden">
+    <p class="field-help">打开项目时自动检测本项目的预设和资源目录，确定的值直接填入，多个候选可下拉选择或手动填写。每项下方显示来源；保存后仅对当前项目生效。本机工具链请在上方全局入口配置。</p>
+    <div id="project-config-fields" class="profile-fields"></div>
+    <button type="submit" class="primary">保存当前项目配置</button>
+    <button type="button" id="btn-project-detect">重新检测</button>
+    <span id="project-config-note" role="status"></span>
+  </form>
 </header>
 
 <div id="hint" class="hint">把鼠标放到参数上，这里显示说明</div>
@@ -35,14 +62,14 @@
       <label class="field-label" for="map-root">地图工作目录</label>
       <input id="map-root" class="path">
       <button id="btn-rescan-map" class="mini">重新扫描</button>
-      <div id="city-list"></div>
+      <div id="city-list" tabindex="-1" aria-label="地图场景选择"></div>
     </div>
     <div class="panel">
       <div class="panel-title">任务文件</div>
       <label class="field-label" for="gongcan-root">工参任务目录</label>
       <input id="gongcan-root" class="path">
       <button id="btn-rescan-task" class="mini">重新扫描</button>
-      <div id="task-list"></div>
+      <div id="task-list" tabindex="-1" aria-label="工参任务选择"></div>
     </div>
   </aside>
 
@@ -63,6 +90,7 @@
           <div class="field">
             <label for="job-name">任务名</label>
             <input id="job-name" class="txt" placeholder="如 pl-guangzhou">
+            <span id="task-name-note" class="field-help" role="status">装配后同步运行 XML 名称、输出子目录和 Visual Studio 启动项；修改后需重新装配。</span>
           </div>
           <div class="field task-id-field">
             <label for="task-id">任务 ID <span class="muted">-t</span></label>
@@ -90,7 +118,17 @@
         <div id="existing-schema-options" class="field hidden">
           <label for="schema-polygon">区域文件</label>
           <select id="schema-polygon" class="path"></select>
-          <span class="field-help">仅替换地图、区域和路损目录；原 name、其他参数及注释保持不变。</span>
+          <span class="field-help">选择对应地图后生成本地路径；生成副本的 name 与任务名一致，原文件、计算参数及注释保留。特殊索引、场景和路测等路径可在下方明确修改，预览后确认。</span>
+          <details>
+            <summary>修改本地资源路径</summary>
+            <p class="field-help">根据当前项目、地图和工参任务自动填入本机路径，可手动调整。区域文件统一使用上方选择。留空恢复自动值；不会修改源 XML。</p>
+            <p id="local-path-status" class="field-help" role="status" aria-live="polite">选择地图与任务运行配置后识别本地路径。</p>
+            <div id="local-path-fields"></div>
+          </details>
+        </div>
+        <div class="field">
+          <button id="btn-save-task-binding" type="button">保存当前工参与地图对应关系</button>
+          <span id="task-binding-note" class="field-help" role="status">选择工参及地图后可保存；对应关系仅在当前项目生效。</span>
         </div>
       </section>
 
@@ -103,6 +141,16 @@
           </div>
           <button id="btn-render" class="primary">装配并渲染</button>
         </div>
+        <details id="cleanup-options">
+          <summary>清理平台历史配置</summary>
+          <p class="field-help">检查当前项目所选构建目录。保留当前运行单；未装配时保留最近一次生成的运行单。仅归档可确认由平台生成的历史 XML、备份、渲染记录、任务 env 和对应平台启动项，原始数据及仿真结果保留。归档位于工作流 docs/runtime-config-archives，可按 restore.json 恢复。</p>
+          <button id="btn-cleanup-preview" type="button">预览可清理配置</button>
+          <div id="cleanup-preview" class="hidden">
+            <pre id="cleanup-preview-text" class="console"></pre>
+            <button id="btn-cleanup-apply" type="button" disabled>归档并清理以上配置</button>
+          </div>
+          <p id="cleanup-note" class="field-help" role="status"></p>
+        </details>
         <div id="schema-preview" class="hidden">
           <pre id="schema-preview-text" class="console"></pre>
           <button id="btn-apply-schema" class="primary">确认装配此配置</button>
@@ -113,7 +161,15 @@
       <section class="parameters-section" aria-labelledby="parameters-heading">
         <div class="section-heading">
           <h2 id="parameters-heading">配置参数</h2>
-          <span class="field-help">最大计算高度、层高等参数在此调整</span>
+          <span class="field-help">显示当前运行 XML 的实际字段；按功能筛选只调整展示，不改变参数值</span>
+        </div>
+        <div id="params-toolbar" class="params-toolbar hidden">
+          <label for="params-scope">显示范围 <select id="params-scope" class="txt"><option value="current">本功能可配置 + 未分类</option><option value="active">本功能当前生效参数</option><option value="all">全部已识别参数</option></select></label>
+          <label for="params-search">搜索参数 <input id="params-search" class="txt" type="search" placeholder="参数名、中文说明或当前值"></label>
+          <p id="params-summary" role="status" aria-live="polite"></p>
+          <p id="params-source" class="field-help"></p>
+          <div id="params-profile" class="field-help"></div>
+          <p class="field-help">已调研功能按源码调用链展示，包含其路损和数据依赖；“当前生效”按已确认开关过滤，实际运行还取决于数据与引擎分支。未分类及其他功能字段仍保留在全部视图。修改写入运行 XML 副本并备份；小区计算半径仍优先写入工参 CSV。</p>
         </div>
         <div id="params-area"></div>
       </section>

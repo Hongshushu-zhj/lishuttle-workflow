@@ -9,7 +9,7 @@
 首次 clone 后按以下顺序操作：
 
 1. 安装 Python 和 Windows C++ 工具链，取得独立的 LiShuttle 引擎项目、完整 ThirdPart 资源及业务数据（第 1～2 节）。
-2. 从示例创建 `env/local-win.env`，逐项改成本机路径、构建预设和数据目录（第 3 节）。**必须先配置再启动网页；“添加项目”不能代替环境初始化。**
+2. 双击 `启动平台.bat`：首次打开会自动查找并保存本机工具链，供所有引擎项目复用；添加引擎项目后，在“项目配置”确认其预设与数据路径（第 3 节）。也可先运行自动配置命令，无需手工找工具位置。
 3. 执行体检，缺少 exe 时编译（第 4 节）。
 4. 启动平台，选择项目、地图、任务和功能，装配、调整参数，再运行并检查结果（第 5～6 节）。网页装配会一并补齐基础运行资源。
 
@@ -53,43 +53,105 @@ lishuttle-workflow/
 └─ templates/
 ```
 
-## 3. 创建本机配置（可以让 AI 协助）
+## 3. 快速配置本机与项目
 
-首次执行：
+### 推荐：自动搜索工具，一台电脑配置一次
+
+首次 clone 后，安装第 1 节的工具，再双击 `启动平台.bat`。网页首次加载时会查找本机工具，**将已验证且尚未配置的工具地址直接保存**；以后添加或切换引擎项目都复用，不必再填一遍。
+
+也可以先在仓库根目录运行，无需先登记引擎项目：
 
 ```powershell
-Copy-Item .\env\local-win.env.example .\env\local-win.env
-notepad .\env\local-win.env
+python .\scripts\project_config.py --setup-machine
+python .\scripts\project_config.py --show-machine
 ```
 
-已有 `local-win.env` 时直接打开修改，不要重新复制覆盖。配置保存为 UTF-8，每行使用 `KEY="VALUE"`，路径使用正斜杠 `/`，带空格的路径也要保留双引号。
+第一条搜索并保存空缺项，第二条显示当前全局值。工具查找顺序是 VS Installer 的 `vswhere.exe` 注册信息、常见 VS 安装目录文件检查、系统 `PATH` 中的 CMake/Ninja；VS 安装在自定义盘符时，优先通过注册信息定位。只接纳实际存在的目录/程序，优先组合同一套 VS 内的 CMake、Ninja 和 `vcvars64.bat`，不会执行引擎 CMake 文件，也不会自动安装软件或修改系统 PATH。
+
+| 配置范围 | 配置项 | 使用方式 |
+| --- | --- | --- |
+| 本机全局 | `VS_ROOT`、`CMAKE`、`NINJA`、`VCVARS` | 自动搜索后直接保存；所有引擎项目和本地脚本共用 |
+| 每个引擎项目 | 构建模式/预设、`CONFIG_SRC`、`DLL_SRC` | 选择 Debug/Release 后自动派生构建/安装目录、程序名；确认资源后保存 |
+| 每个项目的数据 | `MAP_ROOT`、`GONGCAN_ROOT`、`OUT_ROOT`、`DT_ROOT` | 按真实业务数据选择，可显式指向共享目录 |
+
+这里的“全局”指**本机这份平台仓库管理的所有引擎项目**，不是 Windows 系统设置，也不跨其他 clone 自动同步。配置保存在被 Git 忽略的 `env/project-profiles.json` 中：全局工具在顶层 `machine.values`，项目配置在 `profiles.<项目ID>.values`。换电脑请重新 clone 并自动检测，不要复制另一台电脑的本机配置或快照。
+
+顶部“本机工具链（全局）”可查看当前值和下拉候选。点击“自动检测并保存本机工具链”会重新搜索并补齐空缺；已经保存的自定义值保持不变。需要改用另一套工具时，选择候选或切换“手动填写”，然后点击“保存本机工具链”，立即对所有项目生效。改变全局配置会让旧页面修订失效，其他已打开页面需要刷新；已经启动的命令继续使用启动时的配置快照。
+
+**没有找到工具时：** 检查 Python 是否已加入 PATH；VS Installer 中确认安装了 C++ 桌面开发、MSVC x64/x86、Windows SDK、C++ CMake 工具。若某项仍为空，安装后重新检测，或指定真实文件位置：
+
+```powershell
+# 示例路径必须替换为本机实际安装位置；路径含空格时保留整段引号。
+python .\scripts\project_config.py --set-machine "VS_ROOT=C:/Program Files/Microsoft Visual Studio/2022/Community" --set-machine "CMAKE=C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin/cmake.exe" --set-machine "NINJA=C:/Program Files/Microsoft Visual Studio/2022/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe" --set-machine "VCVARS=C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxiliary/Build/vcvars64.bat"
+```
+
+手动保存只做配置文本校验，请用 `Test-Path` 或“体检”确认文件存在。VS 卸载/迁移或误拷贝了旧电脑配置时，可在网页改正；也可以先清空旧工具地址，再自动查找，避免“已有值保留”阻止更新：
+
+```powershell
+python .\scripts\project_config.py --set-machine "VS_ROOT=" --set-machine "CMAKE=" --set-machine "NINJA=" --set-machine "VCVARS=" --setup-machine
+```
+
+工具配置正确后添加引擎项目。自动检测无法提供尚未取得的地图、任务包、ThirdPart 或源码，业务资源仍需自行准备。
+
+### 本地项目档案与切换
+
+网页、渲染器和本地 Windows 脚本共同读取 `env/project-profiles.json`，运行时合并本机全局工具链和所选项目配置。每个项目独立保存构建预设、构建/安装目录、exe 名、配置/DLL 源目录及地图、工参、路测、输出根目录；切换 A→B→A 会恢复各自项目配置，并复用同一份本机工具链。没有旧 env 时也可以在网页添加首个项目。
+
+打开或切换项目时，网页会自动检测并填充尚未配置的项目字段：读取本项目的 `CMakePresets.json` / `CMakeUserPresets.json`（含继承和 include），优先选用已有可执行文件的 Windows x64 Ninja 预设；从项目内容识别程序名、配置源和 DLL 目录。地图、工参、输出和路测目录只列出实际存在的约定目录，包括明确标注的同级共享候选；多个业务目录需下拉选择，未找到则说明原因并允许手动填写，不会编造路径。
+
+“项目配置”直接显示检测值和每项来源，候选可下拉选择或切换手动填写。通过上方 Debug/Release 和项目预设选择构建配置，自动派生构建/安装目录、程序名和匹配的 DLL 目录，不再手填这些构建字段。自定义 DLL 目录仍保留。已保存的项目配置和本次手动输入不会被重新检测覆盖，也不会继承其他项目档案。**项目检测结果是草稿，点击“保存当前项目配置”后生效；本机工具链自动检测则直接保存。**
+
+升级已有配置时：旧 `env/local-win.env` 首次导入前备份为 `local-win.env.profiles.bak`；旧版项目工具链首次升级前备份整个档案为 `project-profiles.json.machine.bak`。迁移使用当前活动项目的工具配置作为全局起点，不拼接其他项目的工具值，其余项目原来的工具值可从备份查看。旧 env、原有备份及任务数据保持不变。**导入后请用网页或上述命令修改；继续编辑旧 env 不会覆盖档案。** 本机配置、备份及快照不提交 Git。配置源与 DLL 源可以是相对项目路径，也可以是本机绝对路径；构建/安装目录沿用相对项目的目录约定。
+
+仅在需要兼容旧入口时，才从 `env/local-win.env.example` 复制 `env/local-win.env` 作为首次导入来源；新安装推荐自动配置，无需复制模板。首次导入前若 env 已存在，不要重新复制覆盖；文件使用 UTF-8、`KEY="VALUE"` 和正斜杠路径。
+
+一次网页请求固定配置；渲染和工具子进程使用 `env/snapshots/` 中按内容摘要保存的快照。本地 `doctor/build/stage/run` 入口通过 `scripts/load_local_env.bat` 在开始时固定快照，后续网页切项目不会改变已启动命令的配置。旧页面修订号不符会被拒绝，需刷新。独立的 `server` target 未纳入此次适配。
+
+直接使用 Python 时可明确选择已登记项目，不改变网页当前选择：
+
+```powershell
+python scripts/render_schema.py --print-env local-win --project "D:/LiShuttle/项目A"
+python scripts/render_schema.py jobs/<项目ID>/web-demo.env local-win --project "D:/LiShuttle/项目A"
+```
+
+网页生成的任务单带项目标识，不能在另一个项目下直接复跑。本地批处理会明确拒绝包含 `!` 的配置/路径，避免 Windows 延迟展开吞字符；该情况下请调整路径，或使用 Python 渲染入口并直接启动引擎。中文和空格路径有独立的 Windows 批处理回归覆盖。
 
 ### 交给 AI 的提示词
 
-把本仓库交给能读取本机文件并执行终端命令的 AI 编程助手，告诉它引擎项目、地图和任务包的位置，再复制以下提示词：
+自动搜索通常比让 AI 猜工具位置更快。若仍有缺项，把本仓库交给能读取本机文件并执行终端命令的 AI 编程助手，提供引擎项目、地图和任务包位置，再复制以下提示词：
 
 ```text
-请根据 README 和 env/local-win.env.example 配置 Windows 本地环境。
+请根据 README 第 3 节配置这台 Windows 电脑上的 lishuttle-workflow。
 LiShuttle C++ 项目、地图和任务包的位置由我提供；缺少位置时先问我。
 
 1. 检查 python --version，确认 python 指向 Python 3。
-2. 如果 env/local-win.env 不存在则从示例复制；存在时保留并检查已有配置。
-3. 读取我提供的项目 CMakePresets.json 及引用的预设文件，确认 Windows
-   预设名、生成器、binaryDir、installDir，填写 PRESET、BUILD_SUBDIR、INSTALL_SUBDIR。
+2. 先运行 python scripts/project_config.py --setup-machine，再运行
+   python scripts/project_config.py --show-machine。优先用程序自动搜索，
+   不要先猜 VS/CMake/Ninja 路径，不要覆盖现有配置。
+3. 若工具仍为空，检查 VS Installer 注册信息、安装组件和 PATH；找到后用
+   Test-Path 验证，再通过 --set-machine "KEY=真实路径" 保存。
+   VS_ROOT、CMAKE、NINJA、VCVARS 是全局项，只配置一次，不写入每个项目。
+   不安装或下载软件；未安装时列出缺少的组件。
+4. 读取我提供的项目 CMakePresets.json 及引用的预设文件，确认 Windows
+   预设名、生成器、binaryDir、installDir，通过网页选择 Debug/Release 及真实预设，
+   让平台派生 PRESET、BUILD_SUBDIR、INSTALL_SUBDIR，不要求手填不存在的构建目录。
    当前脚本在 PROJECT_DIR/BUILD_SUBDIR/Bin/EXE_NAME 找 exe，
    BUILD_SUBDIR 必须是项目内相对目录；预设布局不兼容时说明原因。
-4. 查找实际 VS2022/Build Tools 安装位置，验证 cmake.exe、ninja.exe、
-   vcvars64.bat 文件存在，填写 VS_ROOT、CMAKE、NINJA、VCVARS，不要猜路径。
 5. 检查 CONFIG_SRC、DLL_SRC 和第三方库，确保 DLL 与构建配置匹配。
-6. 根据真实数据位置填写 MAP_ROOT、GONGCAN_ROOT、CASE_ROOT、OUT_ROOT、DT_ROOT。
-   创建必要的输出/工作目录，不伪造地图、工参、第三方库或引擎源码。
-7. 保留全部配置键，使用 UTF-8、KEY="VALUE" 和正斜杠路径保存。
+6. 根据真实数据位置填写 MAP_ROOT、GONGCAN_ROOT、OUT_ROOT；DT_ROOT 仅路测相关功能需要。
+   只有用户确认的输出/工作目录可以创建，不伪造地图、工参或第三方库。
+7. 通过网页“添加项目”“项目配置”保存项目字段。若必须直接修改配置文件，
+   先备份 env/project-profiles.json，使用 UTF-8 JSON，保留所有未知字段、
+   项目ID和任务绑定；全局字段仅在 machine.values，项目字段在
+   profiles.<项目ID>.values。不要改旧 local-win.env 期待覆盖已导入档案。
+   修改全局字段时递增 machine.revision 及所有 profiles 的 revision；
+   修改某项目字段时递增该项目 revision，修改后刷新网页。
 8. 执行 python scripts/render_schema.py --print-env local-win 和
    scripts/doctor_local.bat，阅读完整输出。体检退出码 0 不代表所有检查通过。
 9. 报告检查结果、仍缺少的资源及下一步编译和装配操作。
 
 只配置本地模式，不设置 SSH 或服务器，不修改引擎源码或原始任务数据。
-不要覆盖已有配置、清空构建目录或执行实际计算。
+不要覆盖已有自定义值、清空构建目录、修改引擎源码或执行实际计算。
 ```
 
 只能聊天的 AI 无法自动发现本机路径，需要向它提供模板、项目预设和实际目录，再自行核对生成的配置。
@@ -100,22 +162,34 @@ LiShuttle C++ 项目、地图和任务包的位置由我提供；缺少位置时
 | --- | --- |
 | `PROJECT_DIR` | 引擎项目的绝对路径，不是平台目录；该目录及其父目录必须存在 |
 | `PRESET` | 真实的 Windows CMake 预设名，示例为 `x64-release` |
-| `BUILD_SUBDIR` | 构建目录，相对于引擎项目根目录，必须对应预设的 `binaryDir` |
-| `INSTALL_SUBDIR` | 安装目录，相对于引擎项目根目录；默认从构建树运行，不需要安装 |
-| `EXE_NAME` | 通常为 `lishuttle.exe`，应在构建目录的 `Bin/` 下 |
-| `VS_ROOT` | VS2022/Build Tools 实际安装根目录 |
-| `CMAKE`、`NINJA`、`VCVARS` | 工具文件的绝对路径，不是文件夹路径 |
+| `BUILD_SUBDIR` | 自动取所选预设的 `binaryDir`，相对于引擎项目；首次编译由 CMake 创建，网页无需填写 |
+| `INSTALL_SUBDIR` | 自动读取预设的安装目录；可选，默认从构建树运行，不需要安装 |
+| `EXE_NAME` | 内部运行元数据，自动读取 CMake 主程序目标或 `Bin/` 下的真实产物，网页无需填写 |
+| `VS_ROOT` | 本机全局：VS2022/Build Tools 实际安装根目录 |
+| `CMAKE`、`NINJA`、`VCVARS` | 本机全局：工具文件的绝对路径，不是文件夹路径 |
 | `CONFIG_SRC` | 相对项目目录的配置源，通常为 `ThirdPart/Config` |
 | `DLL_SRC` | 相对项目目录的 DLL 源，通常为 `ThirdPart/Dll/Release`；需匹配构建配置 |
 | `MAP_ROOT` | 地图根目录，每个子文件夹是一座城市或室内场景 |
-| `GONGCAN_ROOT` | Web 平台任务根目录，每个子文件夹是一份任务包 |
-| `CASE_ROOT` | 命令行示例引用的工参/区域文件目录，与 Web 任务目录作用不同 |
+| `GONGCAN_ROOT` | 本地工参任务根目录，每个子文件夹是一份任务包；CLI 任务引用包内的具体输入文件 |
 | `OUT_ROOT` | 可写的结果根目录，通常按任务名存放计算产物 |
-| `DT_ROOT` | 路测、校正等功能的数据目录 |
+| `DT_ROOT` | 可选：仅路测、校正等相关功能需要的数据目录 |
 
-平台不再扫描项目的父目录。顶部点击“添加项目”，输入项目根目录，通过验证后加入本机列表并切换。目录名称不限，以 `CMakeLists.txt`、`LiShuttle/`、`SwanUtility/incl/LiShuttleTypes.h` 组合识别；缺少构建预设或完整运行样例时给出提示。本机列表保存于 `env/projects.json`（不提交 Git），升级前已配置的当前项目会保留。切换时刷新功能、地图和任务列表，并清空旧项目的参数与运行状态；构建预设、工具链和数据根仍使用本机环境配置。
+平台不自动登记父目录中的其他引擎项目。顶部点击“添加项目”，输入项目根目录，通过验证后加入本机列表并切换。目录名称不限，以 `CMakeLists.txt`、`LiShuttle/`、`SwanUtility/incl/LiShuttleTypes.h` 组合识别；缺少构建预设或完整运行样例时给出提示。本机列表保存于 `env/projects.json`（不提交 Git），升级前已配置的当前项目会保留。切换时刷新功能、地图和任务列表，并清空旧项目的参数与运行状态；工具链复用本机全局配置，预设与数据根恢复对应项目配置。
 
-配置后创建缺失的输出和工作目录，例如 `OUT_ROOT`、`CASE_ROOT`。不要用空文件夹替代真实地图或依赖。
+配置后创建缺失的输出和工作目录，例如 `OUT_ROOT`。不要用空文件夹替代真实地图或依赖。
+
+### 新项目按顺序操作
+
+网页顶部会持续显示操作指南，点击步骤可直接定位对应位置：
+
+1. **添加并选择本地项目**：输入引擎源码根目录。
+2. **确认本机工具链**：自动搜索并保存，所有项目复用；缺少工具时先安装并重新检测。
+3. **选择 Debug / Release → 编译所选配置**：下拉框列出项目实际兼容的 Windows x64 Ninja 预设；Release 包含 RelWithDebInfo/MinSizeRel。没有预设时检查项目的 CMakePresets.json。平台先保存所选预设及派生目录，再调用 MSVC、CMake、Ninja；不依赖地图或输出目录已配置。
+4. **确认并保存项目资源**：CONFIG_SRC、DLL_SRC、MAP_ROOT、GONGCAN_ROOT、OUT_ROOT 必需；DT_ROOT 仅路测相关功能需要。CLI 工参目录已移除，旧值迁移前备份到 project-profiles.json.retired-fields.bak；输入文件直接来自任务包或明确文件路径。
+5. **选地图、工参 CSV、已有 XML（如使用）**：确认本地路径和区域文件，可保存任务与地图对应关系。
+6. **装配并渲染 → 确认预览 → 运行**：缺少必填项时，网页展开对应设置、滚动并聚焦到该项，显示缺失原因；填写后保存再重试。
+
+构建路径会在编译前显示为“尚未生成”，只有目录实际存在才显示“已生成”；程序名来自 CMake 目标和构建产物，编译结束后重新识别。目录存在不代表编译成功，请检查运行页的退出码及日志。Debug 与 Release 分别使用各自预设目录和匹配 DLL，不会清空已有构建目录。切换配置后旧运行单失效，需要重新装配。项目要求在 `<binaryDir>/Bin/` 输出主程序；无法明确识别主程序时，检查 CMake 的 add_executable / OUTPUT_NAME 或产物布局。
 
 ## 4. 检查、编译和装配
 
@@ -194,13 +268,15 @@ python .\platform\backend\server.py
 
 浏览器自动打开 <http://127.0.0.1:8641>。页面和项目列表正常加载才说明初始化成功。保留服务终端；关闭浏览器不会停止服务。
 
-1. 顶部确认项目，可使用“添加项目”登记其他引擎项目，用“体检”“编译”检查环境与编译程序。任务装配统一在“功能与参数”页的“资源与装配”区域操作，无需另行执行基础装配脚本。
-2. 左侧确认地图与工参任务目录，点击对应“重新扫描”，选择城市/场景和任务。目录修改会写回本机配置。
-3. 在“功能与参数”选择功能、填写任务名，建议用英文字母、数字、`-`、`_`，例如 `demo-pl`。功能列表按当前引擎项目读取，缺少某功能时先确认版本支持。
-4. 点击“装配并渲染”，自动先从当前项目 `CONFIG_SRC`、`DLL_SRC` 补齐 Bin 的基础资源（含目录结构和 exe 旁的 `config/*.xml`），然后生成任务配置，最后按勾选装配任务天线、模型。基础补齐只复制缺失文件，保留已有运行 XML、模型、天线和 DLL；跳过源中的 `.bak`、`.task-bak`、`.tmp` 备份。源目录缺失时停止并显示错误；装配输出展示复制来源、目标和数量。复用 XML 的预览阶段不复制，确认后才装配。专用运行单生成在 exe 的 `runtimelibrary/` 下，任务单生成在 `jobs/web-*.env`。运行单以当前项目 `CONFIG_SRC/runtimelibrary/runtimeschema.xml` 为完整底稿，保留全部参数、注释、顺序及样例默认值，仅替换任务名、数据路径和任务单明确指定的算高/层高；不按所选功能删减参数。室内任务另设置必需的 `MapFormat`、`MapPath`。样例缺失或无效时直接报错，不回退到精简模板。参数面板出现不表示输入数据已经齐全。
-5. 检查并保存参数。每个参数旁提供“ThirdPart 默认”按钮：数值从当前项目完整样例读取；路径只填入当前项目配置源内确实存在的对应资源（例如场景配置、杂波匹配配置），点击即备份并写入目标 XML，不修改任务源 XML。无可靠默认资源、样例缺少字段或目标 XML 缺少字段时禁用并提示；留空不会自动覆盖。需要调整 CSV 时，在“工参CSV”页加载、编辑并保存。
+1. 在“本机工具链（全局）”确认所有项目共用的工具地址。使用“添加项目”登记引擎项目，在“项目配置”保存该项目的预设与资源路径，再用“体检”“编译”检查。任务装配统一在“功能与参数”页的“资源与装配”区域操作。
+2. 左侧确认地图与工参任务目录，点击对应“重新扫描”，选择城市/场景和任务。目录修改只写当前项目档案。选择工参后可保存“当前工参与地图对应关系”，再次选择相同工参和运行 XML 时恢复当前项目的绑定。
+3. 在“功能与参数”选择功能、填写任务名，建议用英文字母、数字、`-`、`_`，例如 `demo-pl`。装配后生成 `demo-pl.xml`，其 `RuntimeSchema name`、输出子目录及 VS 平台启动项同步为本次任务名；源 XML 保留原状。修改任务名或任务 ID 后需重新装配，页面会阻止继续运行旧任务。功能列表按当前引擎项目读取，缺少某功能时先确认版本支持。
+4. 点击“装配并渲染”，自动先从当前项目 `CONFIG_SRC`、`DLL_SRC` 补齐 Bin 的基础资源（含目录结构和 exe 旁的 `config/*.xml`），然后生成任务配置，最后按勾选装配任务天线、模型。基础补齐只复制缺失文件，保留已有运行 XML、模型、天线和 DLL；跳过源中的 `.bak`、`.task-bak`、`.tmp` 备份。源目录缺失时停止并显示错误；装配输出展示复制来源、目标和数量。复用 XML 的预览阶段不复制，确认后才装配。专用运行单生成在 exe 的 `runtimelibrary/` 下，任务单按项目生成在 `jobs/<项目ID>/<构建标识>/web-*.env`。运行单以当前项目 `CONFIG_SRC/runtimelibrary/runtimeschema.xml` 为完整底稿，保留全部参数、注释、顺序及样例默认值，仅替换任务名、数据路径和任务单明确指定的算高/层高；不按所选功能删减参数。室内任务另设置必需的 `MapFormat`、`MapPath`。样例缺失或无效时直接报错，不回退到精简模板。参数面板出现不表示输入数据已经齐全。
+5. 检查并保存参数。`cali / pred / predindoor / acp / commsensing` 默认进入“本功能可配置 + 未分类”，按本地引擎源码调用链显示功能参数及路损、地图、工参、天线依赖。“本功能当前生效参数”进一步隐藏开关未启用的条件项、仅启动读取项和未分类字段；“全部已识别参数”保留当前运行 XML 的所有实际字段。切换功能会重新计算范围，手选的显示范围和搜索词保持不变。参数旁显示触发条件及源码依据；缺失的强制读取元素和可选参数单独提示，不冒充已配置值，也不自动写入 XML。其他功能暂沿用旧字典推荐范围。
+   每个可编辑参数旁提供“ThirdPart 默认”按钮：数值从当前项目完整样例读取；路径只填入当前项目配置源内确实存在的对应资源（例如场景配置、杂波匹配配置），点击即备份并写入目标 XML，不修改任务源 XML。无可靠默认资源、样例缺少字段或目标 XML 缺少字段时禁用并提示；留空不会自动覆盖。需要调整 CSV 时，在“工参CSV”页加载、编辑并保存。
 6. 在“运行”页点击“运行 lishuttle”，查看实时输出。“导出运行日志”可下载当前会话的全部控制台输出（含指令、导出时间、状态和退出码），保存为 UTF-8 `.log` 文件；运行中也可导出截至当时已收集的日志。体检、编译输出同样支持导出。此功能导出平台捕获的控制台日志，不包含引擎另行写入的 `uplan.log`；服务重启、刷新页面或切换项目后不会自动恢复上一会话的导出入口，需提前保存。
 7. 完成后在“结果”页用相同任务名查询，确认有预期的数据文件并检查日志中的 `ERROR`、`FATAL`。
+8. 需要整理时，在“资源与装配”展开“清理平台历史配置”，先“预览可清理配置”，核对后“归档并清理以上配置”。仅处理当前项目所选构建目录中具有可核验平台渲染记录的历史 XML、`.bak`、manifest、生成任务 env 及对应平台 VS 启动项；保留当前运行单（页面无当前任务时保留最近生成的一份）、任务源 XML、被其他 XML 或手写启动项引用的配置、基础资源和结果。新任务 env 按项目和构建分别存放；旧版共享 env 无法确认构建独占时保留。来源不明的文件跳过；平台进程运行时拒绝清理，文件变化后须重新预览。文件移至本工作流已忽略的 `docs/runtime-config-archives/<时间及唯一编号>/`，不会永久删除；按 `restore.json` 将文件复制回 `source` 路径即可恢复，需要恢复启动项时参考同目录 `launch.vs.json.before` 合并，避免覆盖后来新增的启动项。此入口不清理其他 Debug/Release 构建目录，需切换对应配置再预览。
 
 室外路损选 `pl`，室内路损选 `plindoor`，室外预测选 `pred`，室内预测选 `predindoor`（需要引擎支持）。任务 ID 通常保持默认 `1`，它不是结果目录名；最大计算高度、层高统一在装配后下方的配置参数面板中调整；顶部不再单独设置，网页生成任务单也不再写入高度覆盖值。
 
@@ -216,13 +292,13 @@ python .\platform\backend\server.py
 2. 选择与平台 `PRESET` 对应的 CMake 配置，等待 CMake 目标加载。平台启动项的程序和工作目录指向本机环境配置中的 `BUILD_SUBDIR/Bin`，更改构建路径后重新装配以同步。
 3. 在启动项下拉框选择对应条目，例如 `[LiShuttle 平台] ningde-cali-pl.xml / cali`，再运行或调试。若列表未刷新，重新加载项目文件夹。
 
-重复装配只更新同名的平台条目，保留其他任务及手工启动项、注释和其他配置。修改前备份到 `.vs/launch.vs.json.bak`（仅保留上一份）；文件无效时不覆盖，装配输出会显示同步失败原因。`[LiShuttle 平台]` 名称用于平台维护，需要长期自定义的条目请复制并改名。该功能不自动启动 VS 或计算。
+重复装配更新当前任务的平台条目；同一页面将已装配任务改名后重新装配，会替换上一次任务名对应的平台启动项。其他独立任务及手工启动项、注释和其他配置保留；历史配置清理会同步移除归档任务对应的平台条目。修改前备份到 `.vs/launch.vs.json.bak`（仅保留上一份）；文件无效时不覆盖，装配输出会显示同步失败原因。`[LiShuttle 平台]` 名称用于平台维护，需要长期自定义的条目请复制并改名。该功能不自动启动 VS 或计算。
 
 同组启动项共用一份 XML；切换功能前仍须检查所需输入，例如 `dt/cali` 的路测数据、`ai` 的 Python 运行依赖。生成启动项只提供正确的启动参数，不代表数据已满足所有功能。网页参数面板修改的是同一份目标 XML，VS 下次启动即可读取。
 
 ### cali 校正功能
 
-当前通过通用功能选择和 XML 参数面板配置 `cali`，没有独立的路测配置向导。先确认当前引擎支持该功能，准备匹配版本的工参、地图、路测数据及模型资源；按需配置 `DT_ROOT`，并检查目标 XML 中的 `DriverTestFileDictionaryPath` 等实际输入路径。仅设置数据根目录不等于所有 XML 路径已适配。复用已有 XML 时，该路测路径默认保留，需要显式调整。
+当前通过通用功能选择和 XML 参数面板配置 `cali`，没有独立的路测配置向导。先确认当前引擎支持该功能，准备匹配版本的工参、地图、路测数据及模型资源；按需配置 `DT_ROOT`，并检查目标 XML 中的 `DriverTestFileDictionaryPath` 等实际输入路径。复用已有 XML 时，路测目录自动使用当前项目的 `DT_ROOT`，也可在“修改本地资源路径”中调整；数据根目录不代替具体文件就绪检查。
 
 不同引擎版本的校正参数可能不同，请以当前引擎实现和对应运行说明为准；平台不会自动转换旧版校正配置。运行后检查日志和引擎实际生成的校正产物，当前没有专门的校正结果汇总界面。
 
@@ -232,9 +308,17 @@ python .\platform\backend\server.py
 
 点击“预览路径修改”，查看源文件、目标文件、逐项原/新路径及真实输出目录，再点击“确认装配此配置”。目标为当前项目的 `Bin/runtimelibrary/<任务名>.xml`，已有目标先备份到 `.bak`；原任务 XML 保持不动。
 
-此模式只替换地图路径、区域路径和 `PathlossDirectory`；保留原 `RuntimeSchema name`、所有其他参数值、注释、顺序和换行。工参路径默认保留，勾选“将 XML 工参路径改为上方所选 CSV”才替换 `EngineeringFilePath`。场景配置、算高、层高、精度等沿用 XML；模型复制操作在此模式下停用；天线装配由独立复选框控制，勾选时也会在确认复制配置后装配任务天线，预览中会显示此操作。缺少必需路径字段时直接提示，不补字段或回退到项目样例。
+此模式按所选地图替换常规地图路径、区域路径和 `PathlossDirectory`；网页生成副本的 `RuntimeSchema name` 同步为任务设置中的任务名；计算参数、注释、顺序和换行保留，任务源 XML 不变。工参路径默认保留，勾选“将 XML 工参路径改为上方所选 CSV”才替换 `EngineeringFilePath`。展开“修改本地资源路径”会自动显示当前项目、地图及任务解析出的场景、输出根、地图索引、杂波和路测路径，同时保留原值供核对；更换地图、工参或 XML 后重新识别。任务自带 `scenesettings.xml` 优先，否则使用项目运行目录的场景配置。自动值不会作为手填覆盖保存；手动修改项进入预览及生成任务单。区域文件仅在上方选择，不再提供重复覆盖入口。旧自定义地图索引仅在所选地图内存在同名专用文件时自动定位，否则要求明确填写，不静默换成普通索引。模型复制操作在此模式下停用；天线装配由独立复选框控制。缺少必需字段时直接提示，不补字段或回退到项目样例。
 
-引擎会把 XML 原有 `name` 追加到路损输出根目录，例如文件名为 `ningde-cali.xml`、原 `name="ningde"` 时，实际输出是 `OUT_ROOT/ningde`。运行提示和结果页按真实输出目录显示。复制完成后可继续在参数面板调整目标 XML；原 XML 引用的其他路径仍须在当前运行环境可用。多份配置保留相同 `name` 时会共用同一输出目录。
+小区计算半径以实际运行 XML 的 `EngineeringFilePath` 所指工参 CSV 为准，支持 `Main Calculation Radius (m)`、`CalcRadius` 及中文“小区计算半径”等列名。参数面板优先显示 CSV 各小区的值；数值不一致时明确提示，填写新值会统一修改 CSV 半径列并备份 `.bak`。逐小区设置请使用“工参CSV”编辑。XML 的 `DefaultCalcRadius` 单独显示为默认值，半径编辑不再修改它，也不提供“ThirdPart 默认”覆盖。工参或半径列缺失时停止修改并提示，不能退回写 XML。修改前请确认 XML 已同步为所选 CSV。
+
+参数读取使用 XML 解析，忽略顶层注释中的示例，支持带属性、CDATA 和自闭合空字段。唯一的顶层标量字段可编辑；重复字段会列出各项原值，结构化子节点、内部注释、带命名空间的字段及非 UTF-8 文件完整展示并说明只读原因，避免猜测改哪一项或破坏 XML。保存会验证 XML、备份 `.bak` 并只替换目标值，随后重新读取面板，切换筛选不会恢复旧值。CPU 负载、工参误差、模型校正、预测小区筛选及 ACP 灵敏度等说明补入 `platform/backend/params_spec.json`，每项记录参考源码位置；版本独有且尚未确认用途的字段保留原名归入“未分类”。
+
+路径识别允许项目配置尚未填齐：地图等已知路径仍会自动显示，不会因为缺少 `BUILD_SUBDIR`、`EXE_NAME` 或 `OUT_ROOT` 整块返回空白。未配置构建目录时，场景配置可从当前项目实际存在的 `CONFIG_SRC`（未填时检查本项目传统 `ThirdPart/Config`）中识别；不会借用其他项目的路径。无法确定的输出根或路测根保留为空，并在该字段旁持续显示 `OUT_ROOT` / `DT_ROOT` 的配置提示。实际装配、渲染及运行仍要求填写必要的项目配置。
+
+“保存当前工参与地图对应关系”按项目、任务目录、工参和源 XML 保存地图选择、本地路径、区域和工参同步选项，不修改原 XML。保存关系不代表所有文件已就绪；渲染仍重新校验路径。一个父目录包含多份独立运行配置包时，平台分别列出子任务，避免混选资源。本轮只做本机项目和本地路径配置，不解析服务器挂载关系或自动转换服务器任务。
+
+引擎会把 XML 的 `name` 追加到路损输出根目录。网页任务名为 `ningde-cali` 时，副本为 `ningde-cali.xml`、`name="ningde-cali"`，实际输出为 `OUT_ROOT/ningde-cali`；预览、运行提示和结果页显示真实目录。复制完成后可继续在参数面板调整目标 XML；原 XML 引用的其他路径仍须在当前运行环境可用。CLI 直接复用 XML 时仍默认保留原 name；需要与 JOB_NAME 同步时，在任务 env 中明确配置 `SYNC_RUNTIME_NAME="1"`。
 
 生成的 `jobs/web-*.env` 记录 `SCHEMA_SOURCE`、`SYNC_ENGINEERING` 和所选区域路径，脚本重新渲染时沿用相同复制规则。再次装配会重新读取任务包 XML；若需保留目标文件的手工调整，直接在网页运行，或使用命令行的 `--no-render`。
 
@@ -251,7 +335,7 @@ Copy-Item .\jobs\example-pl-guangzhou.env .\jobs\my-pl.env
 notepad .\jobs\my-pl.env
 ```
 
-修改任务名、城市、工参和区域路径。示例不附带广州或室内数据；示例的 `CASE_ROOT` 不会自动等同于 Web 任务目录。
+修改任务名、城市、工参和区域路径。示例不附带广州或室内数据；本地示例使用 `GONGCAN_ROOT/<实际任务包目录>/<实际文件>`，须替换占位符或直接填写绝对路径，不按任务名猜测文件名。
 
 ```powershell
 python .\scripts\render_schema.py .\jobs\my-pl.env local-win
@@ -274,7 +358,7 @@ python .\scripts\render_schema.py .\jobs\my-pl.env local-win
 | 现象 | 解决方法 |
 | --- | --- |
 | 找不到 Python 或跳到应用商店 | 安装 Python 3 并加入 PATH，必要时关闭 Windows Python 应用执行别名，重新打开终端 |
-| 缺少 `local-win.env` | 按第 3 节复制模板、填写路径；模板不会自动成为配置 |
+| 缺少 `local-win.env` | 新安装无需此文件；按第 3 节自动配置工具并在网页添加项目，旧 env 仅作首次导入来源 |
 | 网页打开但列表加载失败 | 检查配置、项目和父目录是否存在，查看服务终端报错 |
 | 地图/任务为空 | 检查两个根目录及第 5 节结构，准备数据并重新扫描 |
 | 找不到编译工具 | 补装 VS C++ 组件，填写真实的 CMake、Ninja、vcvars 文件路径 |
@@ -303,7 +387,8 @@ python .\scripts\render_schema.py .\jobs\my-pl.env local-win
 
 | 内容 | 换电脑后的处理 |
 | --- | --- |
-| 引擎、构建产物、工具链、配置源和数据根 | 修改 `env/local-win.env` 的对应键，完整说明见第 3 节；不能只改 `PROJECT_DIR` |
+| 工具链 | 顶部“本机工具链（全局）”或 `project_config.py --setup-machine`，一次配置、所有项目复用 |
+| 引擎、构建产物、配置源和数据根 | 在顶部“项目配置”修改当前档案；旧 env 只用于首次导入，完整说明见第 3 节 |
 | 手动添加的项目列表 | `env/projects.json` 是本机文件，不进入 Git；在新电脑重新添加即可，不按项目名称识别 |
 | 本机任务单和运行记录 | `jobs/web-*.env` 内含绝对路径，不进入 Git；在新电脑重新装配生成 |
 | 任务包中已有 XML 的旧路径 | 按第 6 节预览后替换地图、区域和输出路径；工参路径需勾选同步；其余路径须手动核对 |
@@ -318,18 +403,18 @@ python .\scripts\render_schema.py .\jobs\my-pl.env local-win
 
 | 固定约定 | 影响及处理 | 代码位置 |
 | --- | --- | --- |
-| 网页固定读取 `env/local-win.env`，渲染固定使用 `local-win` | 目前没有网页环境配置选择器；替换该文件可迁移 Windows 环境，其他配置模式需改代码 | [core.py](platform/backend/core.py)：`ENV_FILE`、`run_render` |
+| 网页及本地脚本读取同一项目档案 | 当前网页只适配本地 Windows；旧 env 首次导入，子进程使用固定配置快照；服务器环境保持独立 | [project_config.py](scripts/project_config.py)、[core.py](platform/backend/core.py) |
 | 工具按钮调用 `cmd /c` 和 Windows `.bat`；打开文件夹使用 `os.startfile`，引擎输出按 GBK 解码 | macOS/Linux 不能仅改路径直接复用网页完整流程，需要适配启动、编译、文件夹打开和编码处理 | [core.py](platform/backend/core.py)：`start_toolkit`、`Runner`；[server.py](platform/backend/server.py)：`open_folder` |
-| exe 固定在 `PROJECT_DIR/BUILD_SUBDIR/Bin/EXE_NAME`，运行单固定在其 `runtimelibrary/` 下 | `BUILD_SUBDIR`、`EXE_NAME` 可配置，`Bin`、`runtimelibrary` 是代码中的目录约定；引擎产物布局不同需调整构建布局或平台代码 | [core.py](platform/backend/core.py)：`schema_path`、`start_lishuttle`；[render_schema.py](scripts/render_schema.py) |
+| exe 固定在 `PROJECT_DIR/BUILD_SUBDIR/Bin/EXE_NAME`，运行单固定在其 `runtimelibrary/` 下 | `BUILD_SUBDIR` 从预设派生、`EXE_NAME` 自动识别，`Bin`、`runtimelibrary` 是代码中的目录约定；引擎产物布局不同需调整构建布局或平台代码 | [core.py](platform/backend/core.py)：`schema_path`、`start_lishuttle`；[render_schema.py](scripts/render_schema.py) |
 | 项目内容校验及功能定义文件位置固定 | 项目须包含 `CMakeLists.txt`、`LiShuttle/`、`SwanUtility/incl/LiShuttleTypes.h`；改名或改内部布局需适配识别逻辑。项目校验的样例警告仍检查传统 `ThirdPart/Config` 位置，未随自定义 `CONFIG_SRC` 改变 | [core.py](platform/backend/core.py)：`validate_project`、`scan_functions` |
 | 完整样例固定在 `CONFIG_SRC/runtimelibrary/runtimeschema.xml`，参数名和 XML 结构有约定 | 可以修改配置源根目录，但不能任意改样例文件名、节点或参数名；不同引擎版本需核对兼容性。已有任务 XML 要使用 UTF-8 | [render_schema.py](scripts/render_schema.py)、[task_schema.py](scripts/task_schema.py)、[core.py](platform/backend/core.py)：`thirdpart_defaults` |
 | 地图按根目录下的直接子目录识别，以 `heights/index.txt` 或 `building.das` 判定室外/室内 | 根目录可改；地图内部命名和层级不同不会自动识别，需整理数据或修改扫描及路径映射 | [core.py](platform/backend/core.py)：`scan_cities`；[task_schema.py](scripts/task_schema.py) |
 | 任务按任务根目录的子目录组织；天线、模型等资源使用约定名称 | 支持 `antenna/`、`antennas/`、`models/` 等约定，不会自动理解任意资源名称；XML 和 CSV 则按内容识别 | [core.py](platform/backend/core.py)：`scan_tasks`、`assemble_files` |
 | 体检固定检查 `ThirdPart/Lib`、`uplancommon.lib`、`lishuttlectl.lib` 等 | 没有独立的 `LIB_SRC` 配置；依赖库布局或名称不同需要调整体检脚本，并同步核对引擎 CMake | [doctor_local.bat](scripts/doctor_local.bat) |
-| 项目切换只更新 `PROJECT_DIR`，其余环境键共用 | 不同项目若使用不同预设、工具链或数据根，切换后须核对并修改本机配置；当前没有完整的逐项目配置档案 | [core.py](platform/backend/core.py)：`select_project` |
+| 每个项目独立保存配置和任务地图绑定 | 新项目自动检测空白配置并显示候选，需明确保存；可显式引用共享数据目录，运行目录的生命周期互斥另行实现 | [project_config.py](scripts/project_config.py)、[project_detection.py](scripts/project_detection.py)、[server.py](platform/backend/server.py) |
 | 服务只监听 `127.0.0.1`；启动/停止脚本针对默认端口 8641 | CLI 可用 `--port` 修改服务端口，但停止脚本仍针对默认端口；目前是本机网页，不是开箱即用的局域网多人部署 | [server.py](platform/backend/server.py)、[启动平台.bat](启动平台.bat)、[停止平台.bat](停止平台.bat) |
 
-**结论：兼容目录结构的其他 Windows 电脑可通过本机配置复用；其他操作系统或不同引擎内部布局，仍存在需要改代码的适配项。** 本次仅整理文档，没有修改上述实现，也未在全新电脑上验证安装和实际计算。
+**结论：兼容目录结构的其他 Windows 电脑可通过本机配置复用；其他操作系统或不同引擎内部布局，仍存在需要改代码的适配项。** 项目档案与本地任务绑定有自动化回归覆盖；尚未在全新电脑上验证安装或运行真实引擎计算。
 
 ### 外部引擎与远程运行边界
 
