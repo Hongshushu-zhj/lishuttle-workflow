@@ -13,11 +13,18 @@ OUTDOOR_FUNCTIONS = ('pl', 'pred', 'rays', 'dt', 'cali', 'acp', 'ai', 'scene')
 INDOOR_FUNCTIONS = ('plindoor', 'predindoor', 'indoorrays')
 
 
+def _comment_mask(text):
+    tokens = r'"(?:\\.|[^"\\])*"|//[^\r\n]*|/\*[\s\S]*?\*/'
+    return re.sub(tokens, lambda m: m[0] if m[0].startswith('"') else
+                  re.sub(r'[^\r\n]', ' ', m[0]), text)
+
+
 def _jsonc(text):
     """Mask comments and trailing commas without changing character offsets."""
-    tokens = r'"(?:\\.|[^"\\])*"|//[^\r\n]*|/\*[\s\S]*?\*/'
-    masked = re.sub(tokens, lambda m: m[0] if m[0].startswith('"') else
-                    re.sub(r'[^\r\n]', ' ', m[0]), text)
+    masked = _comment_mask(text)
+    structure = re.sub(r'"(?:\\.|[^"\\])*"', '""', masked)
+    if re.search(r'[\[{,]\s*,(?=\s*[}\]])', structure):
+        raise ValueError('启动配置存在孤立逗号')
     return re.sub(r'("(?:\\.|[^"\\])*")|,(?=\s*[}\]])',
                   lambda m: m[1] if m[1] is not None else ' ', masked)
 
@@ -98,7 +105,63 @@ def _merge(text, entries):
     return text
 
 
-def sync_launch(project_env, schema_name, func, task_id, city_kind, available):
+def prune_text(text, schemas, current_dir=None):
+    """Remove only reserved entries referring to the specified generated schemas."""
+    masked = _jsonc(text)
+    comments_masked = _comment_mask(text)
+    data = json.loads(masked, object_pairs_hook=_unique_object)
+    if not isinstance(data, dict) or not isinstance(data.get('configurations', []), list):
+        raise ValueError('启动配置格式不正确，未清理任何启动项')
+    if 'configurations' not in data:
+        return text
+    decoder = json.JSONDecoder()
+    pos = _skip(masked, masked.index('{') + 1)
+    while masked[pos] != '}':
+        key, end = decoder.raw_decode(masked, pos)
+        pos = _skip(masked, _skip(masked, end) + 1)
+        _, end = decoder.raw_decode(masked, pos)
+        if key == 'configurations':
+            break
+        pos = _skip(masked, end)
+        if masked[pos] == ',':
+            pos = _skip(masked, pos + 1)
+    pos = _skip(masked, pos + 1)
+    spans = []
+    while masked[pos] != ']':
+        entry, end = decoder.raw_decode(masked, pos)
+        if not isinstance(entry, dict):
+            raise ValueError('启动项必须为对象')
+        comma = _skip(masked, end)
+        delimiter = next((j for j in range(end, comma + 1) if comments_masked[j] == ','), None)
+        spans.append((pos, end, delimiter, entry))
+        pos = _skip(masked, comma + 1) if masked[comma] == ',' else comma
+    names = tuple(f'{PREFIX}{schema} / ' for schema in schemas)
+    remove = [isinstance(s[3].get('name'), str) and s[3]['name'].startswith(names)
+              and (current_dir is None or str(s[3].get('currentDir', '')).replace('\\', '/').rstrip('/').casefold()
+                   == current_dir.replace('\\', '/').rstrip('/').casefold()) for s in spans]
+    edits = []
+    i = 0
+    while i < len(spans):
+        if not remove[i]:
+            i += 1
+            continue
+        first = i
+        while i + 1 < len(spans) and remove[i + 1]:
+            i += 1
+        start, end = spans[first][0], spans[i][1]
+        if spans[i][2] is not None:
+            end = spans[i][2] + 1
+        elif first:
+            start = spans[first - 1][2]
+        edits.append((start, end))
+        i += 1
+    for start, end in reversed(edits):
+        text = text[:start] + text[end:]
+    json.loads(_jsonc(text), object_pairs_hook=_unique_object)
+    return text
+
+
+def sync_launch(project_env, schema_name, func, task_id, city_kind, available, previous_schema=''):
     """Merge only names reserved by the platform; atomic write with one backup."""
     project = Path(project_env['PROJECT_DIR'])
     target = project / '.vs/launch.vs.json'
@@ -119,7 +182,14 @@ def sync_launch(project_env, schema_name, func, task_id, city_kind, available):
     original = target.read_bytes() if target.exists() else None
     text = original.decode('utf-8-sig') if original is not None else (
         '{\n  "version": "0.2.1",\n  "defaults": {},\n  "configurations": []\n}\n')
-    merged = _merge(text, entries)
+    # Updating one task also removes no-longer-supported functions for that task.
+    obsolete = {schema_name}
+    if previous_schema:
+        obsolete.add(previous_schema)
+    merged = _merge(prune_text(text, obsolete), entries)
+    # Avoid formatting churn and backup replacement on a repeated identical sync.
+    if json.loads(_jsonc(text)) == json.loads(_jsonc(merged)):
+        merged = text
     encoded = merged.encode('utf-8')
     if original is not None and original.startswith(b'\xef\xbb\xbf'):
         encoded = b'\xef\xbb\xbf' + encoded

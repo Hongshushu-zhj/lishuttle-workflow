@@ -19,7 +19,7 @@ class EngineeringSelectionTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.folder = self.root / 'task'
         self.folder.mkdir()
-        self.env = {'GONGCAN_ROOT': str(self.root)}
+        self.env = {'GONGCAN_ROOT': str(self.root), 'PROJECT_DIR': str(self.root), 'BUILD_SUBDIR': 'build'}
 
     def write(self, name, text, encoding='utf-8'):
         path = self.folder / name

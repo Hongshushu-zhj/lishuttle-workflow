@@ -130,6 +130,7 @@ function applyProjectState(st, {preserveMachineDraft = false} = {}) {
   S.projectEpoch = (S.projectEpoch || 0) + 1;
   S.job = null;
   S.city = null;
+  taskIdentityChanged();
   invalidateSchemaPreview();
   $("params-area").innerHTML = "";
   S.paramsData = null; S.paramsScope = null; S.paramsSearch = ''; S.paramsForJob = null;
@@ -435,6 +436,7 @@ function bindActions() {
   $("btn-rescan-map").onclick = rescanMap;
   $("btn-rescan-task").onclick = rescanTasks;
   $("btn-render").onclick = doRender;
+  $("btn-cleanup-preview").onclick = previewCleanup;
   $("btn-run").onclick = doRun;
   $("btn-stop").onclick = () => post("stop", { sid: S.sid });
   $("btn-export-log").onclick = exportRunLog;
@@ -447,6 +449,10 @@ function bindActions() {
   ["sync-engineering", "schema-polygon", "job-name", "task-id", "copy-antennas"].forEach(id => {
     $(id).addEventListener("change", invalidateSchemaPreview);
     $(id).addEventListener("input", invalidateSchemaPreview);
+  });
+  ['job-name', 'task-id'].forEach(id => {
+    $(id).addEventListener('input', taskIdentityChanged);
+    $(id).addEventListener('change', taskIdentityChanged);
   });
   $("btn-csv-save").onclick = saveCsv;
   $("btn-csv-col").onclick = setColumn;
@@ -750,8 +756,9 @@ function updateNote() {
   const c = S.city ? `${S.city.kind === "indoor" ? "室内场景" : "城市"} ${S.city.name}` : "未选地图";
   const t = S.task ? `任务 ${S.task.name}（${KIND_CN[S.task.kind]}，${S.task.detect}）` : "未选任务";
   $("selection-note").textContent = `已选：${c} · ${t}`;
-  if (S.job) $("run-info").textContent =
-    `${S.job.name}.xml · -f ${S.job.func} -t ${S.job.taskId}${S.job.outDir ? ` · 实际输出：${S.job.outDir}` : ""}`;
+  if (S.job) $("run-info").textContent = taskIdentityDirty()
+    ? '任务设置已修改，请重新装配后运行'
+    : `${S.job.name}.xml · -f ${S.job.func} -t ${S.job.taskId}${S.job.outDir ? ` · 实际输出：${S.job.outDir}` : ""}`;
 }
 
 /* ---------------- 功能选择 ---------------- */
@@ -811,6 +818,7 @@ async function doRender() {
     use_existing_schema: reuse, schema_source: $("schema-source").value,
     sync_engineering: $("sync-engineering").checked, polygon_file: $("schema-polygon").value,
     path_overrides: collectLocalPaths(),
+    previous_schema: S.job?.schema || '',
   };
   if (reuse) {
     invalidateSchemaPreview();
@@ -819,7 +827,7 @@ async function doRender() {
     if (revision !== schemaPreviewRevision) return;
     if (p.error) return setupError(p);
     $("schema-preview-text").textContent =
-      `源文件：${p.source}\n目标文件：${p.destination}\n保留 name：${p.runtime_name}\n实际输出目录：${p.out_dir}\n` +
+      `源文件：${p.source}\n目标文件：${p.destination}\n任务 name：${p.runtime_name}\n实际输出目录：${p.out_dir}\n` +
       `覆盖已有目标前备份为 .bak。源文件保持不变。\n\n` +
       `确认后自动补齐当前项目 ThirdPart 基础运行资源，保留已存在文件。\n\n` +
       (body.copy_antennas ? `另装配任务天线：${S.task.antenna_dir || S.task.antenna || "无任务天线，将按现有规则恢复项目默认天线 XML"}\n\n` : "不装配天线，保留项目现有天线文件。\n\n") +
@@ -862,6 +870,9 @@ async function submitRender(body) {
   }
 
   S.job = { name: jobName, schema: r.schema_name, func: r.func, taskId: r.task_id, outDir: r.out_dir };
+  resetCleanupPreview();
+  taskIdentityChanged();
+  $('result-job').value = r.runtime_name || jobName;
   const copied = (r.copied || []).map(c => `${c.file} → ${c.to} ${c.backup}`).join("\n");
   toast(`渲染完成：${r.schema_name}${copied ? "\n已替换：" + copied : ""}`);
   if (r.vs_launch_warning) toast(r.vs_launch_warning, false);
@@ -1081,6 +1092,7 @@ function applyBuildStatus(result, sentDraft = {...S.projectDraft}) {
   S.projectEpoch = (S.projectEpoch || 0) + 1;
   S.job = null;
   invalidateSchemaPreview();
+  taskIdentityChanged();
   $('params-area').innerHTML = '';
   S.paramsData = null; S.paramsForJob = null;
   $('params-toolbar').classList.add('hidden');
@@ -1090,10 +1102,68 @@ function applyBuildStatus(result, sentDraft = {...S.projectDraft}) {
 
 async function doRun() {
   if (!S.job) return toast("先在「功能与参数」页装配并渲染", false);
+  if (taskIdentityDirty()) return toast('任务名或任务 ID 已修改，请先重新装配并渲染', false);
   const r = await post("run", { schema: S.job.schema, func: S.job.func, task_id: S.job.taskId });
   if (r.error) return toast(r.error, false);
   attachConsole(r.sid, `运行 ${S.job.schema}：`);
   switchTab(document.querySelector('[data-tab="run"]'));
+}
+
+function taskIdentityDirty() {
+  return !!S.job && ($('job-name').value.trim() !== S.job.name ||
+    ($('task-id').value || '1') !== String(S.job.taskId));
+}
+
+function taskIdentityChanged() {
+  const dirty = taskIdentityDirty();
+  $('task-name-note').textContent = dirty
+    ? '任务名或任务 ID 已修改，请重新装配；运行 XML、输出子目录和 VS 启动项将在装配成功后同步。'
+    : '装配后同步运行 XML 名称、输出子目录和 Visual Studio 启动项；修改后需重新装配。';
+  if (dirty) $('run-info').textContent = '任务设置已修改，请重新装配后运行';
+  else if (S.job) $('run-info').textContent = `${S.job.schema} · -f ${S.job.func} -t ${S.job.taskId}` +
+    (S.job.outDir ? ` · 实际输出：${S.job.outDir}` : '');
+  resetCleanupPreview();
+}
+
+let cleanupRevision = 0;
+function resetCleanupPreview() {
+  cleanupRevision++;
+  $('cleanup-preview').classList.add('hidden');
+  $('btn-cleanup-apply').disabled = true;
+  $('cleanup-note').textContent = '';
+}
+
+async function previewCleanup() {
+  if (S.pollTimer || S.pendingRequests) return toast('请等待当前操作结束再清理', false);
+  resetCleanupPreview();
+  const revision = cleanupRevision, epoch = S.projectEpoch;
+  const keep = S.job?.schema || '';
+  const r = await post('cleanup_configs', {keep_schema: keep});
+  if (epoch !== S.projectEpoch || revision !== cleanupRevision) return;
+  if (r.error) return toast(r.error, false);
+  $('cleanup-preview-text').textContent = `保留当前配置：${r.keep_schema || '无'}\n` +
+    `将归档 ${r.files.length} 个文件：\n` + r.files.map(f => f.path).join('\n') +
+    (r.launch_changed ? '\n同时移除以上历史配置对应的平台 VS 启动项。' : '') +
+    (r.skipped.length ? `\n另有 ${r.skipped.length} 项记录无法确认归属，已跳过。` : '') +
+    (r.kept_jobs?.length ? `\n保留 ${r.kept_jobs.length} 个无法确认构建独占的旧版或共享任务 env。` : '') +
+    '\n文件将移至 docs/runtime-config-archives，源 XML、当前配置和结果不清理。';
+  $('cleanup-preview').classList.remove('hidden');
+  $('btn-cleanup-apply').disabled = !r.files.length;
+  $('btn-cleanup-apply').onclick = async () => {
+    if (epoch !== S.projectEpoch || revision !== cleanupRevision) return;
+    if (S.pollTimer || S.pendingRequests) return toast('请等待当前操作结束再清理', false);
+    $('btn-cleanup-apply').disabled = true;
+    try {
+      const result = await post('cleanup_configs', {keep_schema:keep, token:r.token, apply:true});
+      if (epoch !== S.projectEpoch || revision !== cleanupRevision) return;
+      resetCleanupPreview();
+      if (result.error) return toast(result.error, false);
+      $('cleanup-note').textContent = result.message + (result.archive ? `；归档位置：${result.archive}` : '');
+      toast(result.message);
+    } catch (error) {
+      if (epoch === S.projectEpoch) { resetCleanupPreview(); toast(error.message, false); }
+    }
+  };
 }
 
 function attachConsole(sid, title, onDone = null) {

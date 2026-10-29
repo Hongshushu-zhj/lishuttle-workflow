@@ -59,6 +59,33 @@ def schema_candidates(paths):
     return candidates
 
 
+def synchronize_runtime_name(text, name):
+    """Set name as the first root attribute, as required by the local engine."""
+    if not name or not name.replace('-', '').replace('_', '').isalnum():
+        raise ValueError('任务名只能用字母数字、-、_')
+    parts = re.split(r'(<!--.*?-->)', text, flags=re.S)
+    replaced = 0
+    def rename(match):
+        nonlocal replaced
+        tag = match[0]
+        attributes = list(re.finditer(r'(\s+)([^\s=]+)(\s*=\s*)([\"\'])(.*?)\4', tag, re.S))
+        item = next((m for m in attributes if m[2] == 'name'), None)
+        if item is None:
+            raise ValueError('RuntimeSchema 根节点缺少 name')
+        replaced += 1
+        new_attribute = item[1] + item[2] + item[3] + item[4] + name + item[4]
+        without = tag[:item.start()] + tag[item.end():]
+        position = len('<RuntimeSchema')
+        return without[:position] + new_attribute + without[position:]
+    for i in range(0, len(parts), 2):
+        parts[i] = re.sub(r'''<RuntimeSchema\b(?:[^>"']|"[^"]*"|'[^']*')*>''', rename, parts[i], count=1)
+    rendered = ''.join(parts)
+    root = ET.fromstring(rendered)
+    if replaced != 1 or root.get('name') != name or next(iter(root.attrib), '') != 'name':
+        raise ValueError('无法唯一同步引擎读取的 RuntimeSchema 首属性 name')
+    return rendered
+
+
 def runtime_details(path, exe_dir):
     """Metadata of the actual copied configuration; independent of its source."""
     _, root = read_runtime(path)
@@ -68,7 +95,7 @@ def runtime_details(path, exe_dir):
         raise ValueError('运行配置缺少 name 或 PathlossDirectory，无法确定真实输出目录')
     if not os.path.isabs(output_root):
         output_root = os.path.join(exe_dir, output_root)
-    return {'out_dir': os.path.join(output_root, name).replace('\\', '/'),
+    return {'name': name, 'out_dir': os.path.join(output_root, name).replace('\\', '/'),
             'paths': {tag: root.findtext(tag) or '' for tag in LOCAL_PATHS if root.find(tag) is not None},
             'engineering_file': root.findtext('EngineeringFilePath') or '',
             'scene_settings_file': root.findtext('SceneSettingsPath') or '',
@@ -125,8 +152,16 @@ def render_existing(table):
     if not schema_name:
         raise ValueError('已有配置缺少 RuntimeSchema name，无法确定真实输出目录')
     values = local_path_values(table, root)
-    parts = re.split(r'(<!--.*?-->)', text, flags=re.S)
     changes = []
+    if table.get('SYNC_RUNTIME_NAME') == '1':
+        new_name = table['JOB_NAME']
+        text = synchronize_runtime_name(text, new_name)
+        if schema_name != new_name:
+            changes.append({'tag': 'RuntimeSchema@name', 'old': schema_name, 'new': new_name})
+        if next(iter(root.attrib), '') != 'name':
+            changes.append({'tag': 'RuntimeSchema@attribute-order', 'old': next(iter(root.attrib), ''), 'new': 'name 首属性（引擎按首属性读取任务名）'})
+        schema_name = new_name
+    parts = re.split(r'(<!--.*?-->)', text, flags=re.S)
     for tag, value in values.items():
         nodes = root.findall(tag)
         if len(nodes) != 1 or list(nodes[0]):
@@ -148,7 +183,8 @@ def render_existing(table):
             raise ValueError(f'字段 {tag} 的格式不支持定点替换，请先调整源配置')
         changes.append({'tag': tag, 'old': old, 'new': value})
     rendered = ''.join(parts)
-    ET.fromstring(rendered)
+    if ET.fromstring(rendered).get('name') != schema_name:
+        raise ValueError('生成 XML 的任务名与预览不一致，未写入运行配置')
     output_root = values['PathlossDirectory'].replace('\\', '/')
     if not os.path.isabs(output_root):
         output_root = os.path.join(table['EXE_DIR'], output_root)

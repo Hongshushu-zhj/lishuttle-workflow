@@ -14,6 +14,8 @@ class AntennaAssemblyTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.runtime_xml = self.root / "job.xml"
+        self.runtime_xml.write_text('<RuntimeSchema name="job"><PathlossDirectory>outputs</PathlossDirectory></RuntimeSchema>', encoding="utf-8")
         self.tasks = self.root / 'tasks'
         self.task = self.tasks / 'task'
         self.task.mkdir(parents=True)
@@ -71,7 +73,7 @@ class AntennaAssemblyTests(unittest.TestCase):
                 patch.object(core, 'build_job_env', return_value='job.env'), \
                 patch.object(core, 'run_render', return_value=(0, '')), \
                 patch.object(core, 'ensure_runtime_resources', return_value={}), \
-                patch.object(core, 'schema_path', return_value=__file__), \
+                patch.object(core, 'schema_path', return_value=str(self.runtime_xml)), \
                 patch.object(core, 'load_env', return_value=self.env), \
                 patch.object(core, 'assemble_files', return_value=[]) as assemble:
             body = dict(job_name='job', task=task, use_existing_schema=True,

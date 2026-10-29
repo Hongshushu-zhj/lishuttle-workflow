@@ -72,6 +72,36 @@ class TaskSchemaTests(unittest.TestCase):
         self.assertIn('<EngineeringFilePath>selected.csv</EngineeringFilePath>',
                       self.render().read_text(encoding='utf-8-sig'))
 
+    def test_web_task_name_updates_generated_runtime_and_output_only(self):
+        self.job['SYNC_RUNTIME_NAME'] = '1'
+        output = self.render()
+        text = output.read_text(encoding='utf-8-sig')
+        self.assertIn('<RuntimeSchema name="new-file">', text)
+        self.assertEqual(self.source.read_bytes().decode('utf-8'), self.text)
+        manifest = json.loads(Path(str(output) + '.manifest.json').read_text(encoding='utf-8'))
+        self.assertEqual(manifest['run']['out_dir'], self.env['OUT_ROOT'] + '/new-file')
+
+    def test_web_rename_handles_quoted_angle_brackets_and_name_like_attribute_values(self):
+        self.source.write_text(self.text.replace('<RuntimeSchema name="original-name">',
+            '<RuntimeSchema description="a > b name=\'keep\'" name = \'original-name\'>'), encoding='utf-8')
+        self.job['SYNC_RUNTIME_NAME'] = '1'
+        result = render_existing(renderer.build_table(self.env, self.job))
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(result['text'].lstrip('\ufeff'))
+        self.assertEqual(root.get('name'), 'new-file')
+        self.assertEqual(next(iter(root.attrib)), 'name', '引擎按首属性读取任务名')
+        self.assertEqual(root.get('description'), "a > b name='keep'")
+
+    def test_web_preview_uses_job_name_and_invalidates_token_when_renamed(self):
+        body = self.preview_body()
+        with patch.object(core, 'load_env', return_value=self.env):
+            first = Api.preview_render(body)
+            second = Api.preview_render(dict(body, job_name='renamed'))
+        self.assertEqual(first['runtime_name'], body['job_name'])
+        self.assertEqual(second['runtime_name'], 'renamed')
+        self.assertTrue(any(c['tag'] == 'RuntimeSchema@name' for c in second['changes']))
+        self.assertNotEqual(first['token'], second['token'])
+
     def test_local_path_overrides_preserve_parameters_and_original(self):
         self.job['PATH_OVERRIDES'] = json.dumps({'SceneSettingsPath': 'D:/local/scene & settings.xml'})
         preview = render_existing(renderer.build_table(self.env, self.job))
@@ -205,8 +235,8 @@ class TaskSchemaTests(unittest.TestCase):
             result = Api.render(dict(body, preview_token=preview['token']))
             self.assertNotIn('error', result)
             self.assertTrue(result['schema_ok'])
-            self.assertEqual(result['out_dir'], self.env['OUT_ROOT'] + '/original-name')
-            saved_job = renderer.read_env_file(str(self.root / 'web-new-file.env'), 'job')
+            self.assertEqual(result['out_dir'], self.env['OUT_ROOT'] + '/new-file')
+            saved_job = renderer.read_env_file(result['job_file'], 'job')
             self.assertEqual(saved_job['SCHEMA_SOURCE'], self.source.as_posix())
             self.assertEqual(saved_job['SYNC_ENGINEERING'], '0')
             assemble.assert_not_called()

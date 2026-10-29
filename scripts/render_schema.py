@@ -36,7 +36,7 @@ import re
 import sys
 import shutil
 from project_config import load_local, validate_operation
-from task_schema import render_existing, runtime_details, LOCAL_PATHS
+from task_schema import render_existing, runtime_details, LOCAL_PATHS, synchronize_runtime_name
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
@@ -429,6 +429,8 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
                 rendered = expand(fh.read(), table, "模板")
             source = to_slash(tpl_path)
 
+        if table.get('SYNC_RUNTIME_NAME') == '1':
+            rendered = synchronize_runtime_name(rendered, table['JOB_NAME'])
         actual = ET.fromstring(rendered)
         actual_paths = {tag: actual.findtext(tag) or '' for tag in LOCAL_PATHS if actual.find(tag) is not None}
         apply_xml_paths(table, actual_paths)

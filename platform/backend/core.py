@@ -352,6 +352,7 @@ def preview_task_schema(body, task, city_kind):
     if not city:
         raise ValueError('请选择地图')
     job = dict(JOB_NAME=body['job_name'], SCHEMA_NAME=body['job_name'] + '.xml',
+               SYNC_RUNTIME_NAME='1',
                FUNC=body.get('func', 'pl'), CITY=city,
                SCHEMA_SOURCE=source, SYNC_ENGINEERING='1' if body.get('sync_engineering') else '0',
                ENGINEERING_FILE=task.get('engineering_file', ''), POLYGON_FILE=polygon)
@@ -391,6 +392,10 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind):
     env = load_env()
     lines = [
         f'JOB_NAME="{job_name}"',
+        'SYNC_RUNTIME_NAME="1"',
+        f'PLATFORM_PROJECT_DIR="{to_slash(env["PROJECT_DIR"])}"',
+        f'PLATFORM_BUILD_SUBDIR="{env["BUILD_SUBDIR"]}"',
+        'PLATFORM_JOB_SCOPE="build-v1"',
         f'SCHEMA_NAME="${{JOB_NAME}}.xml"',
         f'FUNC="{func}"',
         f'TASK_ID="{task_id}"',
@@ -414,11 +419,13 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind):
             f'ENGINEERING_FILE="{csv_file}"',
             f'POLYGON_FILE="{region}"',
         ]
-    job_file = os.path.join(JOBS_DIR, f"web-{job_name}.env")
+    from runtime_cleanup import build_scope
+    directory = os.path.join(JOBS_DIR, env.get('PROJECT_PROFILE_ID') or
+                             hashlib.sha256(os.path.realpath(env['PROJECT_DIR']).encode('utf-8')).hexdigest()[:20],
+                             build_scope(env))
+    os.makedirs(directory, exist_ok=True)
+    job_file = os.path.join(directory, f"web-{job_name}.env")
     if env.get('PROJECT_PROFILE_ID'):
-        directory = os.path.join(JOBS_DIR, env['PROJECT_PROFILE_ID'])
-        os.makedirs(directory, exist_ok=True)
-        job_file = os.path.join(directory, f'web-{job_name}.env')
         lines += [f'PROJECT_PROFILE_ID="{env["PROJECT_PROFILE_ID"]}"']
     if task.get('schema_source'):
         lines += [f'SCHEMA_SOURCE="{task["schema_source"]}"',
@@ -881,9 +888,9 @@ class Runner:
 RUNNER = Runner()
 
 
-def sync_vs_launch(project_env, schema_name, func, task_id, city_kind):
+def sync_vs_launch(project_env, schema_name, func, task_id, city_kind, previous_schema=''):
     return sync_launch(project_env, schema_name, func, task_id, city_kind,
-                       scan_functions(project_env['PROJECT_DIR']))
+                       scan_functions(project_env['PROJECT_DIR']), previous_schema=previous_schema)
 
 
 def start_lishuttle(schema_name, func, task_id):

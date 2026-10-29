@@ -348,15 +348,39 @@ class Api:
             result["copied"] = core.assemble_files(task, core.load_env(), groups=groups)
         if rc == 0 and result['schema_ok']:
             try:
-                result['vs_launch'] = core.sync_vs_launch(
-                    core.load_env(), result['schema_name'], func, task_id, city_kind)
+                previous = body.get('previous_schema', '')
+                if previous and (os.path.basename(previous) != previous or not previous.endswith('.xml')):
+                    raise ValueError('上次运行配置文件名无效')
+                args = (core.load_env(), result['schema_name'], func, task_id, city_kind)
+                result['vs_launch'] = (core.sync_vs_launch(*args, previous_schema=previous)
+                                       if previous else core.sync_vs_launch(*args))
             except (OSError, ValueError) as exc:
                 result['vs_launch_warning'] = f'Visual Studio 启动项未同步：{exc}；请检查 .vs/launch.vs.json'
+        if result['schema_ok']:
+            details = core.runtime_details(schema_path, os.path.dirname(os.path.dirname(schema_path)))
+            result.update(runtime_name=details['name'], out_dir=details['out_dir'])
         return result
 
     @staticmethod
     def preview_render(body):
         return Api.render(dict(body, use_existing_schema=True, preview_only=True))
+
+    @staticmethod
+    @project_operation
+    def cleanup_configs(body):
+        from runtime_cleanup import cleanup_plan, apply_cleanup
+        with core.RUNNER.lock:
+            if any(s.get('status') == 'running' for s in core.RUNNER.sessions.values()):
+                return {'error': '平台仍有运行或编译进程，请结束后再清理'}
+        try:
+            plan = cleanup_plan(core.load_env(), core.JOBS_DIR, core.ROOT, body.get('keep_schema', ''))
+            if body.get('apply'):
+                if body.get('token') != plan['token']:
+                    return {'error': '配置文件已变化，请重新预览清理范围'}
+                return apply_cleanup(plan, os.path.join(core.ROOT, 'docs', 'runtime-config-archives'))
+            return {key: value for key, value in plan.items() if not key.startswith('_')}
+        except (ValueError, OSError, KeyError) as exc:
+            return {'error': f'配置清理未执行：{exc}'}
 
     @staticmethod
     @project_operation
@@ -496,6 +520,7 @@ ROUTES = {
     ("POST", "set_gongcan_root"): Api.set_gongcan_root,
     ("POST", "render"): Api.render,
     ("POST", "preview_render"): Api.preview_render,
+    ("POST", "cleanup_configs"): Api.cleanup_configs,
     ("GET", "params"): Api.params,
     ("POST", "param_write"): Api.param_write,
     ("POST", "param_default"): Api.param_default,

@@ -177,6 +177,19 @@ class ProjectProfileTests(unittest.TestCase):
         self.assertNotEqual(a, b)
         self.assertIn('PROJECT_PROFILE_ID=', Path(a).read_text(encoding='utf-8'))
 
+    def test_generated_jobs_with_same_name_are_build_scoped(self):
+        self.store.load()
+        env = self.store.load()
+        task = dict(txts=[], engineering_file='a.csv')
+        with patch.object(core, 'load_env', return_value=env), patch.object(core, 'JOBS_DIR', str(self.root / 'jobs')), \
+                patch.object(core, 'validate_engineering', return_value='a.csv'):
+            first = core.build_job_env('same', 'pl', '1', task, 'city', 'outdoor')
+            first_bytes = Path(first).read_bytes()
+            env['BUILD_SUBDIR'] = 'out/another-build'
+            second = core.build_job_env('same', 'pl', '2', task, 'city', 'outdoor')
+        self.assertNotEqual(first, second)
+        self.assertEqual(Path(first).read_bytes(), first_bytes)
+
     @unittest.skipUnless(os.name == 'nt', 'Windows batch entrypoint')
     def test_batch_loader_creates_first_snapshot_in_isolated_workspace(self):
         workspace = self.root / '独立 workspace'

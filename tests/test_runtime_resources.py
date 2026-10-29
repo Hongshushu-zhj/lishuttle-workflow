@@ -14,6 +14,8 @@ class RuntimeResourcesTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        self.runtime_xml = self.root / "job.xml"
+        self.runtime_xml.write_text('<RuntimeSchema name="job"><PathlossDirectory>outputs</PathlossDirectory></RuntimeSchema>', encoding="utf-8")
         self.config = self.root / 'ThirdPart/Config'
         self.dll = self.root / 'ThirdPart/Dll/Release'
         self.bin = self.root / 'build/Bin'
@@ -109,7 +111,7 @@ class RuntimeResourcesTests(unittest.TestCase):
              patch.object(core, 'ensure_runtime_resources', side_effect=stage), \
              patch.object(core, 'build_job_env', return_value='job.env'), \
              patch.object(core, 'run_render', side_effect=render), \
-             patch.object(core, 'schema_path', return_value=__file__), \
+             patch.object(core, 'schema_path', return_value=str(self.runtime_xml)), \
              patch.object(core, 'assemble_files', side_effect=overlay), \
              patch.object(core, 'sync_vs_launch', side_effect=launch) as sync:
             result = Api.render(dict(job_name='job', task=task, copy_antennas=True, copy_files=True))
@@ -126,7 +128,7 @@ class RuntimeResourcesTests(unittest.TestCase):
              patch.object(core, 'validate_engineering', return_value='engineering.csv'), \
              patch.object(core, 'build_job_env', return_value='job.env'), \
              patch.object(core, 'run_render', return_value=(0, 'ok')) as render, \
-             patch.object(core, 'schema_path', return_value=__file__), \
+             patch.object(core, 'schema_path', return_value=str(self.runtime_xml)), \
              patch.object(core, 'sync_vs_launch', side_effect=ValueError('JSON 无效')) as sync:
             result = Api.render(dict(job_name='job', task=task))
             self.assertIn('JSON 无效', result['vs_launch_warning'])

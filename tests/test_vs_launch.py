@@ -49,6 +49,22 @@ class VisualStudioLaunchTests(unittest.TestCase):
         self.assertEqual({c['args'][1] for c in configs},
                          {'plindoor', 'predindoor', 'indoorrays'})
 
+    def test_rename_replaces_previous_task_entries_preserves_other_tasks_and_jsonc(self):
+        self.generate('old.xml')
+        self.generate('other.xml')
+        original = self.path.read_text(encoding='utf-8').replace('"defaults": {}', '"defaults": {"keep": 1}')
+        original = original.replace('"configurations": [', '"configurations": [\n // custom preserved\n {"name":"manual", "args":["-c","old.xml"]},')
+        self.path.write_text(original, encoding='utf-8')
+        core.sync_vs_launch(self.env, 'new.xml', 'pred', '2', 'outdoor', previous_schema='old.xml')
+        from vs_launch import _jsonc
+        text = self.path.read_text(encoding='utf-8')
+        configs = json.loads(_jsonc(text))['configurations']
+        self.assertFalse(any(c['name'].startswith('[LiShuttle 平台] old.xml / ') for c in configs))
+        self.assertTrue(any(c['name'].startswith('[LiShuttle 平台] new.xml / ') for c in configs))
+        self.assertTrue(any(c['name'].startswith('[LiShuttle 平台] other.xml / ') for c in configs))
+        self.assertIn('// custom preserved', text)
+        self.assertIn({'name': 'manual', 'args': ['-c', 'old.xml']}, configs)
+
     def test_only_supported_functions_and_explicit_selected_function(self):
         with patch.object(core, 'scan_functions', return_value=['pl', 'cali', 'hybridrays']):
             self.generate(func='hybridrays', task_id='7')
@@ -109,6 +125,20 @@ class VisualStudioLaunchTests(unittest.TestCase):
                 self.generate()
             self.assertEqual(self.path.read_text(encoding='utf-8'), source)
             self.assertFalse(Path(str(self.path) + '.bak').exists())
+
+    def test_pruning_first_middle_last_all_with_jsonc_and_trailing_comma(self):
+        from itertools import combinations
+        from vs_launch import prune_text, _jsonc, PREFIX
+        for trailing in ('', ','):
+            source = '{"configurations":[' + ',\n// marker\n'.join(
+                json.dumps({'name': f'{PREFIX}{i}.xml / pl'}) for i in range(3)) + trailing + ']}'
+            for count in range(4):
+                for indices in combinations(range(3), count):
+                    text = prune_text(source, {f'{i}.xml' for i in indices})
+                    self.assertNotRegex(text, r'\[\s*,\s*\]')
+                    actual = json.loads(_jsonc(text))['configurations']
+                    self.assertEqual([c['name'] for c in actual],
+                                     [f'{PREFIX}{i}.xml / pl' for i in range(3) if i not in indices])
 
     def test_existing_file_without_configurations_gets_array(self):
         self.path.parent.mkdir()
