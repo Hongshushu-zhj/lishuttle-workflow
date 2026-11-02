@@ -69,6 +69,10 @@ main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; borde
 .badge.ok { background: #16a34a; }
 .badge.fail { background: #dc2626; }
 .badge.running { background: #d97706; }
+.runtime-status { margin: 4px 0; color: #92400e; font-size: 13px; }
+.validation-report { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto;
+  padding: 10px; margin: 8px 0; background: #f8fafc; border: 1px solid #dbe3ed; border-radius: 6px; font-size: 13px; }
+.validation-report:empty { display: none; }
 .city .mark { font-size: 11px; }
 
 .tabs { display: flex; gap: 2px; border-bottom: 2px solid #e2e5ea; padding: 6px 10px 0; }

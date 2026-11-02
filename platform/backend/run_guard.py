@@ -1,0 +1,82 @@
+"""One service-wide lease for runtime resources and their input writers."""
+
+from contextlib import contextmanager
+from contextvars import ContextVar
+from copy import deepcopy
+import threading
+import time
+import uuid
+
+
+class RuntimeBusy(RuntimeError):
+    code = 'RUNTIME_BUSY'
+
+    def __init__(self, owner):
+        self.owner = owner
+        super().__init__(f"平台正在{owner.get('label', '执行任务')}，请结束或取消后再操作")
+
+    def response(self):
+        return {'ok': False, 'error': str(self), 'message': str(self),
+                'code': self.code, 'runtime': self.owner}
+
+
+class RuntimeGuard:
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._owner = None
+        self._current = ContextVar('runtime_lease', default=None)
+
+    def snapshot(self):
+        with self._lock:
+            if self._owner is None:
+                return {'busy': False, 'phase': 'idle', 'sid': None}
+            return deepcopy({key: value for key, value in self._owner.items()
+                             if key not in ('token', 'retained')})
+
+    @contextmanager
+    def operation(self, label, context=None):
+        with self._lock:
+            current = self._current.get()
+            nested = self._owner is not None and self._owner['token'] == current
+            if self._owner is not None and not nested:
+                raise RuntimeBusy(self.snapshot())
+            if nested:
+                token = current
+            else:
+                token = uuid.uuid4().hex
+                metadata = {key:value for key,value in (context or {}).items() if key in
+                            ('project', 'bin_dir', 'schema_name', 'func', 'task_id', 'out_dir')}
+                self._owner = dict(metadata, token=token, busy=True,
+                                   phase='preparing', sid=None, label=label,
+                                   started_at=time.time(), retained=False)
+        reset = self._current.set(token)
+        try:
+            yield token
+        finally:
+            self._current.reset(reset)
+            if not nested:
+                with self._lock:
+                    if self._owner and self._owner['token'] == token and not self._owner['retained']:
+                        self.release(token)
+
+    def bind(self, token, sid, context=None):
+        with self._lock:
+            if not self._owner or self._owner['token'] != token:
+                raise RuntimeError('运行占用已失效')
+            # Only safe, descriptive fields are exposed in the busy response.
+            for key in ('project', 'bin_dir', 'schema_name', 'func', 'task_id', 'out_dir'):
+                if context and key in context:
+                    self._owner[key] = context[key]
+            self._owner.update(sid=sid, phase='running', retained=True)
+
+    def set_phase(self, token, phase):
+        with self._lock:
+            if self._owner and self._owner['token'] == token:
+                self._owner['phase'] = phase
+
+    def release(self, token):
+        with self._lock:
+            if not self._owner or self._owner['token'] != token:
+                return False
+            self._owner = None
+            return True

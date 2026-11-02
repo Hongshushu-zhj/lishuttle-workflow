@@ -10,25 +10,26 @@
 <header>
   <div class="header-main">
     <span class="logo">lishuttle <span>本地运行平台</span></span>
-    <label class="project-picker" for="project">当前项目 <select id="project"></select></label>
-    <button id="btn-project-add" aria-expanded="false" aria-controls="project-add-form">添加项目</button>
+    <label class="project-picker" for="project">当前项目 <select id="project" data-runtime-write></select></label>
+    <button id="btn-project-add" data-runtime-write aria-expanded="false" aria-controls="project-add-form">添加项目</button>
     <button id="btn-project-config" aria-expanded="false" aria-controls="project-config-form">项目配置</button>
     <button id="btn-machine-config" aria-expanded="false" aria-controls="machine-config-form">本机工具链（全局）</button>
     <div class="header-tools" aria-label="项目工具">
-      <button id="btn-doctor">体检</button>
-      <button id="btn-build">编译所选配置</button>
+      <button id="btn-doctor" data-runtime-write>体检</button>
+      <button id="btn-build" data-runtime-write>编译所选配置</button>
     </div>
   </div>
   <form id="project-add-form" class="project-add-form hidden">
     <label for="project-path">项目根目录</label>
     <input id="project-path" class="txt" placeholder="输入或粘贴 LiShuttle 项目所在文件夹的完整路径" required>
-    <button type="submit" class="primary">验证并添加</button>
+    <button type="submit" data-runtime-write class="primary">验证并添加</button>
     <span class="field-help">按目录内容识别，不限制项目名称。添加后保存在本机列表。</span>
   </form>
   <span id="env-note" class="muted"></span>
+  <p id="runtime-status" class="runtime-status" role="status" aria-live="polite">正在获取运行状态</p>
   <section id="build-panel" class="setup-card build-panel" aria-label="项目编译">
-    <label for="build-mode">构建模式 <select id="build-mode"></select></label>
-    <label for="build-preset">项目预设 <select id="build-preset"></select></label>
+    <label for="build-mode">构建模式 <select id="build-mode" data-runtime-write></select></label>
+    <label for="build-preset">项目预设 <select id="build-preset" data-runtime-write></select></label>
     <p id="build-summary" class="field-help" role="status"></p>
     <p class="field-help">选择 Debug 或 Release 后点击上方「编译所选配置」。平台调用本机工具链生成构建目录，并自动识别程序文件名。</p>
   </section>
@@ -40,14 +41,14 @@
   <form id="machine-config-form" class="hidden">
     <p class="field-help">VS、CMake、Ninja 和 MSVC 环境脚本属于本机全局配置，所有项目和本地脚本共用。首次打开会自动搜索并保存空缺项；换项目无需重复配置。重新检测只补空缺，已有值可手动修改后保存。</p>
     <div id="machine-config-fields" class="profile-fields"></div>
-    <button type="submit" class="primary">保存本机工具链</button>
-    <button type="button" id="btn-machine-detect">自动检测并保存本机工具链</button>
+    <button type="submit" data-runtime-write class="primary">保存本机工具链</button>
+    <button type="button" id="btn-machine-detect" data-runtime-write>自动检测并保存本机工具链</button>
     <span id="machine-config-note" role="status"></span>
   </form>
   <form id="project-config-form" class="hidden">
     <p class="field-help">打开项目时自动检测本项目的预设和资源目录，确定的值直接填入，多个候选可下拉选择或手动填写。每项下方显示来源；保存后仅对当前项目生效。本机工具链请在上方全局入口配置。</p>
     <div id="project-config-fields" class="profile-fields"></div>
-    <button type="submit" class="primary">保存当前项目配置</button>
+    <button type="submit" data-runtime-write class="primary">保存当前项目配置</button>
     <button type="button" id="btn-project-detect">重新检测</button>
     <span id="project-config-note" role="status"></span>
   </form>
@@ -61,14 +62,14 @@
       <div class="panel-title">地图与场景</div>
       <label class="field-label" for="map-root">地图工作目录</label>
       <input id="map-root" class="path">
-      <button id="btn-rescan-map" class="mini">重新扫描</button>
+      <button id="btn-rescan-map" data-runtime-write class="mini">重新扫描</button>
       <div id="city-list" tabindex="-1" aria-label="地图场景选择"></div>
     </div>
     <div class="panel">
       <div class="panel-title">任务文件</div>
       <label class="field-label" for="gongcan-root">工参任务目录</label>
       <input id="gongcan-root" class="path">
-      <button id="btn-rescan-task" class="mini">重新扫描</button>
+      <button id="btn-rescan-task" data-runtime-write class="mini">重新扫描</button>
       <div id="task-list" tabindex="-1" aria-label="工参任务选择"></div>
     </div>
   </aside>
@@ -94,7 +95,7 @@
           </div>
           <div class="field task-id-field">
             <label for="task-id">任务 ID <span class="muted">-t</span></label>
-            <input id="task-id" class="txt" value="1" title="本次运行的编号标签，不影响输出目录，通常保持默认即可">
+            <input id="task-id" class="txt" value="1" title="本次运行编号；预测结果位于任务输出目录的 pred/编号 下">
           </div>
         </div>
         <div class="field">
@@ -127,7 +128,7 @@
           </details>
         </div>
         <div class="field">
-          <button id="btn-save-task-binding" type="button">保存当前工参与地图对应关系</button>
+          <button id="btn-save-task-binding" data-runtime-write type="button">保存当前工参与地图对应关系</button>
           <span id="task-binding-note" class="field-help" role="status">选择工参及地图后可保存；对应关系仅在当前项目生效。</span>
         </div>
       </section>
@@ -139,21 +140,21 @@
             <label id="antenna-option" class="check-option hidden"><input type="checkbox" id="copy-antennas" disabled> 装配任务天线 <span class="field-help">整目录，带备份</span></label>
             <label class="check-option"><input type="checkbox" id="copy-files" checked> 装配任务模型 <span class="field-help">带备份</span></label>
           </div>
-          <button id="btn-render" class="primary">装配并渲染</button>
+          <button id="btn-render" data-runtime-write class="primary">装配并渲染</button>
         </div>
         <details id="cleanup-options">
           <summary>清理平台历史配置</summary>
           <p class="field-help">检查当前项目所选构建目录。保留当前运行单；未装配时保留最近一次生成的运行单。仅归档可确认由平台生成的历史 XML、备份、渲染记录、任务 env 和对应平台启动项，原始数据及仿真结果保留。归档位于工作流 docs/runtime-config-archives，可按 restore.json 恢复。</p>
-          <button id="btn-cleanup-preview" type="button">预览可清理配置</button>
+          <button id="btn-cleanup-preview" data-runtime-write type="button">预览可清理配置</button>
           <div id="cleanup-preview" class="hidden">
             <pre id="cleanup-preview-text" class="console"></pre>
-            <button id="btn-cleanup-apply" type="button" disabled>归档并清理以上配置</button>
+            <button id="btn-cleanup-apply" data-runtime-write type="button" disabled>归档并清理以上配置</button>
           </div>
           <p id="cleanup-note" class="field-help" role="status"></p>
         </details>
         <div id="schema-preview" class="hidden">
           <pre id="schema-preview-text" class="console"></pre>
-          <button id="btn-apply-schema" class="primary">确认装配此配置</button>
+          <button id="btn-apply-schema" data-runtime-write class="primary">确认装配此配置</button>
         </div>
         <pre id="render-output" class="console hidden"></pre>
       </section>
@@ -179,11 +180,11 @@
       <div class="row">
         <select id="csv-path" class="path"></select>
         <button id="btn-csv-load" class="mini">加载</button>
-        <button id="btn-csv-save" class="mini primary">保存(备份.bak)</button>
+        <button id="btn-csv-save" data-runtime-write class="mini primary">保存(备份.bak)</button>
         <span class="lbl">整列设置：</span>
         <input id="csv-col" class="txt s" placeholder="列名(中英文均可)">
         <input id="csv-val" class="txt s" placeholder="值">
-        <button id="btn-csv-col" class="mini">应用整列</button>
+        <button id="btn-csv-col" data-runtime-write class="mini">应用整列</button>
         <span id="csv-msg" class="muted"></span>
       </div>
       <div id="csv-wrap" class="csv-wrap"><span class="muted">选择上方加载，或在「功能与参数」页选任务后自动带入</span></div>
@@ -192,11 +193,14 @@
     <section id="tab-run" class="tab">
       <div class="row">
         <span id="run-info" class="muted">尚未渲染</span>
-        <button id="btn-run" class="primary">运行 lishuttle</button>
+        <button id="btn-preflight">运行前检查</button>
+        <button id="btn-run" data-runtime-write class="primary">运行 lishuttle</button>
         <button id="btn-stop">停止</button>
         <button id="btn-export-log" disabled title="导出当前会话截至此刻的全部控制台日志">导出运行日志</button>
         <span id="run-status" class="badge hidden"></span>
       </div>
+      <pre id="preflight-report" class="validation-report" aria-live="polite">运行前检查会定位缺失输入；启动时将再次检查。</pre>
+      <pre id="run-outcome" class="validation-report" aria-live="polite"></pre>
       <pre id="run-console" class="console"></pre>
     </section>
 
@@ -204,9 +208,11 @@
       <div class="row">
         <span class="lbl">任务名：</span><input id="result-job" class="txt" placeholder="与运行时的任务名一致">
         <button id="btn-results" class="mini">查看</button>
+        <label><input id="result-directory-only" type="checkbox">仅浏览任务目录</label>
         <button id="btn-open-dir" class="mini">打开目录</button>
         <span id="result-status" class="badge hidden"></span>
       </div>
+      <pre id="result-validation" class="validation-report" aria-live="polite"></pre>
       <div class="cols2">
         <div><div class="panel-title">输出文件</div><div id="result-files"></div></div>
         <div><div class="panel-title">日志尾部（红=ERROR/FATAL）</div><pre id="result-log" class="console short"></pre></div>

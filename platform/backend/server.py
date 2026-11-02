@@ -27,6 +27,7 @@ ROOT = os.path.dirname(PLATFORM)                       # 工作流根目录
 sys.path.insert(0, HERE)
 
 import core  # noqa: E402
+from run_guard import RuntimeBusy
 
 STATIC = os.path.join(PLATFORM, "frontend")
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
@@ -35,6 +36,24 @@ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=ut
 
 
 PROJECT_LOCK = threading.RLock()
+
+
+def runtime_operation(fn):
+    """Reserve before any project/config read that might persist a migration."""
+    @wraps(fn)
+    def wrapped(payload):
+        try:
+            labels = {'run':'运行', 'toolkit':'工具任务', 'render':'装配', 'select_project':'切换项目',
+                      'csv_save':'保存工参', 'csv_column':'修改工参', 'param_write':'修改参数',
+                      'param_default':'恢复参数', 'cleanup_configs':'清理配置'}
+            label = labels.get(fn.__name__, '更新配置')
+            if fn.__name__ == 'toolkit' and isinstance(payload, dict):
+                label = {'build':'编译','stage':'装配','doctor':'体检'}.get(payload.get('step'), label)
+            with core.RUNTIME.operation(label):
+                return fn(payload)
+        except RuntimeBusy as exc:
+            return exc.response()
+    return wrapped
 
 
 def project_operation(fn):
@@ -68,9 +87,15 @@ class Api:
     @project_operation
     def state(_):
         store = core.ProjectStore(core.ENV_FILE)
-        machine = store.setup_machine()
-        # setup may persist tool discovery and invalidate the request's initial revision.
-        core.PROJECT_CONTEXT.set(store.load(allow_empty=True))
+        try:
+            with core.RUNTIME.operation('检测本机工具'):
+                machine = store.setup_machine()
+                # Tool discovery can update the revision, but never while a run owns it.
+                core.PROJECT_CONTEXT.set(store.load(allow_empty=True))
+        except RuntimeBusy:
+            env = core.load_env()
+            machine = {'values': {key: env.get(key, '') for key in core.MACHINE_FIELDS},
+                       'candidates': {}, 'filled': [], 'deferred': True}
         projects, current_project = core.scan_projects()
         cities, map_root = core.scan_cities()
         tasks, gongcan_root = core.scan_tasks()
@@ -89,9 +114,11 @@ class Api:
                 "profile_revision": env.get('PROJECT_PROFILE_REVISION', ''),
                 "function_info": funcs,
                 "functions": [f["name"] for f in funcs],
-                "func_source": "来自 " + current_project + "/SwanUtility/incl/LiShuttleTypes.h"}
+                "func_source": "来自 " + current_project + "/SwanUtility/incl/LiShuttleTypes.h",
+                'runtime': core.RUNTIME.snapshot()}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def select_project(body):
         path = body.get("path", "")
@@ -106,6 +133,7 @@ class Api:
         return Api.select_project(body)
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def save_project_config(body):
         try:
@@ -134,7 +162,12 @@ class Api:
     @project_operation
     def build_status(body):
         try:
-            env = core.sync_executable(core.ProjectStore(core.ENV_FILE), core.load_env())
+            env = core.load_env()
+            try:
+                with core.RUNTIME.operation('刷新构建状态'):
+                    env = core.sync_executable(core.ProjectStore(core.ENV_FILE), env)
+            except RuntimeBusy:
+                pass  # Describe the pinned configuration without implicit persistence.
             core.PROJECT_CONTEXT.set(env)
             return {'build_workflow': core.describe_build(env),
                     'build_values': {key:env.get(key,'') for key in core.BUILD_FIELDS},
@@ -143,6 +176,7 @@ class Api:
             return {'error': str(exc)}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def save_machine_config(body):
         try:
@@ -153,6 +187,7 @@ class Api:
             return {'error': str(exc)}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def detect_machine_config(body):
         try:
@@ -185,7 +220,8 @@ class Api:
         try:
             _, key, _, _ = Api._binding_task(body)
             env = core.load_env()
-            binding = core.ProjectStore(core.ENV_FILE).binding(key, project=env['PROJECT_DIR'])
+            binding = core.ProjectStore(core.ENV_FILE).binding(key, project=env['PROJECT_DIR'],
+                read_only=True)
             return {'binding': binding}
         except (ValueError, OSError) as exc:
             return {'error': str(exc)}
@@ -228,6 +264,7 @@ class Api:
             return {'error': str(exc)}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def save_task_binding(body):
         try:
@@ -251,6 +288,7 @@ class Api:
             return {'error': str(exc)}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def set_map_root(body):
         path = body.get("path", "").replace("\\", "/")
@@ -261,6 +299,7 @@ class Api:
         return {"map_root": map_root, "cities": cities, "profile_revision": core.load_env().get('PROJECT_PROFILE_REVISION', '')}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def set_gongcan_root(body):
         path = body.get("path", "").replace("\\", "/")
@@ -271,6 +310,7 @@ class Api:
         return {"gongcan_root": gongcan_root, "tasks": tasks, "profile_revision": core.load_env().get('PROJECT_PROFILE_REVISION', '')}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def render(body):
         """装配并渲染：写 web-*.env → 调渲染脚本 → 可选复制共用文件。"""
@@ -366,6 +406,7 @@ class Api:
         return Api.render(dict(body, use_existing_schema=True, preview_only=True))
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def cleanup_configs(body):
         from runtime_cleanup import cleanup_plan, apply_cleanup
@@ -403,6 +444,7 @@ class Api:
                 "thirdpart_defaults": core.thirdpart_defaults()}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def param_default(body):
         tag = body.get('tag', '')
@@ -415,6 +457,7 @@ class Api:
         return dict(ok=ok, message=msg, value=default['value'], source=default['source'])
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def param_write(body):
         schema = body.get("schema", "")
@@ -433,28 +476,48 @@ class Api:
         return core.read_csv_grid(query.get("path", [""])[0])
 
     @staticmethod
+    @runtime_operation
+    @project_operation
     def csv_save(body):
         ok, msg = core.save_csv_grid(body["path"], body["header_zh"],
                                      body["header_en"], body["rows"])
         return {"ok": ok, "message": msg}
 
     @staticmethod
+    @runtime_operation
+    @project_operation
     def csv_column(body):
         ok, msg = core.set_csv_column(body["path"], body["column"], body["value"])
         return {"ok": ok, "message": msg}
 
     @staticmethod
+    @runtime_operation
     @project_operation
     def run(body):
         schema = body.get("schema", "")
         func = body.get("func", "pl")
         task_id = str(body.get("task_id", "1"))
-        sid, exe = core.start_lishuttle(schema, func, task_id)
+        try:
+            sid, exe = core.start_lishuttle(schema, func, task_id)
+        except core.PreflightRejected as exc:
+            return {'error': str(exc), 'code': 'PREFLIGHT_FAILED', 'preflight': exc.report,
+                    'issues': exc.report['issues']}
         if sid is None:
             return {"error": exe}
-        return {"sid": sid, "exe": exe}
+        return {"sid": sid, "exe": exe, 'runtime': core.RUNTIME.snapshot(),
+                'context': core.RUNNER.output(sid, 0).get('context', {})}
 
     @staticmethod
+    @project_operation
+    def preflight(body):
+        return core.check_run(body.get('schema', ''), body.get('func', 'pl'), str(body.get('task_id', '1')))
+
+    @staticmethod
+    def runtime_state(_):
+        return core.RUNTIME.snapshot()
+
+    @staticmethod
+    @runtime_operation
     @project_operation
     def toolkit(body):
         if body.get('step') == 'build':
@@ -490,9 +553,15 @@ class Api:
         return {"stopped": core.RUNNER.stop(int(body.get("sid", "0")))}
 
     @staticmethod
-    @project_operation
     def results(query):
-        return core.results(query.get("job", [""])[0])
+        if query.get('sid'):
+            return core.session_results(int(query['sid'][0]))
+        return Api.job_results(query)
+
+    @staticmethod
+    @project_operation
+    def job_results(query):
+        return core.results(query.get('job', [''])[0])
 
     @staticmethod
     def open_folder(body):
@@ -528,6 +597,8 @@ ROUTES = {
     ("POST", "csv_save"): Api.csv_save,
     ("POST", "csv_column"): Api.csv_column,
     ("POST", "run"): Api.run,
+    ("POST", "preflight"): Api.preflight,
+    ("GET", "runtime_state"): Api.runtime_state,
     ("POST", "toolkit"): Api.toolkit,
     ("GET", "output"): Api.output,
     ("POST", "stop"): Api.stop,
@@ -541,6 +612,8 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _json(self, obj, code=200):
+        if isinstance(obj, dict) and obj.get('code') == 'RUNTIME_BUSY':
+            code = 409
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -605,6 +678,9 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n已停止")
+    finally:
+        core.RUNNER.shutdown()
+        server.server_close()
 
 
 if __name__ == "__main__":

@@ -89,7 +89,12 @@ def function_profile(func, values):
     else:
         add('UsingBuildingPolygon MacroMinAntHeight CordPrecision SpatialCalcMode', 'common', 'common')
         add('MaxCalcHeight', 'common', 'dependency', condition='SpatialCalcMode != ground',
-            active=str(values.get('SpatialCalcMode', 'ground')).strip().lower() in ('floor', 'building', '3d'))
+            active=str(values.get('SpatialCalcMode', 'ground')).lower() in ('floor', 'building', '3d'))
+        if func == 'cali':
+            rules['SpatialCalcMode'].update(kind='startup',
+                note='公共解析器读取；校正实测射线显式使用 ground，不由室外预测空间模式决定。')
+            rules['MaxCalcHeight'].update(kind='startup', active=False,
+                note='校正实测射线显式使用 ground，不要求三维预测高度或楼层栈。')
         add('ProjectionFilePath HeightIndexPath ClutterIndexPath ClutterMenuPath BuildingIndexPath BulidVectorIndexPath', 'geo', 'dependency',
             condition='XML 不存在 MapPath 元素时使用逐项地图路径', active='MapPath' not in values)
         for tag in ('ProjectionFilePath', 'HeightIndexPath', 'ClutterIndexPath'):

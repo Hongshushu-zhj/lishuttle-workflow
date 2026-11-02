@@ -9,6 +9,7 @@ const S = {  // 全局状态
   func: "pl",
   job: null,           // {name, schema, func, taskId}
   sid: 0, since: 0, pollTimer: null,
+  resultSid: 0, resultContext: null, runtime: {busy:false}, launchPending: false,
 };
 
 async function api(name, body, method) {
@@ -23,7 +24,9 @@ async function api(name, body, method) {
     const suffix = method === 'GET' && S.project && name !== 'output' && name !== 'state'
       ? `${body ? '&' : '?'}_project=${encodeURIComponent(S.project)}&_revision=${encodeURIComponent(S.profileRevision || '')}` : '';
     const res = await fetch(`/api/${name}${method === "GET" ? body + suffix : ""}`, opt);
-    return await res.json();
+    const result = await res.json();
+    if (result.code === 'RUNTIME_BUSY' && result.runtime) applyRuntimeState(result.runtime, true);
+    return result;
   } finally {
     if (writing) S.pendingRequests--;
   }
@@ -58,6 +61,8 @@ async function init() {
     await changeProject("add_project", $("project-path").value.trim());
   };
   bindActions();
+  await refreshRuntimeState(true);
+  S.runtimeTimer = setInterval(() => refreshRuntimeState(true), 1200);
   $("btn-project-config").onclick = () => {
     const open = $("project-config-form").classList.contains("hidden");
     $("project-config-form").classList.toggle("hidden", !open);
@@ -140,6 +145,7 @@ function applyProjectState(st, {preserveMachineDraft = false} = {}) {
   $("run-info").textContent = "尚未渲染";
   $("run-console").textContent = "";
   S.sid = 0; S.since = 0;
+  S.resultSid = 0; S.resultContext = null;
   $("btn-export-log").disabled = true;
   $("run-status").classList.add("hidden");
   $("result-files").innerHTML = "";
@@ -159,6 +165,7 @@ function applyProjectState(st, {preserveMachineDraft = false} = {}) {
   renderTasks(st.tasks);
   $("env-note").textContent = `预设 ${st.preset} · 输出根 ${st.out_root}`;
   if (typeof fetch === 'function' && S.profileId) refreshProjectDetection();
+  if (st.runtime) applyRuntimeState(st.runtime, true);
 }
 
 const PROFILE_LABELS = {
@@ -438,6 +445,7 @@ function bindActions() {
   $("btn-render").onclick = doRender;
   $("btn-cleanup-preview").onclick = previewCleanup;
   $("btn-run").onclick = doRun;
+  $("btn-preflight").onclick = doPreflight;
   $("btn-stop").onclick = () => post("stop", { sid: S.sid });
   $("btn-export-log").onclick = exportRunLog;
   $("btn-csv-load").onclick = loadCsv;
@@ -1101,12 +1109,131 @@ function applyBuildStatus(result, sentDraft = {...S.projectDraft}) {
 }
 
 async function doRun() {
+  if (S.launchPending || S.pollTimer || S.runtime?.busy) return toast('平台已有任务，请等待结束或取消', false);
   if (!S.job) return toast("先在「功能与参数」页装配并渲染", false);
   if (taskIdentityDirty()) return toast('任务名或任务 ID 已修改，请先重新装配并渲染', false);
-  const r = await post("run", { schema: S.job.schema, func: S.job.func, task_id: S.job.taskId });
-  if (r.error) return toast(r.error, false);
-  attachConsole(r.sid, `运行 ${S.job.schema}：`);
-  switchTab(document.querySelector('[data-tab="run"]'));
+  S.launchPending = true;
+  const epoch = S.projectEpoch;
+  const request = {schema:S.job.schema, func:S.job.func, task_id:S.job.taskId};
+  try {
+    const check = await post('preflight', request);
+    if (epoch !== S.projectEpoch) return;
+    showPreflight(check);
+    if (check.error || !check.ok) return toast(check.error || '运行前检查未通过，请查看具体缺项', false);
+    const r = await post('run', request);
+    if (epoch !== S.projectEpoch) return;
+    if (r.preflight) showPreflight(r.preflight);
+    if (r.error) return toast(r.error, false);
+    rememberRunContext(r.sid, r.context);
+    if (r.runtime) applyRuntimeState(r.runtime);
+    attachConsole(r.sid, `运行 ${request.schema}：`);
+    switchTab(document.querySelector('[data-tab="run"]'));
+  } catch (error) {
+    toast(`运行请求失败：${error.message}`, false);
+  } finally {
+    S.launchPending = false;
+  }
+}
+
+async function doPreflight() {
+  if (!S.job) return toast('请先装配并渲染运行配置', false);
+  if (taskIdentityDirty()) return toast('任务设置已修改，请先重新装配', false);
+  const epoch = S.projectEpoch;
+  const report = await post('preflight', {schema:S.job.schema,func:S.job.func,task_id:S.job.taskId});
+  if (epoch === S.projectEpoch) showPreflight(report);
+}
+
+function showPreflight(report) {
+  const mode = report.context?.mode;
+  $('preflight-report').textContent = (report.error || (report.ok ? '运行前检查通过' : '运行前检查未通过')) +
+    (mode ? `\n配置模式：${mode.requested ?? '缺省 ground'}；本功能使用：${mode.effective}` : '') +
+    (report.issues || []).map(issue => `\n${issue.severity === 'error' ? '阻断' : '提示'}：${issue.message}` +
+      (issue.field ? ` [${issue.field}]` : '') + (issue.path ? `\n  ${issue.path}` : '')).join('');
+}
+
+const runtimeDisabled = new WeakMap();
+function applyRuntimeState(state, restore = false) {
+  if (!state || state.error) return;
+  S.runtime = state;
+  S.runtimeSerial = (S.runtimeSerial || 0) + 1;
+  const phases = {preparing:'准备中',running:'运行中',cancelling:'取消中',finalizing:'验证结果中'};
+  $('runtime-status').textContent = state.busy
+    ? `${state.func || state.label || '任务'}：${phases[state.phase] || state.phase}；相关输入已锁定` : '平台空闲';
+  const controls = [...document.querySelectorAll('[data-runtime-write]'),
+    ...document.querySelectorAll('#params-area input, #params-area select, #params-area button, #csv-wrap input, #csv-wrap select, #project-config-form input, #project-config-form select, #machine-config-form input')];
+  controls.forEach(node => {
+    if (state.busy) {
+      if (!runtimeDisabled.has(node)) runtimeDisabled.set(node, !!node.disabled);
+      node.disabled = true;
+    } else if (runtimeDisabled.has(node)) {
+      node.disabled = runtimeDisabled.get(node);
+      runtimeDisabled.delete(node);
+    }
+  });
+  if (restore && state.busy && state.sid && S.sid !== state.sid) attachConsole(state.sid, `恢复会话 ${state.sid}：`);
+}
+
+async function refreshRuntimeState(restore = false) {
+  if (S.runtimeRefreshPending) return;
+  S.runtimeRefreshPending = true;
+  const serial = S.runtimeSerial || 0;
+  try {
+    const state = await get('runtime_state');
+    if (serial === (S.runtimeSerial || 0)) applyRuntimeState(state, restore);
+  } catch (error) {
+    $('runtime-status').textContent = `运行状态暂不可用：${error.message}`;
+  } finally {
+    S.runtimeRefreshPending = false;
+  }
+}
+
+function rememberRunContext(sid, context) {
+  if (!context?.func) return;
+  if (S.resultSid === sid) { S.resultContext = context; return; }
+  S.resultSid = sid;
+  S.resultContext = context;
+  $('result-job').value = context.task_name || '';
+}
+
+const VERDICTS = {success:'成功',partial:'部分成功',no_update:'无模型更新',unconfirmed:'未确认',failed:'失败',cancelled:'已取消',pending:'处理中'};
+function verdictClass(verdict) {
+  return verdict === 'success' ? 'ok' : ['failed','cancelled'].includes(verdict) ? 'fail' : verdict === 'pending' ? 'running' : 'unknown';
+}
+
+function showOutcome(id, report) {
+  const labels = {valid:'通过',invalid:'不完整或损坏',failed:'失败',unconfirmed:'未确认',pending:'待验证',
+    usable:'可用',unusable:'不可用',success:'成功',partial:'部分成功',no_update:'无模型更新',skipped:'已跳过',
+    not_applicable:'不适用',unassociated:'未关联',done:'已结束',exited:'已退出',running:'运行中',
+    cancelling:'取消中',finalizing:'结果验证中',cancelled:'已取消'};
+  const process = report.process || {}, artifacts = report.artifacts || {}, business = report.business || {};
+  const exit = process.exit ?? process.exit_code ?? report.exit;
+  const text = [`进程：${labels[process.status] || process.status || '未确认'}；退出码 ${exit ?? '尚未退出'}`,
+    `产物验证：${labels[artifacts.status] || artifacts.status || '未确认'}`,
+    `业务可用性：${labels[business.status] || business.status || '未确认'}`];
+  const mode = report.context?.mode;
+  if (mode) text.push(`配置模式：${mode.requested ?? '缺省 ground'}；实际计算：${mode.effective}`);
+  if (business.total != null) text.push(`校正站点：${business.total}；成功：${business.succeeded ?? 0}；更新：${business.updated ?? 0}；失败：${business.failed ?? 0}；未更新：${business.no_update ?? 0}`);
+  (business.sites || []).forEach(site => text.push(`${site.site}：${site.success ? '校正成功' : '校正失败'}，${site.update ? '有更新' : '未更新'}，网格 ${site.grids}，原因码 0x${Number(site.code).toString(16)}`));
+  const countText = counts => ['processed','total','succeeded','success','updated','skipped','failed','unconfirmed']
+    .filter(key => counts[key] != null).map(key =>
+      `${({processed:'处理',total:'总数',succeeded:'成功',success:'成功',updated:'更新',skipped:'跳过',failed:'失败',unconfirmed:'未确认'})[key]} ${counts[key]}`).join('，');
+  if (business.counts) text.push('模型类别汇总：' + countText(business.counts));
+  Object.entries(business.model_kinds || {}).forEach(([kind, outcome]) => {
+    text.push(`${({cells:'站点模型',general:'通用模型',scenes:'场景模型'})[kind] || kind}：${labels[outcome.status] || outcome.status || '未确认'}` +
+      (countText(outcome) ? `；${countText(outcome)}` : '') +
+      (outcome.unit ? `；单位：${({site_groups:'站点组',models:'模型',scenes:'场景'})[outcome.unit] || outcome.unit}` : '') +
+      (outcome.reason ? `；${outcome.reason}` : ''));
+    (outcome.items || []).forEach((item, index) => text.push(
+      `  ${item.label || item.name || item.id || item.site || index + 1}：${labels[item.status] || item.status || '未确认'}` +
+      (item.reason ? `；${item.reason}` : '')));
+  });
+  (artifacts.checked || []).forEach(item => {
+    if (item.valid != null) text.push(`${item.path || item.file || ''}：有效栅格 ${item.valid}` +
+      (item.total != null ? ` / ${item.total}` : '') + (item.current === false ? '；本次归属未确认' : ''));
+  });
+  (report.issues || []).forEach(issue => text.push(`${issue.severity === 'error' ? '问题' : '提示'}：${issue.message}` + (issue.path ? `\n  ${issue.path}` : '')));
+  if (report.internal_error) text.push(report.internal_error);
+  $(id).textContent = text.join('\n');
 }
 
 function taskIdentityDirty() {
@@ -1167,16 +1294,31 @@ async function previewCleanup() {
 }
 
 function attachConsole(sid, title, onDone = null) {
+  const epoch = S.projectEpoch, project = S.project, sentDraft = {...S.projectDraft};
   S.sid = sid; S.since = 0;
   $("btn-export-log").disabled = false;
   const con = $("run-console");
   con.textContent = title + "\n";
+  $('run-outcome').textContent = '';
   $("run-status").className = "badge running hidden";
   if (S.pollTimer) clearInterval(S.pollTimer);
   S.pollTimer = setInterval(async () => {
     const r = await get("output", `sid=${sid}&since=${S.since}`);
     if (sid !== S.sid) return;
+    if (r.code === 'SESSION_NOT_FOUND') {
+      clearInterval(S.pollTimer);
+      S.pollTimer = null;
+      S.sid = 0;
+      if (S.resultSid === sid) { S.resultSid = 0; S.resultContext = null; }
+      $('btn-export-log').disabled = true;
+      $('run-status').className = 'badge unknown';
+      $('run-status').textContent = '会话已失效；结果未确认';
+      $('run-outcome').textContent = `${r.error}；目录浏览不作为本次成功证据。`;
+      await refreshRuntimeState(true);
+      return;
+    }
     if (r.error) return;
+    rememberRunContext(sid, r.context);
     if (r.lines.length) {
       S.since = r.total;
       const frag = r.lines.map(l => {
@@ -1191,10 +1333,20 @@ function attachConsole(sid, title, onDone = null) {
       S.pollTimer = null;
       const b = $("run-status");
       b.classList.remove("hidden");
-      b.className = "badge " + (r.exit === 0 ? "ok" : "fail");
-      b.textContent = `退出码 ${r.exit}`;
-      toast(`${r.label} 结束，退出码 ${r.exit}`, r.exit === 0);
+      const result = r.result || {verdict:r.exit === 0 ? 'unconfirmed' : 'failed',process:{status:'done',exit:r.exit}};
+      b.className = 'badge ' + verdictClass(result.verdict);
+      b.textContent = `${VERDICTS[result.verdict] || '未确认'} · 退出码 ${r.exit}`;
+      showOutcome('run-outcome', {...result, context:r.context, internal_error:r.internal_error});
+      toast(`${r.label}：${VERDICTS[result.verdict] || '未确认'}，退出码 ${r.exit}`, result.verdict === 'success');
+      await refreshRuntimeState();
       if (onDone) await onDone(r);
+      else if (r.context?.operation === 'build' && epoch === S.projectEpoch &&
+               r.context.project?.replace(/\\/g, '/') === project) {
+        const status = await post('build_status', {});
+        if (epoch !== S.projectEpoch) return;
+        if (status.error) return setupError(status);
+        applyBuildStatus(status, sentDraft);
+      }
     }
   }, 700);
 }
@@ -1242,25 +1394,26 @@ let lastResultsDir = "";
 async function loadResults() {
   const epoch = S.projectEpoch;
   const job = $("result-job").value.trim() || (S.job && S.job.name);
-  if (!job) return toast("填任务名", false);
-  const r = await get("results", `job=${encodeURIComponent(job)}`);
+  const sid = !$("result-directory-only").checked && S.resultSid && (!job || job === S.resultContext?.task_name) ? S.resultSid : 0;
+  if (!job && !sid) return toast("填任务名或先运行任务", false);
+  const r = await get("results", sid ? `sid=${sid}` : `job=${encodeURIComponent(job)}`);
   if (epoch !== S.projectEpoch) return;
+  if (r.error) return toast(r.error, false);
   lastResultsDir = r.dir || "";
   const b = $("result-status");
+  showOutcome('result-validation', r);
   if (!r.exists) {
     b.className = "badge fail"; b.textContent = "输出目录不存在";
     $("result-files").innerHTML = ""; $("result-log").textContent = "";
     return;
   }
   b.classList.remove("hidden");
-  const empty = r.empty_run;
-  b.className = "badge " + (empty ? "fail" : r.status === "end" ? "ok" : r.status ? "fail" : "unknown");
-  b.textContent = empty ? "假完成(无产物)"
-    : r.status ? ({ end: "完成", failed: "失败", processing: "进行中" }[r.status] || r.status) : "无状态文件";
+  b.className = 'badge ' + (r.associated ? verdictClass(r.verdict) : 'unknown');
+  b.textContent = r.associated ? `会话 ${sid}：${VERDICTS[r.verdict] || '未确认'}` : '目录浏览：未关联本次运行';
   $("result-files").innerHTML = r.files.map(f =>
-    `<div><span>${f.rel}</span><span class="muted">${f.size}</span></div>`).join("");
+    `<div><span>${esc(f.rel)}</span><span class="muted">${f.size}</span></div>`).join("");
   const src = r.log_file
-    ? `\n（日志来源：${r.log_file}${r.log_file.includes("Bin") ? "，exe目录实时日志" : "，输出目录归档日志"}）` : "";
+    ? `\n（历史目录日志：${esc(r.log_file)}；不作为本次成功证据）` : "";
   $("result-log").innerHTML =
     r.log_tail.map(l => {
       const cls = /FATAL|ERROR/.test(l) ? "err" : /WARN/.test(l) ? "warn" : "";

@@ -23,6 +23,11 @@ import hashlib
 import tempfile
 import math
 import xml.etree.ElementTree as ET
+from copy import deepcopy
+import time
+import secrets
+from run_guard import RuntimeGuard
+from managed_process import ManagedProcess
 from engineering import identify_engineering, validate_engineering, normalized
 from vs_launch import sync_launch
 
@@ -52,7 +57,8 @@ CSV_ENCODINGS = ("utf-8-sig", "gb18030", "gbk")
 # ----------------------------------------------------------------------
 
 def load_env():
-    return dict(PROJECT_CONTEXT.get() or ProjectStore(ENV_FILE).load(allow_empty=True))
+    return dict(PROJECT_CONTEXT.get() or ProjectStore(ENV_FILE).load(
+        allow_empty=True, read_only=True))
 
 
 def save_env_keys(**kwargs):
@@ -82,7 +88,7 @@ def scan_projects():
             found = json.load(fh).get('projects', [])
     current = to_slash(env.get("PROJECT_DIR", ""))
     if env.get('PROJECT_PROFILE_ID'):
-        found = found + ProjectStore(ENV_FILE).paths()
+        found = found + ProjectStore(ENV_FILE).paths(read_only=True)
     unique, seen = [], set()
     for path in ([current] if current else []) + found:
         key = os.path.normcase(os.path.abspath(to_native(path)))
@@ -840,49 +846,167 @@ def set_csv_column(path, column_key, value):
 # 进程运行器（lishuttle / 体检 / 编译 / 装配 共用）
 # ----------------------------------------------------------------------
 
+RUNTIME = RuntimeGuard()
+
+
 class Runner:
-    def __init__(self):
+    def __init__(self, guard=None):
         self.sessions = {}
-        self.lock = threading.Lock()
-        self.counter = 0
+        self.lock = threading.RLock()
+        # Numeric for existing clients, unique across service restarts (< JS 2**53).
+        self.counter = secrets.randbits(51)
+        self.guard = guard if guard is not None else RUNTIME
 
-    def start(self, cmd, cwd, label, env=None):
-        with self.lock:
-            self.counter += 1
-            sid = self.counter
-        proc = subprocess.Popen(
-            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="gbk", errors="replace", shell=False, env=env)
-        self.sessions[sid] = {"proc": proc, "lines": [], "status": "running",
-                              "label": label, "exit": None}
-
-        def pump():
-            for line in proc.stdout:
+    def start(self, cmd, cwd, label, env=None, context=None, baseline=None, finalize=None):
+        context = deepcopy(context or {})
+        with self.guard.operation(label, context) as token:
+            tree = ManagedProcess(cmd, cwd, env=env)
+            proc = tree.proc
+            try:
                 with self.lock:
-                    self.sessions[sid]["lines"].append(line.rstrip("\r\n"))
-            proc.wait()
-            with self.lock:
-                self.sessions[sid]["status"] = "done"
-                self.sessions[sid]["exit"] = proc.returncode
+                    self.counter += 1
+                    sid = self.counter
+                    self.sessions[sid] = {"proc": proc, "tree": tree, "lines": [], "status": "running",
+                                          "label": label, "exit": None, "context": context,
+                                          "cancelled": False, "internal_error": '', "result": None,
+                                          "token": token, 'done_event': threading.Event()}
+                    self.guard.bind(token, sid, context)
+            except BaseException:
+                tree.terminate()
+                tree.wait()
+                tree.close()
+                raise
 
-        threading.Thread(target=pump, daemon=True).start()
-        return sid
+            def pump():
+                s = self.sessions[sid]
+                try:
+                    for line in proc.stdout:
+                        with self.lock:
+                            s['lines'].append(line.rstrip('\r\n'))
+                except Exception as exc:
+                    with self.lock:
+                        s['internal_error'] = f'日志读取失败：{exc}'
+                    try:
+                        tree.terminate()
+                    except Exception as stop_error:
+                        with self.lock:
+                            s['internal_error'] += f'；终止失败：{stop_error}'
+                finally:
+                    try:
+                        proc.stdout.close()
+                    except Exception:
+                        pass
+                # A root process can exit while build/engine children still run.
+                # Keep the lease, even on a monitoring error, until exit is confirmed.
+                while True:
+                    try:
+                        code = tree.wait()
+                        break
+                    except Exception as exc:
+                        with self.lock:
+                            s['internal_error'] = f'等待进程树退出失败：{exc}'
+                        time.sleep(.1)
+                self.guard.set_phase(token, 'finalizing')
+                with self.lock:
+                    s.update(status='finalizing', exit=code)
+                    lines, cancelled = list(s['lines']), s['cancelled']
+                try:
+                    if finalize:
+                        result = finalize(context, baseline, lines, code, cancelled=cancelled)
+                    else:
+                        verdict = ('cancelled' if cancelled else 'failed' if code else
+                                   'unconfirmed' if context.get('func') else 'success')
+                        result = {'verdict': verdict, 'process': {'exit': code, 'status': 'done'},
+                                  'artifacts': {'status': 'unconfirmed' if context.get('func') else 'not_applicable'},
+                                  'business': {'status': 'unconfirmed' if context.get('func') else 'not_applicable'}}
+                    if s['internal_error'] and result.get('verdict') == 'success':
+                        result['verdict'] = 'unconfirmed'
+                except Exception as exc:
+                    with self.lock:
+                        s['internal_error'] = f'结果验证失败：{exc}'
+                    result = {'verdict': 'cancelled' if cancelled else 'failed' if code else 'unconfirmed',
+                              'process': {'exit': code, 'status': 'done'},
+                              'artifacts': {'status': 'unconfirmed'}, 'business': {'status': 'unconfirmed'},
+                              'issues': [{'severity': 'error', 'code': 'VALIDATION_ERROR',
+                                          'message': str(exc), 'path': context.get('out_dir', '')}]}
+                finally:
+                    try:
+                        tree.close()
+                    except Exception as exc:
+                        with self.lock:
+                            s['internal_error'] += f'；关闭进程句柄失败：{exc}'
+                        if result.get('verdict') == 'success':
+                            result['verdict'] = 'unconfirmed'
+                with self.lock:
+                    s.update(result=result, status='done')
+                    self.guard.release(token)
+                    s['done_event'].set()
+
+            try:
+                threading.Thread(target=pump, daemon=True).start()
+            except BaseException as exc:
+                with self.lock:
+                    s = self.sessions[sid]
+                    s['internal_error'] = f'无法启动进程监控：{exc}'
+                    # If termination also fails, a later stop/shutdown can
+                    # finish the same monitor synchronously without a new thread.
+                    s['recover_pump'] = pump
+                try:
+                    tree.terminate()
+                except Exception as stop_error:
+                    with self.lock:
+                        s['internal_error'] += f'；终止失败，可重试：{stop_error}'
+                else:
+                    with self.lock:
+                        recover = s.pop('recover_pump', None)
+                    if recover:
+                        recover()
+                raise
+            return sid
 
     def output(self, sid, since):
         with self.lock:
             s = self.sessions.get(sid)
             if not s:
-                return {"error": "会话不存在"}
-            return {"lines": s["lines"][since:], "total": len(s["lines"]),
-                    "status": s["status"], "exit": s["exit"], "label": s["label"]}
+                return {"error": "会话不存在", 'code':'SESSION_NOT_FOUND'}
+            return deepcopy({"lines": s["lines"][max(0, since):], "total": len(s["lines"]),
+                             "status": s["status"], "exit": s["exit"], "label": s["label"],
+                             'context': s.get('context', {}), 'result': s.get('result'),
+                             'cancelled': s.get('cancelled', False), 'internal_error': s.get('internal_error', '')})
 
     def stop(self, sid):
         with self.lock:
             s = self.sessions.get(sid)
-        if s and s["status"] == "running":
-            s["proc"].terminate()
-            return True
-        return False
+            if not s or s['status'] in ('done', 'finalizing'):
+                return False
+            if s.get('cancelled'):
+                return True
+            s.update(cancelled=True, status='cancelling')
+            self.guard.set_phase(s['token'], 'cancelling')
+            try:
+                s['tree'].terminate()
+            except Exception as exc:
+                s.update(cancelled=False, status='running', internal_error=f'停止失败，可重试：{exc}')
+                self.guard.set_phase(s['token'], 'running')
+                raise
+            recover = s.pop('recover_pump', None)
+        if recover:
+            recover()
+        return True
+
+    def shutdown(self):
+        with self.lock:
+            active = [sid for sid, s in self.sessions.items() if s['status'] != 'done']
+        for sid in active:
+            # The HTTP server must not exit while daemon monitors are still
+            # waiting on a killed child or validating its final products.
+            event = self.sessions[sid]['done_event']
+            while not event.is_set():
+                try:
+                    self.stop(sid)
+                except Exception:
+                    pass  # stop records the diagnostic and remains retryable.
+                event.wait(.1)
 
 
 RUNNER = Runner()
@@ -893,39 +1017,91 @@ def sync_vs_launch(project_env, schema_name, func, task_id, city_kind, previous_
                        scan_functions(project_env['PROJECT_DIR']), previous_schema=previous_schema)
 
 
+class PreflightRejected(ValueError):
+    def __init__(self, report):
+        self.report = report
+        errors = [item['message'] for item in report['issues'] if item['severity'] == 'error']
+        super().__init__('运行前检查未通过：' + ('；'.join(errors[:3]) or '输入无法确认'))
+
+
+def check_run(schema_name, func, task_id):
+    from preflight import check_run as inspect_run
+    if (not schema_name or os.path.basename(schema_name) != schema_name or
+            '/' in schema_name or '\\' in schema_name or not schema_name.lower().endswith('.xml')):
+        return {'ok': False, 'issues': [{'severity': 'error', 'code': 'SCHEMA_NAME_INVALID',
+                'message': '请选择 runtimelibrary 中的运行 XML 文件名', 'field': 'schema', 'path': schema_name}],
+                'context': {}}
+    report = inspect_run(load_env(), schema_path(schema_name), func, str(task_id))
+    report['context']['schema_name'] = schema_name
+    return report
+
+
 def start_lishuttle(schema_name, func, task_id):
     """直接起 lishuttle.exe（工作目录=exe 目录），不经 bat。"""
-    env = load_env()
-    try:
-        validate_operation(env, 'run')
-    except ValueError as exc:
-        return None, str(exc)
-    exe = os.path.join(env["PROJECT_DIR"].replace("/", os.sep),
-                       *env["BUILD_SUBDIR"].split("/"), "Bin", env["EXE_NAME"])
-    if not os.path.isfile(exe):
-        return None, f"找不到 {exe}，先编译"
-    cmd = [exe, "-f", func, "-t", str(task_id), "-c", schema_name]
-    cwd = os.path.dirname(exe)
-    return RUNNER.start(cmd, cwd, f"-f {func} -t {task_id} -c {schema_name}"), to_slash(exe)
+    with RUNTIME.operation('运行 ' + func):
+        env = load_env()
+        try:
+            validate_operation(env, 'run')
+        except ValueError as exc:
+            return None, str(exc)
+        report = check_run(schema_name, func, task_id)
+        if not report['ok']:
+            raise PreflightRejected(report)
+        from result_validation import snapshot, validate
+        context = deepcopy(report['context'])
+        context['project_config'] = dict(env)
+        context['preflight_issues'] = report['issues']
+        baseline = snapshot(context)
+        exe, cwd = context['exe'], context['bin_dir']
+        cmd = [exe, '-f', func, '-t', str(task_id), '-c', schema_name]
+        sid = RUNNER.start(cmd, cwd, f'-f {func} -t {task_id} -c {schema_name}',
+                           context=context, baseline=baseline, finalize=validate)
+        return sid, to_slash(exe)
 
 
 def start_toolkit(step):
     """doctor/build/stage：批处理封装。"""
-    env = load_env()
-    try:
-        validate_operation(env, step)
-    except ValueError as exc:
-        return None, str(exc)
-    bat = os.path.join(SCRIPTS, {"doctor": "doctor_local.bat", "build": "build_local.bat",
-                                 "stage": "stage_local.bat"}[step])
-    child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env))
-    sid = RUNNER.start(["cmd", "/c", bat], ROOT, step, env=child_env)
-    return sid, to_slash(bat)
+    with RUNTIME.operation(step):
+        env = load_env()
+        try:
+            validate_operation(env, step)
+        except ValueError as exc:
+            return None, str(exc)
+        bat = os.path.join(SCRIPTS, {"doctor": "doctor_local.bat", "build": "build_local.bat",
+                                     "stage": "stage_local.bat"}[step])
+        child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env))
+        binary = os.path.realpath(os.path.join(env['PROJECT_DIR'], env.get('BUILD_SUBDIR', ''), 'Bin'))
+        sid = RUNNER.start(["cmd", "/d", "/c", bat], ROOT, step, env=child_env,
+                           context={'project': env['PROJECT_DIR'], 'bin_dir': binary, 'operation': step})
+        return sid, to_slash(bat)
 
 
 # ----------------------------------------------------------------------
 # 结果查看
 # ----------------------------------------------------------------------
+
+def session_results(sid):
+    with RUNNER.lock:
+        session = RUNNER.sessions.get(sid)
+        if not session:
+            return {'error': '会话不存在；重启服务后的目录浏览无法确认本次运行',
+                    'code':'SESSION_NOT_FOUND'}
+        context = deepcopy(session.get('context', {}))
+        report = deepcopy(session.get('result'))
+        if report is None:
+            report = {'verdict': 'pending', 'process': {'status': session['status'], 'exit': session['exit']},
+                      'artifacts': {'status': 'pending'}, 'business': {'status': 'pending'},
+                      'files': [], 'log_tail': session['lines'][-40:], 'errors': [], 'issues': []}
+        report.update(sid=sid, associated=True, context=context, dir=context.get('out_dir', ''),
+                      status=session['status'], exit=session['exit'], label=session['label'],
+                      internal_error=session.get('internal_error', ''))
+        report.setdefault('exists', bool(context.get('out_dir') and os.path.isdir(context['out_dir'])))
+        report.setdefault('files', [])
+        report.setdefault('log_tail', session['lines'][-40:])
+        report.setdefault('errors', [])
+        report.setdefault('log_file', '')
+        return report
+
 
 def results(job_name):
     env = load_env()
@@ -941,7 +1117,10 @@ def results(job_name):
                            *env["BUILD_SUBDIR"].split("/"), "Bin")
     info = {"dir": to_slash(out_dir), "exists": os.path.isdir(out_dir),
             "files": [], "status": "", "log_tail": [], "errors": [],
-            "log_file": ""}
+            "log_file": "", 'associated': False, 'verdict': 'unconfirmed',
+            'association_note': '目录浏览：未关联本次运行',
+            'process': {'status': 'unassociated', 'exit': None},
+            'artifacts': {'status': 'unconfirmed'}, 'business': {'status': 'unconfirmed'}}
     if not info["exists"]:
         return info
     for base, dirs, files in os.walk(out_dir):
