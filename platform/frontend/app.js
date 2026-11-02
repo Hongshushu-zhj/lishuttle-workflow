@@ -432,8 +432,14 @@ async function changeProject(action, path) {
     $("project").value = S.project;
     toast(`项目切换失败：${error.message}`, false);
   } finally {
-    $("project").disabled = false;
-    $("btn-project-add").disabled = false;
+    for (const id of ['project', 'btn-project-add']) {
+      const node = $(id);
+      // The response can capture this request's temporary disable as the
+      // runtime lock's baseline. Restore its idle value without bypassing
+      // an actual runtime owner that may have rejected the switch.
+      if (runtimeDisabled.has(node)) runtimeDisabled.set(node, false);
+      node.disabled = !!S.runtime?.busy;
+    }
   }
 }
 
