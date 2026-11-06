@@ -17,7 +17,7 @@ function fixture() {
     document:{getElementById:element, querySelectorAll:selector =>
       selector === '[data-runtime-write]' ? protectedIds.map(element) : []},
   });
-  vm.runInContext(fs.readFileSync('platform/frontend/app.js', 'utf8').replace(/init\(\);\s*$/, ''), context);
+  vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/, ''), context);
   const run = code => vm.runInContext(code, context);
   run(`renderCities=cities=>{S.cities=cities}; renderTasks=tasks=>{S.tasks=tasks};
     renderFuncRadios=func=>{S.func=func};
@@ -37,7 +37,7 @@ const selected = runtime => ({project:'/new',projects:['/old','/new'],functions:
   self.run('applyRuntimeState({busy:false,phase:"idle"})');
   assert.equal(self.element('project').disabled, false, '切换结束和空闲确认后项目选择不能永久禁用');
   assert.equal(self.element('btn-project-add').disabled, false, '添加项目也应释放临时禁用');
-  assert.equal(self.element('btn-run').disabled, false);
+  assert.equal(self.element('btn-run').disabled, true, 'idle does not make an unassembled project runnable');
   assert.equal(self.run('S.project'), '/new');
   let switches = 0;
   self.context.fetch = async () => { switches++; return {json:async()=>selected({busy:false,phase:'idle'})}; };

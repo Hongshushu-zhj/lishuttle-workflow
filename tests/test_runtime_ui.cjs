@@ -16,7 +16,7 @@ const context = vm.createContext({
   setTimeout(){}, setInterval(fn){const id=nextTimer++; timers.set(id,fn); return id;},
   clearInterval(id){timers.delete(id);}, console,
 });
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/, ''), context);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/, ''), context);
 const run = code => vm.runInContext(code, context);
 
 (async () => {

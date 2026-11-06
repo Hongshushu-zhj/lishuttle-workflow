@@ -366,7 +366,8 @@ class Api:
             if body.get('preview_only'):
                 return preview
             if body.get('preview_token') != preview['token']:
-                return {'error': '配置或路径选择已变化，请重新预览后确认装配'}
+                return {'error': '配置或路径选择已变化，请重新预览后确认装配',
+                        'code': 'PREVIEW_STALE'}
         try:
             base_resources = core.ensure_runtime_resources(core.load_env())
         except (OSError, ValueError) as exc:
@@ -533,14 +534,14 @@ class Api:
                 sid, bat = core.start_toolkit('build')
                 if sid is None:
                     return {'error': bat}
-                return {'sid':sid, 'bat':bat, 'build_values':values,
+                return {'sid':sid, 'bat':bat, 'build_values':values, 'runtime':core.RUNTIME.snapshot(),
                         'profile_revision':env.get('PROJECT_PROFILE_REVISION'), 'build_workflow':core.describe_build(env)}
             except (ValueError, OSError) as exc:
                 return {'error':str(exc), 'issues':[{'key':'PRESET','target':'build-mode','section':'build','message':str(exc)}]}
         sid, bat = core.start_toolkit(body.get("step", "doctor"))
         if sid is None:
             return {'error': bat}
-        return {"sid": sid, "bat": bat}
+        return {"sid": sid, "bat": bat, 'runtime':core.RUNTIME.snapshot()}
 
     @staticmethod
     def output(query):

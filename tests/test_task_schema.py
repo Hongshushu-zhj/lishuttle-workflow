@@ -216,6 +216,7 @@ class TaskSchemaTests(unittest.TestCase):
             self.source.write_bytes(self.text.replace('>123<', '>124<').encode('utf-8'))
             result = Api.render(dict(body, preview_token=preview['token']))
             self.assertIn('error', result)
+            self.assertEqual(result.get('code'), 'PREVIEW_STALE')
             build.assert_not_called()
 
     def test_api_apply_persists_reuse_and_skips_shared_resource_changes(self):

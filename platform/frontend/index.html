@@ -10,40 +10,41 @@
 <header>
   <div class="header-main">
     <span class="logo">lishuttle <span>本地运行平台</span></span>
-    <label class="project-picker" for="project">当前项目 <select id="project" data-runtime-write></select></label>
-    <button id="btn-project-add" data-runtime-write aria-expanded="false" aria-controls="project-add-form">添加项目</button>
-    <button id="btn-project-config" aria-expanded="false" aria-controls="project-config-form">项目配置</button>
     <button id="btn-machine-config" aria-expanded="false" aria-controls="machine-config-form">本机工具链（全局）</button>
-    <div class="header-tools" aria-label="项目工具">
-      <button id="btn-doctor" data-runtime-write>体检</button>
-      <button id="btn-build" data-runtime-write>编译所选配置</button>
-    </div>
+    <button id="btn-show-operation" aria-controls="operation-panel">查看操作日志</button>
   </div>
-  <form id="project-add-form" class="project-add-form hidden">
-    <label for="project-path">项目根目录</label>
-    <input id="project-path" class="txt" placeholder="输入或粘贴 LiShuttle 项目所在文件夹的完整路径" required>
-    <button type="submit" data-runtime-write class="primary">验证并添加</button>
-    <span class="field-help">按目录内容识别，不限制项目名称。添加后保存在本机列表。</span>
-  </form>
-  <span id="env-note" class="muted"></span>
   <p id="runtime-status" class="runtime-status" role="status" aria-live="polite">正在获取运行状态</p>
-  <section id="build-panel" class="setup-card build-panel" aria-label="项目编译">
-    <label for="build-mode">构建模式 <select id="build-mode" data-runtime-write></select></label>
-    <label for="build-preset">项目预设 <select id="build-preset" data-runtime-write></select></label>
-    <p id="build-summary" class="field-help" role="status"></p>
-    <p class="field-help">选择 Debug 或 Release 后点击上方「编译所选配置」。平台调用本机工具链生成构建目录，并自动识别程序文件名。</p>
-  </section>
-  <section class="project-guide" aria-label="项目操作指南">
-    <strong>新项目操作指南</strong>
-    <ol id="workflow-steps"></ol>
-    <p id="setup-validation" role="alert" aria-live="assertive"></p>
-  </section>
   <form id="machine-config-form" class="hidden">
     <p class="field-help">VS、CMake、Ninja 和 MSVC 环境脚本属于本机全局配置，所有项目和本地脚本共用。首次打开会自动搜索并保存空缺项；换项目无需重复配置。重新检测只补空缺，已有值可手动修改后保存。</p>
     <div id="machine-config-fields" class="profile-fields"></div>
     <button type="submit" data-runtime-write class="primary">保存本机工具链</button>
     <button type="button" id="btn-machine-detect" data-runtime-write>自动检测并保存本机工具链</button>
     <span id="machine-config-note" role="status"></span>
+  </form>
+</header>
+<div id="hint" class="hint">把鼠标放到参数上，这里显示说明</div>
+<div class="layout">
+ <aside class="workflow-sidebar" aria-label="工作流程">
+  <p class="nav-eyebrow">工作流程</p><nav id="workflow-nav" aria-label="六个工作阶段"></nav>
+  <ol id="workflow-steps" class="hidden" aria-hidden="true"></ol>
+  <p class="field-help">按顺序准备，随时返回修改。已有程序可直接使用。</p>
+ </aside>
+ <main id="workflow-main">
+  <nav class="hidden" aria-hidden="true"><button data-tab="params">参数</button><button data-tab="csv">CSV</button><button data-tab="run">运行</button><button data-tab="results">结果</button></nav>
+<details class="workflow-stage" id="stage-project" data-stage="project" open>
+  <summary><span class="stage-number">01</span><span class="stage-heading"><strong>项目与环境</strong><span id="current-project-name">选择项目 · 确认目录与资源</span></span><span id="stage-project-status" class="stage-status">待确认</span><span class="stage-toggle"><span class="stage-toggle-expand">展开</span><span class="stage-toggle-collapse">收起</span><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4"/></svg></span></summary>
+  <div class="stage-body">
+  <div class="project-context">
+    <label class="project-picker" for="project">当前项目 <select id="project" data-runtime-write aria-describedby="current-project-path"></select></label>
+    <div class="project-location"><span class="field-help">项目目录</span><p id="current-project-path" class="project-path">尚未选择项目</p></div>
+    <p id="env-note" class="field-help"></p>
+  </div>
+  <div class="section-heading"><p class="field-help">在此选择或切换项目，确认目录与资源位置；配置保存在当前项目。</p>
+<button id="btn-project-add" data-runtime-write aria-expanded="false" aria-controls="project-add-form">添加项目</button><button id="btn-project-config" aria-expanded="false" aria-controls="project-config-form">项目配置</button></div>  <form id="project-add-form" class="project-add-form hidden">
+    <label for="project-path">项目根目录</label>
+    <input id="project-path" class="txt" placeholder="输入或粘贴 LiShuttle 项目所在文件夹的完整路径" required>
+    <button type="submit" data-runtime-write class="primary">验证并添加</button>
+    <span class="field-help">按目录内容识别，不限制项目名称。添加后保存在本机列表。</span>
   </form>
   <form id="project-config-form" class="hidden">
     <p class="field-help">打开项目时自动检测本项目的预设和资源目录，确定的值直接填入，多个候选可下拉选择或手动填写。每项下方显示来源；保存后仅对当前项目生效。本机工具链请在上方全局入口配置。</p>
@@ -52,13 +53,21 @@
     <button type="button" id="btn-project-detect">重新检测</button>
     <span id="project-config-note" role="status"></span>
   </form>
-</header>
-
-<div id="hint" class="hint">把鼠标放到参数上，这里显示说明</div>
-
-<div class="layout">
-  <aside>
-    <div class="panel">
+<p id="setup-validation" role="alert" aria-live="assertive"></p></div>
+</details>
+<details class="workflow-stage" id="stage-build" data-stage="build" open>
+  <summary><span class="stage-number">02</span><span class="stage-heading"><strong>程序准备</strong><span>复用已有程序，或编译所选配置</span></span><span id="stage-build-status" class="stage-status">待确认</span><span class="stage-toggle"><span class="stage-toggle-expand">展开</span><span class="stage-toggle-collapse">收起</span><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4"/></svg></span></summary>
+  <div class="stage-body">  <section id="build-panel" class="setup-card build-panel" aria-label="项目编译">
+    <label for="build-mode">构建模式 <select id="build-mode" data-runtime-write></select></label>
+    <label for="build-preset">项目预设 <select id="build-preset" data-runtime-write></select></label>
+    <p id="build-summary" class="field-help" role="status"></p>
+    <p id="build-help" class="field-help">修改源码并保存后，点击「编译所选配置」会调用本机 CMake / MSVC，按所选项目预设增量编译并链接受影响的目标；没有变化时可能无需重新编译。请在操作日志中确认本次编译成功，然后重新装配并进行运行前检查。</p>
+  </section>
+<div class="row"><button id="btn-use-executable" aria-describedby="build-action-reason" type="button">使用已识别程序</button><button id="btn-doctor" data-runtime-write>项目体检</button><button id="btn-build" aria-describedby="build-action-reason" data-runtime-write class="primary">编译所选配置</button></div><p id="build-action-reason" class="field-help" role="status">已有匹配程序可直接继续；需要编译时再配置工具链。</p></div>
+</details>
+<details class="workflow-stage" id="stage-inputs" data-stage="inputs" open>
+  <summary><span class="stage-number">03</span><span class="stage-heading"><strong>任务与输入</strong><span>功能、地图、工参与运行配置</span></span><span id="stage-inputs-status" class="stage-status">待确认</span><span class="stage-toggle"><span class="stage-toggle-expand">展开</span><span class="stage-toggle-collapse">收起</span><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4"/></svg></span></summary>
+  <div class="stage-body"><p class="selection-summary" id="selection-note">选择地图场景与工参任务，确认本次输入。</p><div class="inputs-grid"><div class="input-catalogs">    <div class="panel">
       <div class="panel-title">地图与场景</div>
       <label class="field-label" for="map-root">地图工作目录</label>
       <input id="map-root" class="path">
@@ -72,25 +81,13 @@
       <button id="btn-rescan-task" data-runtime-write class="mini">重新扫描</button>
       <div id="task-list" tabindex="-1" aria-label="工参任务选择"></div>
     </div>
-  </aside>
-
-  <main>
-    <nav class="tabs">
-      <button data-tab="params" class="active">功能与参数</button>
-      <button data-tab="csv">工参CSV</button>
-      <button data-tab="run">运行</button>
-      <button data-tab="results">结果</button>
-    </nav>
-
-    <section id="tab-params" class="tab active">
-      <div class="selection-summary" id="selection-note">先在左侧选城市/场景和工参任务</div>
-
-      <section class="setup-card" aria-labelledby="task-heading">
+</div><div class="input-settings">
+<section class="setup-card" aria-labelledby="task-heading">
         <h2 id="task-heading">任务设置</h2>
         <div class="task-fields">
           <div class="field">
             <label for="job-name">任务名</label>
-            <input id="job-name" class="txt" placeholder="如 pl-guangzhou">
+            <input id="job-name" class="txt" placeholder="如 pred-guangzhou">
             <span id="task-name-note" class="field-help" role="status">装配后同步运行 XML 名称、输出子目录和 Visual Studio 启动项；修改后需重新装配。</span>
           </div>
           <div class="field task-id-field">
@@ -133,14 +130,37 @@
         </div>
       </section>
 
-      <section class="setup-card assembly-card" aria-labelledby="assembly-heading">
+</div>
+</div>
+<details id="csv-editor"><summary>查看与编辑所选工参 CSV</summary><p id="csv-dirty-status" class="field-help" role="status">修改后请保存，再切换文件或运行。</p>
+<button id="btn-csv-discard" type="button" class="hidden">放弃未保存修改并重新加载</button>    <section id="tab-csv" class="legacy-view">
+      <div class="row">
+        <select id="csv-path" aria-label="当前编辑的工参 CSV 文件" class="path"></select>
+        <button id="btn-csv-load" class="mini">加载</button>
+        <button id="btn-csv-save" data-runtime-write class="mini primary">保存(备份.bak)</button>
+        <span class="lbl">整列设置：</span>
+        <input id="csv-col" aria-label="整列设置的列名" class="txt s" placeholder="列名(中英文均可)">
+        <input id="csv-val" aria-label="整列设置的新值" class="txt s" placeholder="值">
+        <button id="btn-csv-col" data-runtime-write class="mini">应用整列</button>
+        <span id="csv-msg" class="muted"></span>
+      </div>
+      <div id="csv-wrap" class="csv-wrap"><span class="muted">选择工参后自动带入同一文件，点击加载查看内容</span></div>
+    </section>
+
+</details>
+</div>
+</details>
+<details class="workflow-stage" id="stage-assembly" data-stage="assembly" open>
+  <summary><span class="stage-number">04</span><span class="stage-heading"><strong>装配与确认</strong><span>核对来源与目标，生成运行配置</span></span><span id="stage-assembly-status" class="stage-status">待确认</span><span class="stage-toggle"><span class="stage-toggle-expand">展开</span><span class="stage-toggle-collapse">收起</span><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4"/></svg></span></summary>
+  <div class="stage-body"><p id="assembly-summary" class="selection-summary">装配前请核对目标程序、输入来源和任务名称。</p>
+<section class="setup-card assembly-card" aria-labelledby="assembly-heading">
         <h2 id="assembly-heading">资源与装配</h2>
         <div class="assembly-actions">
           <div class="resource-options">
             <label id="antenna-option" class="check-option hidden"><input type="checkbox" id="copy-antennas" disabled> 装配任务天线 <span class="field-help">整目录，带备份</span></label>
             <label class="check-option"><input type="checkbox" id="copy-files" checked> 装配任务模型 <span class="field-help">带备份</span></label>
           </div>
-          <button id="btn-render" data-runtime-write class="primary">装配并渲染</button>
+          <button id="btn-render" aria-describedby="assembly-action-reason" data-runtime-write class="primary">装配并渲染</button>
         </div>
         <details id="cleanup-options">
           <summary>清理平台历史配置</summary>
@@ -154,12 +174,18 @@
         </details>
         <div id="schema-preview" class="hidden">
           <pre id="schema-preview-text" class="console"></pre>
-          <button id="btn-apply-schema" data-runtime-write class="primary">确认装配此配置</button>
+          <button id="btn-apply-schema" aria-describedby="schema-apply-status" data-runtime-write class="primary">确认装配此配置</button>
         </div>
         <pre id="render-output" class="console hidden"></pre>
       </section>
 
-      <section class="parameters-section" aria-labelledby="parameters-heading">
+<p id="schema-apply-status" class="field-help" role="status" aria-live="polite"></p>
+<p id="assembly-action-reason" class="field-help" role="status"></p></div>
+</details>
+<details class="workflow-stage" id="stage-check" data-stage="check" open>
+  <summary><span class="stage-number">05</span><span class="stage-heading"><strong>参数与运行前检查</strong><span>调整目标参数，核对运行依赖</span></span><span id="stage-check-status" class="stage-status">待确认</span><span class="stage-toggle"><span class="stage-toggle-expand">展开</span><span class="stage-toggle-collapse">收起</span><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4"/></svg></span></summary>
+  <div class="stage-body"><section id="tab-params">
+<section class="parameters-section" aria-labelledby="parameters-heading">
         <div class="section-heading">
           <h2 id="parameters-heading">配置参数</h2>
           <span class="field-help">显示当前运行 XML 的实际字段；按功能筛选只调整展示，不改变参数值</span>
@@ -172,39 +198,19 @@
           <div id="params-profile" class="field-help"></div>
           <p class="field-help">已调研功能按源码调用链展示，包含其路损和数据依赖；“当前生效”按已确认开关过滤，实际运行还取决于数据与引擎分支。未分类及其他功能字段仍保留在全部视图。修改写入运行 XML 副本并备份；小区计算半径仍优先写入工参 CSV。</p>
         </div>
+        <div class="row"><button id="btn-params-save" data-runtime-write type="button" class="hidden">重试保存未完成的修改</button><button id="btn-params-discard" type="button" class="hidden">放弃未保存的参数修改</button></div>
         <div id="params-area"></div>
       </section>
-    </section>
-
-    <section id="tab-csv" class="tab">
-      <div class="row">
-        <select id="csv-path" class="path"></select>
-        <button id="btn-csv-load" class="mini">加载</button>
-        <button id="btn-csv-save" data-runtime-write class="mini primary">保存(备份.bak)</button>
-        <span class="lbl">整列设置：</span>
-        <input id="csv-col" class="txt s" placeholder="列名(中英文均可)">
-        <input id="csv-val" class="txt s" placeholder="值">
-        <button id="btn-csv-col" data-runtime-write class="mini">应用整列</button>
-        <span id="csv-msg" class="muted"></span>
-      </div>
-      <div id="csv-wrap" class="csv-wrap"><span class="muted">选择上方加载，或在「功能与参数」页选任务后自动带入</span></div>
-    </section>
-
-    <section id="tab-run" class="tab">
-      <div class="row">
-        <span id="run-info" class="muted">尚未渲染</span>
-        <button id="btn-preflight">运行前检查</button>
-        <button id="btn-run" data-runtime-write class="primary">运行 lishuttle</button>
-        <button id="btn-stop">停止</button>
-        <button id="btn-export-log" disabled title="导出当前会话截至此刻的全部控制台日志">导出运行日志</button>
-        <span id="run-status" class="badge hidden"></span>
-      </div>
-      <pre id="preflight-report" class="validation-report" aria-live="polite">运行前检查会定位缺失输入；启动时将再次检查。</pre>
-      <pre id="run-outcome" class="validation-report" aria-live="polite"></pre>
-      <pre id="run-console" class="console"></pre>
-    </section>
-
-    <section id="tab-results" class="tab">
+</section>
+<div class="row"><button id="btn-preflight" aria-describedby="check-action-reason">运行前检查</button><span id="check-action-reason" class="field-help" role="status">装配后检查当前运行配置。</span></div>      <pre id="preflight-report" class="validation-report" aria-live="polite">运行前检查会定位缺失输入；启动时将再次检查。</pre>
+</div>
+</details>
+<details class="workflow-stage" id="stage-run" data-stage="run" open>
+  <summary><span class="stage-number">06</span><span class="stage-heading"><strong>运行与结果</strong><span>启动本次任务，查看产物与结果</span></span><span id="stage-run-status" class="stage-status">待确认</span><span class="stage-toggle"><span class="stage-toggle-expand">展开</span><span class="stage-toggle-collapse">收起</span><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4"/></svg></span></summary>
+  <div class="stage-body"><section id="tab-run"><div class="row"><span id="run-info" class="muted">尚未装配</span><button id="btn-run" aria-describedby="run-action-reason" data-runtime-write class="primary">运行 lishuttle</button><span id="run-status" class="badge hidden"></span></div><p id="run-action-reason" class="field-help" role="status">完成装配与检查后启动。</p>
+<pre id="run-outcome" class="validation-report" aria-live="polite"></pre>
+</section>
+<section id="tab-results" class="legacy-view">
       <div class="row">
         <span class="lbl">任务名：</span><input id="result-job" class="txt" placeholder="与运行时的任务名一致">
         <button id="btn-results" class="mini">查看</button>
@@ -214,13 +220,21 @@
       </div>
       <pre id="result-validation" class="validation-report" aria-live="polite"></pre>
       <div class="cols2">
-        <div><div class="panel-title">输出文件</div><div id="result-files"></div></div>
+        <div><div class="panel-title">输出文件</div><div id="result-files"></div>
+</div>
         <div><div class="panel-title">日志尾部（红=ERROR/FATAL）</div><pre id="result-log" class="console short"></pre></div>
       </div>
     </section>
-  </main>
 </div>
-
+</details>
+</main></div>
+<details id="operation-panel" class="operation-panel" open><summary><strong id="operation-title">操作日志</strong><span class="field-help">编译、体检、装配与运行的共享日志</span></summary><div class="operation-body"><div class="row"><button id="btn-stop">停止当前操作</button><button id="btn-export-log" disabled title="导出当前会话截至此刻的全部控制台日志">导出日志</button></div><pre id="run-console" class="console" aria-label="当前操作日志"></pre></div></details>
+<script src="workflow-state.js"></script>
+<script src="api-client.js"></script>
+<script src="project-build.js"></script>
+<script src="task-assembly.js"></script>
+<script src="editors.js"></script>
+<script src="runtime-session.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

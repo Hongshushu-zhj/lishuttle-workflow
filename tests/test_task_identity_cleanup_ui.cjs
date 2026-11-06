@@ -10,7 +10,7 @@ function el(id) {
   return nodes.get(id);
 }
 const ctx = vm.createContext({document:{getElementById:el,querySelectorAll:()=>[],querySelector:()=>null},setTimeout(){}});
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/,''),ctx);
 const run = code => vm.runInContext(code,ctx);
 run(`S.project='/engine';S.projectEpoch=1;S.job={name:'old',schema:'old.xml',func:'pred',taskId:'1'};`);
 el('job-name').value='new'; el('task-id').value='1';
@@ -31,6 +31,11 @@ el('job-name').value='new'; el('task-id').value='1';
   assert.equal(calls[0].body.keep_schema,'old.xml');
   assert.match(el('cleanup-preview-text').textContent,/history.xml/);
   assert.equal(el('btn-cleanup-apply').disabled,false);
+  ctx.document.querySelectorAll = selector => selector === '[data-runtime-write]' ? [el('btn-cleanup-apply')] : [];
+  run('applyRuntimeState({busy:true,phase:"preparing"});resetCleanupPreview();applyRuntimeState({busy:false,phase:"idle"})');
+  assert.equal(el('btn-cleanup-apply').disabled,true,'idle must not revive an invalidated cleanup confirmation');
+  await run('previewCleanup()');
+  calls.pop(); // The repeated preview is read-only; retain payload assertions below.
   assert.equal(calls.length,1,'preview does not move files');
   await el('btn-cleanup-apply').onclick();
   assert.equal(calls[1].body.token,'snapshot');

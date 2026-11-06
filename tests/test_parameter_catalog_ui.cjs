@@ -7,7 +7,7 @@ function el(id){
 }
 const ctx=vm.createContext({document:{getElementById:el,querySelectorAll:()=>[],createElement(){return {
   innerHTML:'',querySelector(){return {appendChild(row){rows.push(row);}};}};}},setTimeout(){}});
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 ctx.catalog={file:'/project/Bin/runtimelibrary/job.xml',schema_name:'job',function:'pl',
  counts:{total:4,recommended:1,other:1,unclassified:2},values:{DefaultCalcResolution:'5',MinK0:'10',Vendor:'<raw>',Structured:'<Item>1</Item>'},
@@ -44,7 +44,7 @@ ctx.catalog={file:'/project/Bin/runtimelibrary/job.xml',schema_name:'job',functi
   await run('loadParams()');
   assert.match(run('requestQuery'),/func=cali/,'uses current selected simulation function');
   assert.match(run('requestQuery'),/all=1/,'always fetches the complete actual inventory');
-  const input={dataset:{tag:'DefaultCalcResolution'},value:'7',listeners:{},classList:{remove(){}},
+  const input={dataset:{tag:'DefaultCalcResolution'},value:'7',listeners:{},classList:{add(){},remove(){}},
     addEventListener(name,handler){this.listeners[name]=handler;}};
   el('params-area').querySelectorAll=selector=>selector.startsWith('input') ? [input] : [];
   ctx.savedCatalog=JSON.parse(JSON.stringify(ctx.catalog));

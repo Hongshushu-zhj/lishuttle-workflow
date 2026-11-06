@@ -15,12 +15,14 @@ header .logo span { margin-left: 8px; font-size: 13px; font-weight: normal; colo
 .param-control { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .param-control input { flex: 1 1 180px; min-width: 0; }
 .param-default { white-space: nowrap; }
-#env-note { color: #bac8da; font-size: 12px; overflow-wrap: anywhere; }
+#env-note { color: #64748b; font-size: 12px; overflow-wrap: anywhere; margin: 8px 0 0; }
 .profile-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px 18px; margin-bottom: 12px; }
 .profile-fields label, #local-path-fields label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .profile-fields input, .profile-fields select { width: 100%; min-width: 0; padding: 6px; }
-#project-config-form .field-help, #machine-config-form .field-help { color: #bac8da; overflow-wrap: anywhere; }
-#project-config-note, #machine-config-note { display: block; margin-top: 8px; color: #d9e7f5; }
+#project-config-form .field-help { color: #64748b; overflow-wrap: anywhere; }
+#machine-config-form .field-help { color: #bac8da; overflow-wrap: anywhere; }
+#project-config-note, #machine-config-note { display: block; margin-top: 8px; }
+#machine-config-note { color: #d9e7f5; }
 #local-path-fields { display: grid; gap: 10px; margin: 12px 0; }
 #local-path-fields .field-help { overflow-wrap: anywhere; }
 #task-binding-note { margin-top: 8px; }
@@ -46,8 +48,8 @@ select:disabled, input:disabled { background: #f1f5f9; color: #64748b; cursor: n
   color: #665; min-height: 22px; }
 
 .layout { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
-aside { width: 250px; flex-shrink: 0; display: flex; flex-direction: column; gap: 14px; }
-main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; border-radius: 8px; min-height: 80vh; }
+aside { width: 208px; flex-shrink: 0; }
+main { flex: 1; min-width: 0; }
 
 .panel { background: #fff; border: 1px solid #e2e5ea; border-radius: 8px; padding: 12px; }
 .panel-title { font-weight: bold; margin-bottom: 6px; color: #1f2d3d; }
@@ -74,12 +76,6 @@ main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; borde
   padding: 10px; margin: 8px 0; background: #f8fafc; border: 1px solid #dbe3ed; border-radius: 6px; font-size: 13px; }
 .validation-report:empty { display: none; }
 .city .mark { font-size: 11px; }
-
-.tabs { display: flex; gap: 2px; border-bottom: 2px solid #e2e5ea; padding: 6px 10px 0; }
-.tabs button { border: 1px solid #e2e5ea; border-bottom: none; border-radius: 4px 4px 0 0; }
-.tabs button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
-.tab { display: none; padding: 18px; }
-.tab.active { display: block; }
 
 .selection-summary { padding: 10px 14px; margin-bottom: 16px; border: 1px solid #dbeafe;
   border-radius: 6px; background: #eff6ff; color: #1e40af; overflow-wrap: anywhere; }
@@ -155,7 +151,7 @@ main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; borde
 @media (max-width: 1000px) {
   aside { width: 220px; }
   .layout { gap: 12px; padding: 12px; }
-  .tab { padding: 12px; }
+
   .ptable td:first-child { width: 150px; overflow-wrap: anywhere; }
 }
 @media (max-width: 720px) {
@@ -171,8 +167,6 @@ main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; borde
   aside .panel { flex: 1 1 240px; min-width: 0; }
   .task-fields { grid-template-columns: minmax(0, 1fr) 100px; gap: 12px; }
   .setup-card { padding: 12px; }
-  .tabs { overflow-x: auto; }
-  .tabs button { white-space: nowrap; }
   .ptable { table-layout: fixed; }
   .ptable td { overflow-wrap: anywhere; }
   .ptable td:first-child { width: 30%; }
@@ -182,7 +176,7 @@ main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; borde
 /* Project setup and build guidance */
 .build-panel { display:flex; flex-wrap:wrap; align-items:center; gap:8px 20px; margin:12px 0; }
 .build-panel p { flex-basis:100%; margin:0; }
-.build-panel .field-help { color:#d0dbea; }
+.build-panel .field-help { color:#64748b; }
 .build-panel select { min-width:170px; padding:5px; }
 .project-guide { padding:12px 16px; background:#f3f7fc; border:1px solid #d5e1ef; border-radius:8px; margin:12px 0; }
 .project-guide strong, .project-guide li { color:#334155; }
@@ -199,3 +193,98 @@ main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; borde
 .param-warning { color: #9a3412; background: #fff7ed; padding: 6px 8px; border-left: 3px solid #f59e0b; }
 #params-profile details { margin: 6px 0; }
 #params-profile p { margin: 5px 0; overflow-wrap: anywhere; }
+
+/* Ordered workflow workspace: view navigation never hides the stage contents. */
+:root { scroll-behavior: smooth; }
+body { color: #243247; background: #f3f5f8; }
+header { padding: 12px 24px; gap: 5px; background: #203249; }
+.header-main { gap: 10px 16px; }
+.header-main .logo { margin-right: auto; }
+header .runtime-status { color: #f3d19d; }
+button { min-height: 30px; border-radius: 5px; }
+button.primary { background: #275eb0; border-color: #275eb0; }
+button.primary:hover { background: #194c96; }
+:focus-visible { outline: 3px solid #80aef2; outline-offset: 3px; }
+.layout { max-width: 1600px; margin: 0 auto; padding: 24px; gap: 24px; }
+.workflow-sidebar { position: sticky; top: 20px; padding: 8px 0; }
+.nav-eyebrow { font-size: 11px; font-weight: 700; letter-spacing: .12em; color: #708198; margin: 0 12px 14px; }
+#workflow-nav { display: grid; gap: 5px; }
+#workflow-nav a, #workflow-nav button { display: block; width: 100%; padding: 10px 12px; border: 1px solid transparent; border-radius: 7px; text-align: left; text-decoration: none; background: transparent; color: #475569; overflow-wrap: anywhere; }
+#workflow-nav [aria-current="step"], #workflow-nav .active { background: #e5edf9; color: #1f5298; border-color: #cddcf1; }
+.workflow-sidebar > .field-help { padding: 8px 12px; line-height: 1.8; }
+.workflow-stage { background: #fff; border: 1px solid #dfe5ed; border-radius: 10px; margin: 0 0 18px; scroll-margin-top: 18px; box-shadow: 0 2px 4px #20324904; }
+.workflow-stage > summary { display: flex; align-items: center; gap: 12px; list-style: none; margin: 0; padding: 19px 22px; border-radius: 10px; }
+.workflow-stage > summary::-webkit-details-marker { display: none; }
+.workflow-stage > summary:hover { background: #f7faff; }
+.stage-toggle { display: inline-flex; align-items: center; justify-content: center; gap: 7px; flex-shrink: 0; min-width: 80px; min-height: 44px; padding: 8px 12px; border: 1px solid #9dbbe2; border-radius: 7px; color: #1f5298; background: #edf4ff; font-size: 13px; font-weight: 600; }
+.stage-toggle svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.stage-toggle-collapse, .workflow-stage[open] > summary .stage-toggle-expand { display: none; }
+.workflow-stage[open] > summary .stage-toggle-collapse { display: inline; }
+.workflow-stage[open] > summary .stage-toggle svg { transform: rotate(180deg); }
+.workflow-stage > summary:hover .stage-toggle { background: #dceaff; border-color: #648ec4; }
+.workflow-stage[open] > summary { border-bottom: 1px solid #edf0f5; border-radius: 10px 10px 0 0; }
+.stage-number { display: grid; place-items: center; width: 32px; height: 32px; flex-shrink: 0; border-radius: 8px; background: #edf2fa; color: #365e94; font-size: 12px; font-weight: 700; }
+.stage-heading { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.stage-heading strong { font-size: 16px; font-weight: 600; color: #23364e; }
+.stage-heading > span { font-size: 12px; color: #718096; }
+#current-project-name { overflow-wrap: anywhere; }
+.stage-status { margin-left: auto; color: #61738a; font-size: 12px; white-space: nowrap; background: #f2f5f9; padding: 3px 8px; border-radius: 20px; }
+.stage-body { padding: 22px; min-width: 0; }
+.project-context { padding: 14px 16px; margin-bottom: 16px; border: 1px solid #d7e3f2; border-radius: 7px; background: #f7faff; min-width: 0; }
+.project-context .project-picker { color: #334155; font-weight: 600; }
+.project-context select { flex: 1 1 300px; min-width: 0; width: 100%; max-width: 100%; font-weight: 400; }
+.project-location { margin-top: 10px; }
+.project-path { margin: 3px 0 0; color: #23364e; overflow-wrap: anywhere; }
+.stage-body > :last-child { margin-bottom: 0; }
+.stage-body .setup-card { background: #fff; border: 0; border-radius: 0; padding: 0; margin-bottom: 22px; }
+.stage-body .setup-card h2 { font-size: 13px; color: #5b6c82; }
+.stage-body .project-add-form { border-color: #dfe5ed; padding: 12px 0; }
+.stage-body .project-add-form .field-help { color: #64748b; }
+.inputs-grid { display: grid; grid-template-columns: minmax(220px, .85fr) minmax(0, 1.5fr); gap: 24px; }
+.input-catalogs { min-width: 0; }
+.input-catalogs .panel { background: #f8fafc; margin-bottom: 14px; }
+.input-settings { min-width: 0; }
+#city-list, #task-list { max-height: 290px; overflow: auto; }
+#csv-editor { margin-top: 14px; border-top: 1px solid #e2e8f0; padding-top: 8px; }
+#csv-editor > summary { color: #275b9f; font-weight: 600; }
+#tab-csv { min-width: 0; padding-top: 12px; }
+#tab-csv .row .path { flex: 1 1 100%; }
+#csv-col, #csv-val { width: 130px; }
+#cleanup-options { margin: 20px 0; padding: 10px 14px; background: #f8fafc; border: 1px solid #e6ebf1; border-radius: 6px; }
+#assembly-summary { margin-bottom: 20px; }
+#schema-preview { margin-top: 16px; }
+#assembly-action-reason:empty, #schema-apply-status:empty { display: none; }
+.console { overflow-wrap: anywhere; }
+.operation-panel { max-width: 1552px; margin: 0 24px 24px; background: #fff; border: 1px solid #dbe2ec; border-radius: 10px; }
+.operation-panel > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0; padding: 14px 20px; }
+.operation-body { padding: 0 20px 18px; }
+#run-console { margin-bottom: 0; min-height: 120px; }
+#run-info, #build-summary, #assembly-summary, #result-files, #project-config-note { overflow-wrap: anywhere; }
+.cols2 > div { min-width: 0; }
+@media (min-width: 1600px) { .operation-panel { margin-left: auto; margin-right: auto; } }
+@media (max-width: 1000px) { .layout { padding: 16px; gap: 16px; } .workflow-sidebar { width: 175px; } .inputs-grid { grid-template-columns: minmax(0, 1fr); gap: 12px; } .input-catalogs { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; } }
+@media (max-width: 720px) {
+ header { padding: 12px; } .header-main { gap: 8px; } .header-main .logo { width: 100%; }
+ .layout { display: block; padding: 12px; } .workflow-sidebar { position: static; width: 100%; padding: 0 0 12px; }
+ .nav-eyebrow, .workflow-sidebar > .field-help { display: none; } #workflow-nav { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 4px; }
+ #workflow-nav a, #workflow-nav button { padding: 8px; font-size: 12px; }
+ .workflow-stage { margin-bottom: 12px; } .workflow-stage > summary { display: grid; grid-template-columns: 32px minmax(0,1fr) auto; padding: 14px 12px; gap: 5px 8px; }
+ .stage-number { grid-column: 1; grid-row: 1 / span 2; }
+ .stage-heading { grid-column: 2; grid-row: 1; }
+ .stage-heading strong { font-size: 14px; } .stage-heading > span { display: none; }
+ #current-project-name { display: block; }
+ .stage-status { grid-column: 2; grid-row: 2; justify-self: start; margin-left: 0; font-size: 11px; padding: 3px 6px; }
+ .stage-toggle { grid-column: 3; grid-row: 1 / span 2; min-width: 72px; padding: 8px; }
+ .project-context { padding: 12px; }
+ .stage-body { padding: 14px 12px; } .input-catalogs { grid-template-columns: minmax(0,1fr); }
+ .task-fields { grid-template-columns: minmax(0,1fr); } .stage-body .row > .txt { max-width: 100%; }
+ .params-toolbar label { flex-wrap: wrap; min-width: 0; } .params-toolbar input, .params-toolbar select { max-width: 100%; }
+ .operation-panel { margin: 0 12px 12px; } .operation-panel > summary { padding: 12px; } .operation-body { padding: 0 12px 12px; }
+}
+
+#workflow-nav button > span, #workflow-nav button > small { display: block; }
+#workflow-nav button > small { margin-top: 3px; color: #6f8096; font-size: 11px; }
+#workflow-nav .complete > small, .stage-status.complete { color: #23704d; }
+#workflow-nav .stale > small, .stage-status.stale { color: #96630d; }
+#workflow-nav .failed > small, .stage-status.failed { color: #b93c3c; }
+.stage-status.active { background: #e5edf9; color: #235eaa; }

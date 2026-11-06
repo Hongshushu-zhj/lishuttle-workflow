@@ -26,7 +26,7 @@ const context = vm.createContext({
   Option: function (text, value) { this.text = text; this.value = value; },
   setTimeout() {},
 });
-const source = fs.readFileSync(path.join(__dirname, '../platform/frontend/app.js'), 'utf8');
+const source = require('./frontend_source.cjs')();
 vm.runInContext(source.replace(/init\(\);\s*$/, ''), context);
 vm.runInContext(`
   const task = { name: 'task', dir: '/task', engineering_candidates: ['/task/a.csv', '/task/b.csv'],
