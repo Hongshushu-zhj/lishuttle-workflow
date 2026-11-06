@@ -58,6 +58,7 @@ jobstatus_*
 .history/
 .codex/
 .agents/
+.superpowers/
 .DS_Store
 Thumbs.db
 Desktop.ini

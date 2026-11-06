@@ -99,10 +99,11 @@ class ProjectDefaultsTests(unittest.TestCase):
         self.assertFalse(res['ok'])
         self.assertIn('项目已切换', res['message'])
 
-    def test_project_switch_waits_for_default_write(self):
+    def test_project_switch_is_busy_during_default_write_then_can_retry(self):
         entered = threading.Event()
         release = threading.Event()
         switched = threading.Event()
+        switch_results = []
         original_defaults = core.thirdpart_defaults
         def defaults():
             value = original_defaults()
@@ -117,7 +118,7 @@ class ProjectDefaultsTests(unittest.TestCase):
              patch.object(core, 'save_env_keys', side_effect=lambda **kw: switched.set()), \
              patch.object(Api, 'state', return_value={}):
             writer = threading.Thread(target=lambda: Api.param_default(dict(schema='job.xml', tag='CpuLoad')))
-            switch = threading.Thread(target=lambda: Api.select_project(dict(path=str(self.project))))
+            switch = threading.Thread(target=lambda: switch_results.append(Api.select_project(dict(path=str(self.project)))))
             writer.start()
             try:
                 self.assertTrue(entered.wait(3))
@@ -128,6 +129,9 @@ class ProjectDefaultsTests(unittest.TestCase):
                 writer.join(3)
                 if switch.ident is not None:
                     switch.join(3)
+            self.assertEqual(switch_results[0]['code'], 'RUNTIME_BUSY')
+            self.assertFalse(switched.is_set())
+            Api.select_project(dict(path=str(self.project)))
             self.assertTrue(switched.is_set())
         self.assertIn('<CpuLoad>80</CpuLoad>', target.read_text())
 

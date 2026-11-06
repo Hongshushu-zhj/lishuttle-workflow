@@ -12,7 +12,7 @@ const cityNode = {dataset:{name:'city-B'},classList:{add(){},remove(){}}};
 const ctx = vm.createContext({document:{getElementById:el,querySelectorAll(selector){
   return selector === '#city-list .city' ? [cityNode] : [];
 }},setTimeout(){}});
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/, ''),ctx);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/, ''),ctx);
 vm.runInContext(`S.project='/project'; S.profileId='profile'; S.profileRevision='1'; S.projectEpoch=1;
   S.task={name:'task',dir:'/task',engineering_file:'/task/cells.csv',schema_candidates:[{
     path:'/task/task.xml',path_values:{SceneSettingsPath:'/old/scene.xml',HeightIndexPath:'/old/index.txt',
@@ -66,7 +66,7 @@ ctx.fetch=async (url,options)=>{
   const rows=[];
   ctx.document.createElement=()=>({innerHTML:'',querySelector(){return {appendChild(row){rows.push(row);}};}});
   el('params-area').appendChild=()=>{};
-  const input={dataset:{tag:'DefaultCalcRadius'},value:'300',classList:{remove(){}},listeners:{},
+  const input={dataset:{tag:'DefaultCalcRadius'},value:'300',classList:{add(){},remove(){}},listeners:{},
     addEventListener(event,fn){this.listeners[event]=fn;}};
   el('params-area').querySelectorAll=selector=>selector.startsWith('input') ? [input] : [];
   vm.runInContext(`S.job={schema:'job.xml'};

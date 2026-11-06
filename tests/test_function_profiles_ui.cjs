@@ -7,7 +7,7 @@ function el(id){
 }
 const ctx=vm.createContext({document:{getElementById:el,querySelectorAll:()=>[],createElement(){return {
   innerHTML:'',querySelector(){return {appendChild(row){rows.push(row);}};}};}},setTimeout(){}});
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 ctx.catalog={file:'/project/job.xml',function:'acp',values:{IsOptEleTilt:'false',MaxEleTilt:'6',SigmaRCS:'1',Vendor:'x'},
   counts:{total:4,recommended:2,other:1,unclassified:1},profile:{reviewed:true,description:'基于覆盖指标的优化',

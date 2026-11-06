@@ -7,7 +7,7 @@ const element = id => {
   return nodes.get(id);
 };
 const context = vm.createContext({document:{getElementById:element}, setTimeout(){}});
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/, ''), context);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/, ''), context);
 vm.runInContext(`
 renderCities = cities => { S.cities = cities; };
 renderTasks = tasks => { S.tasks = tasks; S.task = null; };
@@ -23,6 +23,9 @@ assert.equal(vm.runInContext('S.func',context), 'cali');
 assert.equal(vm.runInContext('S.project',context), '/new');
 assert.equal(element('params-area').innerHTML, '');
 assert.equal(element('project').value, '/new');
+assert.equal(element('current-project-path').textContent, '/new');
+assert.equal(element('current-project-name').textContent, '当前项目：new');
+assert.equal(element('current-project-path').title, '/new');
 assert.equal(element('run-info').textContent, '尚未渲染');
 assert.equal(vm.runInContext('S.previewCleared',context), true);
 console.log('PASS: project switch refreshes functions and clears prior schema, preview and results');

@@ -15,7 +15,7 @@ const context = vm.createContext({
   Blob, URL:{createObjectURL(value){blob=value;return 'blob:log';}, revokeObjectURL(){}},
   setTimeout(){}, setInterval(){return 1;}, clearInterval(){},
 });
-vm.runInContext(fs.readFileSync('platform/frontend/app.js', 'utf8').replace(/init\(\);\s*$/, ''), context);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/, ''), context);
 const run = code => vm.runInContext(code, context);
 
 (async () => {

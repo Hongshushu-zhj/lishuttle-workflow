@@ -11,9 +11,9 @@ const machine={VS_ROOT:'/VS',CMAKE:'/VS/cmake.exe',NINJA:'/VS/ninja.exe',VCVARS:
 let state={project:'',projects:[],profile_id:'',profile_revision:'',machine_revision:'1',functions:[],cities:[],tasks:[],
   project_config:{...machine},machine_config:{...machine},machine_detection:{filled:[],candidates:{}}};
 let sent;
-const ctx=vm.createContext({document:{getElementById:el,querySelectorAll:()=>[]},setTimeout(){},
+const ctx=vm.createContext({document:{getElementById:el,querySelectorAll:()=>[]},setTimeout(){},setInterval(){return 1;},
   fetch:async(url,opts)=>{sent={url,body:opts.body?JSON.parse(opts.body):null};return {json:async()=>state};}});
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 run('renderCities=()=>{};renderTasks=()=>{};renderFuncRadios=()=>{}');
 (async()=>{
