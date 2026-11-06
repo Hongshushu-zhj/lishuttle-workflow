@@ -1,0 +1,885 @@
+diff --git a/platform/backend/result_validation.py b/platform/backend/result_validation.py
+new file mode 100644
+index 0000000..772d247
+--- /dev/null
++++ b/platform/backend/result_validation.py
+@@ -0,0 +1,534 @@
++"""Read-only, session-bound result checks for the reviewed LiShuttle products.
++
++The caller owns run identity and supplies only its current process output.  In
++particular, this module never opens the engine's shared historical log files.
++An exit code, modification time or task-level completion line cannot attribute
++an unchanged final product to a run.
++"""
++
++import csv
++import hashlib
++import io
++import math
++from pathlib import Path
++import re
++import struct
++import xml.etree.ElementTree as ET
++
++
++_CHUNK = 1024 * 1024
++_OUTDOOR = re.compile(r'^(RSRP|DLRSSINR|BESTSERVER|ECHORP|SCR)(\d*)\.dem$', re.I)
++_INDOOR = re.compile(r'^(RSRP|DLRSSINR)_(-?\d+)\.dem$', re.I)
++_SITE = re.compile(r'Calibration site\((.*?)\):\s*grid count=(\d+),\s*success=([YN]),\s*update=([YN]),\s*code=0x([\da-fA-F]+)\.')
++
++
++def _path(value):
++    return Path(value).resolve() if value else None
++
++
++def _fingerprint(path):
++    """Hash streams rather than allocating an entire raster or model file."""
++    before = path.stat()
++    digest = hashlib.sha256()
++    with path.open('rb') as handle:
++        for chunk in iter(lambda: handle.read(_CHUNK), b''):
++            digest.update(chunk)
++    after = path.stat()
++    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
++        raise OSError('文件在读取期间发生变化')
++    return dict(path=str(path), size=after.st_size, mtime_ns=after.st_mtime_ns,
++                sha256=digest.hexdigest())
++
++
++def _candidates(context):
++    """Only final artifacts; do not hash potentially enormous ray/cache trees."""
++    found = set()
++    prefix = context.get('schema_name') or ''
++    reports = ('meas.anchor', 'clean_grids.csv', 'propmodel_ana.csv')
++    if prefix:
++        reports += (prefix + '_cell_summary.csv', prefix + '_scene_summary.csv')
++    patterns = [('pred_dir', ('*.dem', 'index.txt', 'cellid.csv')),
++                ('dt_dir', reports),
++                ('models_dir', ('*.xml',))]
++    for key, globs in patterns:
++        root = _path(context.get(key))
++        if not root or not root.is_dir():
++            continue
++        for pattern in globs:
++            for path in root.rglob(pattern):
++                # A linked artifact outside the selected root is not run evidence.
++                if path.is_file() and path.resolve().is_relative_to(root):
++                    found.add(path.resolve())
++    root = _path(context.get('out_dir'))
++    if root:
++        path = root / 'CorrectionMeanVariance.xml'
++        if path.is_file() and path.resolve().is_relative_to(root):
++            found.add(path.resolve())
++    return sorted(found, key=str)
++
++
++def snapshot(context):
++    """Capture the content baseline before launch; the return value is JSON safe."""
++    files, issues = {}, []
++    try:
++        paths = _candidates(context)
++    except (OSError, ValueError) as exc:
++        paths = []
++        issues.append(dict(code='BASELINE_READ', path='', message='运行前基线读取失败：' + str(exc)))
++    for path in paths:
++        try:
++            files[str(path)] = _fingerprint(path)
++        except OSError as exc:
++            issues.append(dict(code='BASELINE_READ', path=str(path), message='运行前基线读取失败：' + str(exc)))
++    return dict(version=1, files=files, issues=issues)
++
++
++def _text(path):
++    if path.stat().st_size > 16 * _CHUNK:
++        raise ValueError('元数据超过 16 MiB 检查上限')
++    data = path.read_bytes()
++    for encoding in ('utf-8-sig', 'gb18030'):
++        try:
++            return data.decode(encoding)
++        except UnicodeDecodeError:
++            pass
++    raise ValueError('无法识别元数据文本编码')
++
++
++def _geometry(tokens):
++    values = [float(value) for value in tokens]
++    if len(values) != 5 or not all(math.isfinite(v) for v in values):
++        raise ValueError('网格索引必须包含五个有限数值')
++    left, right, bottom, top, resolution = values
++    if resolution <= 0 or right <= left or top <= bottom:
++        raise ValueError('栅格范围或分辨率无效')
++    # GeoRasterRect's edges are exclusive, with its source rounding tolerance.
++    columns = math.ceil((right - left) / resolution - .01)
++    rows = math.ceil((top - bottom) / resolution - .01)
++    if columns <= 0 or rows <= 0:
++        raise ValueError('栅格行列数为空')
++    return dict(bounds=values[:4], resolution=resolution, columns=columns, rows=rows,
++                expected_bytes=columns * rows * 2)
++
++
++class _Check:
++    def __init__(self, context, baseline):
++        self.context = context
++        self.baseline = baseline.get('files', {}) if isinstance(baseline, dict) else {}
++        self.issues = []
++        self.checked = []
++        self.fingerprints = {}
++        self.unknown = False
++        if not isinstance(baseline, dict) or 'files' not in baseline or baseline.get('issues'):
++            self.uncertain('BASELINE_UNKNOWN', '缺少完整的本次运行前产物基线，不能确认结果归属。')
++
++    def issue(self, code, message, path='', severity='error', **where):
++        self.issues.append(dict(code=code, message=message, path=str(path or ''),
++                                severity=severity, **where))
++
++    def uncertain(self, code, message, path='', **where):
++        self.unknown = True
++        self.issue(code, message, path, severity='warning', **where)
++
++    def file(self, path, current=False, **where):
++        if path is None:
++            self.uncertain('PATH_UNKNOWN', '无法确定所选任务的输出路径。', **where)
++            return None
++        path = path.resolve()
++        roots = [_path(self.context.get(key)) for key in ('pred_dir', 'dt_dir', 'models_dir', 'out_dir')]
++        if not any(root and path.is_relative_to(root) for root in roots):
++            self.issue('ARTIFACT_OUTSIDE_ROOT', '产物解析后位于所选任务输出目录之外。', path, **where)
++            return None
++        entry = dict(path=str(path), changed=False, **where)
++        self.checked.append(entry)
++        try:
++            info = self.fingerprints.get(str(path))
++            if info is None:
++                info = _fingerprint(path)
++                self.fingerprints[str(path)] = info
++            entry.update(size=info['size'], sha256=info['sha256'])
++            previous = self.baseline.get(str(path))
++            entry['changed'] = previous is None or previous.get('sha256') != info['sha256']
++            if not info['size']:
++                self.issue('EMPTY_FILE', '必需产物为空文件。', path, **where)
++                return None
++            if current and not entry['changed']:
++                self.uncertain('NO_CURRENT_ARTIFACT', '文件内容与运行前一致，不能确认由本次运行生成。', path, **where)
++            return entry
++        except FileNotFoundError:
++            self.issue('REQUIRED_FILE', '缺少必需的最终产物。', path, **where)
++        except OSError as exc:
++            self.issue('ARTIFACT_READ', '产物读取失败：' + str(exc), path, **where)
++        return None
++
++
++def _index(check, root, indoor):
++    path = root / 'index.txt'
++    if not check.file(path):
++        return 'missing', {}
++    try:
++        lines = [line.split() for line in _text(path).splitlines() if line.strip()]
++        if not lines:
++            raise ValueError('索引为空')
++        utm = lines[0][0] == 'UTM'
++        if utm:
++            if len(lines[0]) != 2 or not re.fullmatch(r'-?\d+', lines[0][1]):
++                raise ValueError('UTM 索引头无效')
++            lines = lines[1:]
++        if indoor and not utm and len(lines) == 1 and len(lines[0]) == 5:
++            return 'indoor_numeric_legacy', {'*': _geometry(lines[0])}
++        if not indoor and not utm:
++            raise ValueError('室外索引缺少已识别的 UTM 头')
++        entries = {}
++        for fields in lines:
++            if len(fields) != 6:
++                raise ValueError('索引行必须包含文件名和五个网格数值')
++            name = fields[0]
++            if '/' in name or '\\' in name or ':' in name or name in ('.', '..'):
++                check.issue('UNSAFE_INDEX_PATH', '索引只能引用输出目录内的产物文件名。', path)
++                return 'unsafe', {}
++            matcher = _INDOOR if indoor else _OUTDOOR
++            if not matcher.fullmatch(name):
++                raise ValueError('未识别的索引产物名称：' + name)
++            if name in entries:
++                check.issue('DUPLICATE_INDEX', '产物索引存在重复条目。', path)
++                return 'invalid', {}
++            try:
++                entries[name] = _geometry(fields[1:])
++            except ValueError as exc:
++                check.issue('INDEX_GEOMETRY', '索引网格参数无效：' + str(exc), path)
++                return 'invalid', {}
++        if not entries:
++            raise ValueError('索引没有产物条目')
++        if indoor and utm:
++            raise ValueError('带 UTM 头的室内索引格式尚未核实')
++        return 'indoor_filename' if indoor else 'outdoor_utm', entries
++    except (OSError, ValueError) as exc:
++        check.uncertain('INDEX_FORMAT_UNKNOWN', '索引格式无法确认：' + str(exc), path)
++        return 'unknown', {}
++
++
++def _mapping(check, root):
++    path = root / 'cellid.csv'
++    if not check.file(path):
++        return set()
++    ids = set()
++    try:
++        for row in csv.reader(io.StringIO(_text(path))):
++            if not row:
++                continue
++            if len(row) < 2 or not row[1].strip():
++                raise ValueError('小区映射行格式无效')
++            value = int(row[0])
++            if value < 0 or value > 32767 or value in ids:
++                raise ValueError('小区映射编号重复或超出有符号 int16 范围')
++            ids.add(value)
++        if not ids:
++            raise ValueError('小区映射没有有效编号')
++    except (OSError, ValueError) as exc:
++        check.issue('CELL_MAPPING', '小区映射不可读或格式有误：' + str(exc), path)
++    return ids
++
++
++def _raster(check, path, geometry, ids=None, allow_empty=False, **where):
++    entry = check.file(path, current=True, **where)
++    if not entry:
++        return
++    entry.update(geometry)
++    if entry['size'] != geometry['expected_bytes']:
++        check.issue('RASTER_SIZE', f"应为 {geometry['expected_bytes']} 字节，实际为 {entry['size']} 字节。", path, **where)
++        return
++    valid, invalid, minimum, maximum, unmapped = 0, 0, None, None, 0
++    digest = hashlib.sha256()
++    try:
++        with path.open('rb') as handle:
++            for chunk in iter(lambda: handle.read(_CHUNK), b''):
++                digest.update(chunk)
++                for (value,) in struct.iter_unpack('<h', chunk):
++                    if value == -32768:
++                        invalid += 1
++                    else:
++                        valid += 1
++                        minimum = value if minimum is None else min(minimum, value)
++                        maximum = value if maximum is None else max(maximum, value)
++                        if ids is not None and (value == 0 or value not in ids):
++                            unmapped += 1
++        if digest.hexdigest() != entry['sha256']:
++            check.issue('ARTIFACT_CHANGED', '栅格在校验期间发生变化。', path, **where)
++        entry.update(valid=valid, invalid=invalid, minimum=minimum, maximum=maximum, unmapped=unmapped)
++        if not valid and not allow_empty:
++            check.issue('NO_VALID_CELLS', '栅格全部为 -32768 无效值，没有可用网格。', path, **where)
++        if unmapped:
++            check.issue('BESTSERVER_ID', f'{unmapped} 个有效网格使用了零编号或 cellid.csv 中不存在的小区编号。', path, **where)
++    except (OSError, struct.error) as exc:
++        check.issue('RASTER_READ', '栅格读取失败：' + str(exc), path, **where)
++
++
++def _height_folder(height):
++    whole = math.floor(height)
++    return (f'{height:.1f}' if height - whole > .09 else str(whole)) + 'm'
++
++
++def _prediction(check):
++    context = check.context
++    root = _path(context.get('pred_dir'))
++    if root is None:
++        check.uncertain('PATH_UNKNOWN', '无法确定预测输出目录。')
++        return dict(status='unconfirmed'), 'unknown'
++    indoor = context.get('func') == 'predindoor'
++    fmt, entries = _index(check, root, indoor)
++    if not entries:
++        return dict(status='unconfirmed'), fmt
++    if indoor:
++        floors = context.get('indoor_floors') or []
++        if not floors:
++            check.uncertain('FLOORS_UNKNOWN', '缺少实际 DAS/AP 楼层信息，无法确认应有室内产物。', root)
++            floors = sorted({int(_INDOOR.fullmatch(name)[2]) for name in entries if name != '*'})
++        for floor in floors:
++            pair = [entries.get(f'{product}_{floor}.dem', entries.get('*')) for product in ('RSRP', 'DLRSSINR')]
++            if all(pair) and pair[0] != pair[1]:
++                check.issue('INDEX_GRID_MISMATCH', '同一室内楼层的配套指标使用了不同网格。', root / 'index.txt', region=0, layer=floor)
++            for product in ('RSRP', 'DLRSSINR'):
++                name = f'{product}_{floor}.dem'
++                geometry = entries.get(name, entries.get('*'))
++                if geometry is None:
++                    check.issue('INDEX_PRODUCT', '索引缺少本楼层必需的室内预测产物。', root / 'index.txt', layer=floor)
++                    continue
++                _raster(check, root / name, geometry, layer=floor, region=0)
++        return dict(status='checked', floors=len(floors)), fmt
++
++    ids = _mapping(check, root)
++    products = ('RSRP', 'DLRSSINR', 'BESTSERVER') if context.get('func') == 'pred' else ('ECHORP', 'SCR')
++    region_entries = {}
++    for name, geometry in entries.items():
++        match = _OUTDOOR.fullmatch(name)
++        if match[1].upper() in products:
++            region_entries.setdefault(int(match[2] or 0), {})[match[1].upper()] = (name, geometry)
++    if not region_entries:
++        check.uncertain('INDEX_PRODUCTS_UNKNOWN', '索引没有所选功能对应的已识别产物。', root / 'index.txt')
++        return dict(status='unconfirmed'), fmt
++    mode = context.get('mode') or {}
++    effective = mode.get('effective')
++    if effective not in ('ground', '3d', 'floor', 'building'):
++        check.uncertain('MODE_UNKNOWN', '无法确定本任务应采用的空间计算模式。', root)
++        return dict(status='unconfirmed'), fmt
++    count, step = mode.get('layer_count'), mode.get('floor_height')
++    if effective != 'ground' and (not isinstance(count, int) or count < 1 or not isinstance(step, (int, float)) or not math.isfinite(step) or step <= 0):
++        check.uncertain('LAYERS_UNKNOWN', '无法确定本任务实际适用的输出层数。', root)
++    if effective == '3d' and isinstance(count, int) and count > 10000:
++        check.uncertain('LAYERS_LIMIT', '层数超过产物校验的检查上限。', root)
++        return dict(status='unconfirmed'), fmt
++    requested_regions = {r.get('id') for r in context.get('regions', []) if isinstance(r, dict)}
++    omitted = sorted(requested_regions - set(region_entries))
++    for region in omitted:
++        check.uncertain('UNCOMPUTED_REGIONS', '本请求区域没有已计算的索引条目，其可用性尚不能确认。', root / 'index.txt', region=region)
++    checked_layers = 0
++    for region, group in sorted(region_entries.items()):
++        reference = next(iter(group.values()))[1]
++        for product in products:
++            if product not in group:
++                check.issue('INDEX_PRODUCT', f'已计算区域缺少 {product} 索引条目。', root / 'index.txt', region=region, layer=0)
++            elif group[product][1] != reference:
++                check.issue('INDEX_GRID_MISMATCH', '同一区域的配套指标使用了不同网格。', root / 'index.txt', region=region, layer=0)
++        layers = [(0, root)]
++        if effective == '3d' and isinstance(count, int) and 0 < count <= 10000 and isinstance(step, (int, float)) and step > 0:
++            layers.extend((layer, root / _height_folder(layer * step)) for layer in range(1, count))
++        elif effective in ('floor', 'building') and isinstance(step, (int, float)) and step > 0:
++            # Floor cases expand lazily. Validate each observed region stack;
++            # another region's height is not evidence that this one was computed.
++            observed = []
++            if root.is_dir():
++                for folder in root.iterdir():
++                    match = re.fullmatch(r'(\d+(?:\.\d+)?)m', folder.name)
++                    if not match or not folder.is_dir():
++                        continue
++                    layer = round(float(match[1]) / step)
++                    if layer <= 0 or (isinstance(count, int) and layer >= count):
++                        continue
++                    if _height_folder(layer * step) != folder.name:
++                        continue
++                    names = [name for name, _ in group.values()]
++                    if any((folder / name).is_file() for name in names):
++                        observed.append((layer, folder))
++            if observed:
++                # Expansion to a high floor creates every lower case for this
++                # region, but says nothing about another region's stack.
++                last = max(layer for layer, _ in observed)
++                if last > 10000:
++                    check.uncertain('LAYERS_LIMIT', '已观察楼层数超过校验检查上限。', root, region=region)
++                else:
++                    layers.extend((layer, root / _height_folder(layer * step)) for layer in range(1, last + 1))
++            elif isinstance(count, int) and count > 1:
++                check.uncertain('FLOOR_OUTPUT_UNCONFIRMED', '仅存在地面产物，尚不能确认本区域建筑楼层的实际计算情况。', root, region=region)
++        for layer, folder in layers:
++            checked_layers += 1
++            for product in products:
++                if product in group:
++                    name, geometry = group[product]
++                    _raster(check, folder / name, geometry, ids if product == 'BESTSERVER' else None,
++                            allow_empty=layer > 0 and effective in ('floor', 'building'), region=region, layer=layer)
++    return dict(status='checked', regions=len(region_entries), layers=checked_layers, omitted_regions=omitted), fmt
++
++
++def _xml(check, path, current=False):
++    entry = check.file(path, current=current)
++    if not entry:
++        return None
++    try:
++        # TinyXML writes sibling roots (version + propagation categories).
++        text = re.sub(r'<\?xml\s.*?\?>', '', _text(path), flags=re.S)
++        root = ET.fromstring('<artifact>' + text + '</artifact>')
++        if not list(root):
++            raise ValueError('XML 模型片段没有元素')
++        entry['model_names'] = [node.text.strip() for node in root.iter('ModelName') if node.text and node.text.strip()]
++    except (OSError, ValueError, ET.ParseError) as exc:
++        check.issue('MODEL_XML', '模型 XML 片段解析失败：' + str(exc), path)
++    return entry
++
++
++def _csv_report(check, path, current=False):
++    entry = check.file(path, current=current)
++    if not entry:
++        return
++    try:
++        rows = csv.reader(io.StringIO(_text(path)))
++        header = next(rows, [])
++        if len(header) < 2:
++            raise ValueError('报告缺少已识别的 CSV 表头')
++        entry['columns'] = [value.strip() for value in header]
++        entry['rows'] = sum(1 for row in rows if any(row))
++    except (OSError, ValueError, csv.Error) as exc:
++        check.issue('REPORT_CSV', '校正报告读取失败：' + str(exc), path)
++    return entry
++
++
++def _calibration(check, lines):
++    context = check.context
++    # Site names are unique in the source map. Keep the last event per site;
++    # never infer these outcomes from a historical merged report.
++    sites = {}
++    for line in lines:
++        match = _SITE.search(line)
++        if match:
++            sites[match[1]] = dict(site=match[1], grids=int(match[2]), success=match[3] == 'Y',
++                                  update=match[4] == 'Y', code=int(match[5], 16))
++    values = list(sites.values())
++    succeeded = sum(site['success'] for site in values)
++    updated = sum(site['update'] for site in values)
++    business = dict(status='unconfirmed', total=len(values), succeeded=succeeded,
++                    failed=len(values) - succeeded, updated=updated,
++                    no_update=len(values) - updated, sites=values)
++    dt = _path(context.get('dt_dir'))
++    name = context.get('schema_name')
++    if dt is None or not name:
++        check.uncertain('CALIBRATION_CONTEXT_UNKNOWN', '无法确定 DT 目录或任务报告前缀。')
++        return business
++    check.file(dt / 'meas.anchor')
++    cell_report_path = dt / (name + '_cell_summary.csv')
++    cell_report = _csv_report(check, cell_report_path, current=True)
++    if cell_report:
++        if not {'cell', 'update'}.issubset(set(cell_report.get('columns', []))):
++            check.issue('REPORT_CSV', '逐小区报告缺少 cell 或 update 字段。', cell_report_path)
++        if not cell_report.get('rows'):
++            check.issue('EMPTY_REPORT', '逐小区报告没有结果记录。', cell_report_path)
++    params = context.get('params') or {}
++    scene = str(params.get('IsCorrectSceneModel', 'true')).lower()
++    scene_report = None
++    if scene in ('true', '1'):
++        scene_report = _csv_report(check, dt / (name + '_scene_summary.csv'), current=True)
++    elif scene not in ('false', '0'):
++        check.uncertain('CALIBRATION_SETTING_UNKNOWN', '无法确定场景模型报告是否适用。')
++    models = _path(context.get('models_dir'))
++    if updated or (scene_report and scene_report.get('rows')):
++        if models is None:
++            check.uncertain('MODEL_PATH_UNKNOWN', '无法确定校正模型的实际保存目录。')
++        else:
++            changed_cells = []
++            changed_scenes = []
++            for path in sorted(models.rglob('*.xml')) if models.is_dir() else []:
++                if not path.resolve().is_relative_to(models):
++                    continue
++                entry = _xml(check, path)
++                if entry and entry['changed'] and entry.get('model_names'):
++                    if path.relative_to(models).parts[0] == 'cells':
++                        changed_cells.append(str(path))
++                    if path.relative_to(models).as_posix() == 'scenes/SceneModel.xml':
++                        changed_scenes.append(str(path))
++            if updated and not changed_cells:
++                check.uncertain('NO_CURRENT_MODEL', '日志记录了站点模型更新，但未发现内容变化的 cells 模型 XML 来确认保存。', models)
++            if scene_report and scene_report.get('rows') and not changed_scenes:
++                check.uncertain('NO_CURRENT_SCENE_MODEL', '本次场景报告包含结果，但未发现内容变化的场景模型 XML 来确认保存。', models / 'scenes/SceneModel.xml')
++    out = _path(context.get('out_dir'))
++    # This diagnostic is written only when both general and exclusive models
++    # exist. Its absence is not a mandatory-product failure.
++    if out and (out / 'CorrectionMeanVariance.xml').is_file():
++        path = out / 'CorrectionMeanVariance.xml'
++        try:
++            current = _fingerprint(path)
++            previous = check.baseline.get(str(path))
++            if previous is None or previous.get('sha256') != current['sha256']:
++                _xml(check, path)
++        except OSError as exc:
++            check.issue('ARTIFACT_READ', '产物读取失败：' + str(exc), path)
++    if not values:
++        check.uncertain('CALIBRATION_COUNTS_UNKNOWN', '未捕获本次运行的逐站校正结果，不能使用历史合并报告推断更新数量。', dt)
++    elif any(site['grids'] == 0 for site in values):
++        check.uncertain('CALIBRATION_GRIDS_UNKNOWN', '某站点结果没有实测网格，不能确认校正有效性。', dt)
++    elif succeeded == 0 and updated == 0:
++        business['status'] = 'failed'
++    elif succeeded < len(values):
++        business['status'] = 'partial'
++    elif updated == 0:
++        business['status'] = 'no_update'
++    else:
++        business['status'] = 'success'
++    return business
++
++
++def validate(context, baseline, lines, exit_code, cancelled=False):
++    """Separate process completion, artifact integrity and business usability."""
++    lines = str(lines).splitlines() if isinstance(lines, str) else [str(line) for line in (lines or [])]
++    check = _Check(context, baseline)
++    func = context.get('func')
++    fmt = None
++    business = dict(status='unconfirmed')
++    try:
++        if func in ('pred', 'commsensing', 'predindoor'):
++            business, fmt = _prediction(check)
++        elif func == 'cali':
++            business = _calibration(check, lines)
++        else:
++            check.uncertain('FUNCTION_UNREVIEWED', '该功能尚无经过核实的结果校验规则，不能自动判为成功。')
++    except (OSError, ValueError, TypeError) as exc:
++        check.uncertain('VALIDATION_INCOMPLETE', '结果校验未能完成：' + str(exc))
++    hard_errors = [issue for issue in check.issues if issue['severity'] == 'error']
++    if hard_errors:
++        verdict = 'failed'
++    elif check.unknown:
++        verdict = 'unconfirmed'
++    elif business['status'] in ('failed', 'partial', 'no_update'):
++        verdict = business['status']
++    else:
++        verdict = 'success'
++    if not cancelled and exit_code is None:
++        verdict = 'unconfirmed'
++    elif exit_code not in (0, None):
++        verdict = 'failed'
++    if cancelled:
++        verdict = 'cancelled'
++    if func in ('pred', 'commsensing', 'predindoor'):
++        business['status'] = 'unusable' if hard_errors else 'unconfirmed' if check.unknown else 'usable'
++        business['valid_cells'] = sum(entry.get('valid', 0) for entry in check.checked)
++    process = dict(exit=exit_code, exit_code=exit_code, status='cancelled' if cancelled else 'running' if exit_code is None else 'exited' if exit_code == 0 else 'failed', cancelled=bool(cancelled))
++    directory = context.get('pred_dir' if func in ('pred', 'commsensing', 'predindoor') else 'out_dir', '')
++    root = _path(directory)
++    files = []
++    for path, info in sorted(check.fingerprints.items()):
++        file_path = Path(path)
++        rel = str(file_path.relative_to(root)).replace('\\', '/') if root and file_path.is_relative_to(root) else file_path.name
++        files.append(dict(rel=rel, size=info['size'], path=path))
++    errors = [line for line in lines if re.search(r'\b(?:ERROR|FATAL)\b', line, re.I)]
++    return dict(process=process, artifacts=dict(status='invalid' if hard_errors else 'unconfirmed' if check.unknown else 'valid',
++                checked=check.checked, index_format=fmt), business=business, verdict=verdict,
++                issues=check.issues, files=files, dir=str(directory or ''), exists=bool(root and root.is_dir()),
++                log_tail=lines[-80:], errors=errors[-30:])
+
+diff --git a/tests/test_result_validation.py b/tests/test_result_validation.py
+new file mode 100644
+index 0000000..42ed695
+--- /dev/null
++++ b/tests/test_result_validation.py
+@@ -0,0 +1,338 @@
++from pathlib import Path
++import importlib.util
++import json
++import os
++import struct
++import sys
++import tempfile
++import unittest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'platform/backend'))
++
++
++class ResultValidationTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.tmp.cleanup)
++        self.root = Path(self.tmp.name)
++        self.pred = self.root / 'output/prediction/7'
++        self.dt = self.root / 'dt'
++        self.models = self.root / 'output/models_task7'
++        self.ctx = dict(func='pred', task_id='7', schema_name='demo',
++            out_dir=str(self.root / 'output'), pred_dir=str(self.pred),
++            dt_dir=str(self.dt), models_dir=str(self.models), bin_dir=str(self.root / 'Bin'),
++            params={'ModelTemporaryStorage': 'true', 'IsCorrectSceneModel': 'false'},
++            mode=dict(effective='ground', layer_count=1, floor_height=3, max_height=7),
++            regions=[dict(id=0, points=[])], indoor_floors=[1])
++
++    def api(self):
++        self.assertIsNotNone(importlib.util.find_spec('result_validation'), 'result validation module must exist')
++        import result_validation
++        return result_validation
++
++    def write(self, path, data):
++        path.parent.mkdir(parents=True, exist_ok=True)
++        path.write_bytes(data.encode() if isinstance(data, str) else data)
++
++    def raster(self, name, values=(-900, -32768, -800, -750), folder=None):
++        self.write((folder or self.pred) / name, struct.pack('<' + 'h' * len(values), *values))
++
++    def outdoor(self, func='pred', layers=(0,), regions=(0,)):
++        products = ('RSRP', 'DLRSSINR', 'BESTSERVER') if func == 'pred' else ('ECHORP', 'SCR')
++        self.ctx['func'] = func
++        entries = ['UTM 50']
++        for region in regions:
++            for product in products:
++                name = product + (str(region) if region else '') + '.dem'
++                entries.append(name + ' 0 2 0 2 1')
++                for layer in layers:
++                    folder = self.pred if not layer else self.pred / f'{layer * 3}m'
++                    self.raster(name, (1, -32768, 1, 1) if product == 'BESTSERVER' else (-900, -32768, -800, -750), folder)
++        self.write(self.pred / 'index.txt', '\n'.join(entries) + '\n')
++        self.write(self.pred / 'cellid.csv', '1,cell-a\n')
++
++    def indoor(self, numeric=False):
++        self.ctx['func'] = 'predindoor'
++        self.ctx['mode'] = dict(effective='indoor', layer_count=1)
++        self.raster('RSRP_1.dem')
++        self.raster('DLRSSINR_1.dem')
++        self.write(self.pred / 'index.txt', '0 2 0 2 1\n' if numeric else
++            'RSRP_1.dem 0 2 0 2 1\nDLRSSINR_1.dem 0 2 0 2 1\n')
++
++    def calibration(self, scene=False):
++        self.ctx['func'] = 'cali'
++        self.ctx['params']['IsCorrectSceneModel'] = str(scene).lower()
++        self.write(self.dt / 'meas.anchor', b'anchor')
++        self.write(self.dt / 'demo_cell_summary.csv', 'cell,filter_type,cal_ret,update\na,0x0,0x0,yes\n')
++        if scene:
++            self.write(self.dt / 'demo_scene_summary.csv', 'sceneNo,model_id\n1,m\n')
++
++    def line(self, site='a', success='Y', update='Y', code='0'):
++        return f'Calibration site({site}): grid count=12, success={success}, update={update}, code=0x{code}.'
++
++    def result(self, baseline=None, lines=(), exit_code=0, cancelled=False):
++        return self.api().validate(self.ctx, baseline if baseline is not None else {'files': {}}, lines, exit_code, cancelled)
++
++    def codes(self, result):
++        return {item['code'] for item in result['issues']}
++
++    def test_new_ground_outputs_success_and_json_contract(self):
++        baseline = self.api().snapshot(self.ctx)
++        self.outdoor()
++        result = self.result(baseline)
++        self.assertEqual(result['verdict'], 'success')
++        json.dumps(result)
++        self.assertEqual(result['process']['exit_code'], 0)
++        self.assertEqual(result['process'].get('exit'), 0)
++        self.assertTrue(all('rel' in item and 'size' in item for item in result['files']))
++
++    def test_snapshot_contains_hash_and_time_and_detects_same_size_rewrite(self):
++        self.outdoor()
++        baseline = self.api().snapshot(self.ctx)
++        item = baseline['files'][str((self.pred / 'RSRP.dem').resolve())]
++        self.assertEqual(len(item['sha256']), 64)
++        self.assertIn('mtime_ns', item)
++        self.raster('RSRP.dem', (-901, -32768, -800, -750))
++        os.utime(self.pred / 'RSRP.dem', ns=(item['mtime_ns'], item['mtime_ns']))
++        result = self.result(baseline)
++        checked = next(x for x in result['artifacts']['checked'] if x['path'].endswith('RSRP.dem'))
++        self.assertTrue(checked['changed'])
++        self.assertEqual(result['verdict'], 'unconfirmed')
++
++    def test_completion_and_mtime_only_cannot_confirm_old_outputs(self):
++        self.outdoor()
++        baseline = self.api().snapshot(self.ctx)
++        os.utime(self.pred / 'RSRP.dem', None)
++        result = self.result(baseline, ['Finished the predication.(7).'])
++        self.assertEqual(result['verdict'], 'unconfirmed')
++        self.assertIn('NO_CURRENT_ARTIFACT', self.codes(result))
++
++    def test_ground_ignores_stale_elevated_files(self):
++        self.write(self.pred / '3m/RSRP.dem', b'bad')
++        baseline = self.api().snapshot(self.ctx)
++        self.outdoor()
++        result = self.result(baseline)
++        self.assertEqual(result['verdict'], 'success')
++        self.assertFalse(any('/3m/' in x['path'].replace('\\', '/') for x in result['artifacts']['checked']))
++
++    def test_dimension_mismatch_has_region_layer_and_path(self):
++        self.outdoor()
++        self.raster('RSRP.dem', (-900,))
++        result = self.result()
++        self.assertEqual(result['verdict'], 'failed')
++        item = next(x for x in result['issues'] if x['code'] == 'RASTER_SIZE')
++        self.assertEqual((item['region'], item['layer']), (0, 0))
++        self.assertTrue(item['path'].endswith('RSRP.dem'))
++
++    def test_invalid_bestserver_id_fails(self):
++        self.outdoor()
++        self.raster('BESTSERVER.dem', (9, -32768, 1, 1))
++        self.assertIn('BESTSERVER_ID', self.codes(self.result()))
++
++    def test_bestserver_zero_is_invalid_even_if_mapping_contains_zero(self):
++        self.outdoor()
++        self.write(self.pred / 'cellid.csv', '0,cell-zero\n1,cell-a\n')
++        self.raster('BESTSERVER.dem', (0, 1, 1, 1))
++        self.assertIn('BESTSERVER_ID', self.codes(self.result()))
++
++    def test_all_sentinel_ground_is_not_usable(self):
++        self.outdoor()
++        self.raster('RSRP.dem', (-32768,) * 4)
++        self.assertEqual(self.result()['verdict'], 'failed')
++
++    def test_commsensing_requires_echo_scr_and_mapping_but_no_bsintf(self):
++        self.outdoor('commsensing')
++        self.assertEqual(self.result()['verdict'], 'success')
++        (self.pred / 'cellid.csv').unlink()
++        self.assertEqual(self.result()['verdict'], 'failed')
++
++    def test_3d_nonmultiple_height_requires_only_real_layers(self):
++        self.ctx['mode'].update(effective='3d', layer_count=3)
++        self.outdoor(layers=(0, 1, 2))
++        self.assertEqual(self.result()['verdict'], 'success')
++        (self.pred / '6m/SCR.dem').parent.joinpath('RSRP.dem').unlink()
++        self.assertEqual(self.result()['verdict'], 'failed')
++
++    def test_floor_does_not_invent_rectangular_stack_for_other_region(self):
++        self.ctx['mode'].update(effective='floor', layer_count=3)
++        self.ctx['regions'].append(dict(id=1, points=[]))
++        self.outdoor(layers=(0, 1, 2), regions=(0,))
++        # Only region 0 was computed; absent region 1 does not demand fake upper products.
++        self.assertNotEqual(self.result()['verdict'], 'failed')
++
++    def test_floor_unknown_expected_layers_unconfirmed(self):
++        self.ctx['mode'].update(effective='floor', layer_count=None)
++        self.outdoor()
++        self.assertEqual(self.result()['verdict'], 'unconfirmed')
++
++    def test_upper_floor_all_sentinel_is_legitimate(self):
++        self.ctx['mode'].update(effective='floor', layer_count=2)
++        self.outdoor(layers=(0, 1))
++        for product in ('RSRP', 'DLRSSINR', 'BESTSERVER'):
++            self.raster(product + '.dem', (-32768,) * 4, self.pred / '3m')
++        self.assertEqual(self.result()['verdict'], 'success')
++
++    def test_unknown_index_is_unconfirmed(self):
++        self.outdoor()
++        self.write(self.pred / 'index.txt', 'future-format 9\n')
++        self.assertEqual(self.result()['verdict'], 'unconfirmed')
++
++    def test_index_path_traversal_is_rejected_without_reading_external_file(self):
++        self.outdoor()
++        self.write(self.pred / 'index.txt', 'UTM 50\n../../outside.dem 0 2 0 2 1\n')
++        self.assertEqual(self.result()['verdict'], 'failed')
++        self.assertIn('UNSAFE_INDEX_PATH', self.codes(self.result()))
++
++    def test_indoor_requires_final_pair_not_ils(self):
++        self.indoor()
++        self.assertEqual(self.result()['verdict'], 'success')
++        (self.pred / 'RSRP_1.dem').unlink()
++        self.write(Path(self.ctx['out_dir']) / 'ray.ils', b'cache')
++        self.assertEqual(self.result()['verdict'], 'failed')
++
++    def test_numeric_indoor_index_detected_explicitly(self):
++        self.indoor(numeric=True)
++        result = self.result()
++        self.assertEqual(result['artifacts']['index_format'], 'indoor_numeric_legacy')
++        self.assertEqual(result['verdict'], 'success')
++
++    def test_missing_indoor_floor_metadata_is_unconfirmed(self):
++        self.indoor()
++        self.ctx['indoor_floors'] = []
++        self.assertEqual(self.result()['verdict'], 'unconfirmed')
++
++    def test_unknown_function_and_missing_context_do_not_false_succeed(self):
++        self.ctx['func'] = 'acp'
++        self.assertEqual(self.result()['verdict'], 'unconfirmed')
++        self.assertEqual(self.api().validate({}, {}, [], 0)['verdict'], 'unconfirmed')
++
++    def test_cancel_and_nonzero_override_valid_artifacts(self):
++        self.outdoor()
++        self.assertEqual(self.result(exit_code=3)['verdict'], 'failed')
++        self.assertEqual(self.result(exit_code=0, cancelled=True)['verdict'], 'cancelled')
++
++    def test_calibration_current_updates_accept_multi_root_models(self):
++        baseline = self.api().snapshot(self.ctx)
++        self.calibration()
++        self.write(self.models / 'cells/model.xml', '<?xml version="1.0"?><version>1</version><PropagationCategory><ModelName>x</ModelName></PropagationCategory>')
++        result = self.result(baseline, [self.line()])
++        self.assertEqual(result['verdict'], 'success')
++        self.assertEqual(result['business']['updated'], 1)
++        self.assertNotIn('CorrectionMeanVariance.xml', [Path(x['path']).name for x in result['issues']])
++
++    def test_calibration_mixed_site_results_are_partial_and_codes_preserved(self):
++        self.calibration()
++        self.write(self.models / 'cells/model.xml', '<Model><ModelName>x</ModelName></Model>')
++        result = self.result(lines=[self.line(), self.line('b', 'N', 'N', '8')])
++        self.assertEqual(result['verdict'], 'partial')
++        self.assertEqual((result['business']['succeeded'], result['business']['failed'], result['business']['updated']), (1, 1, 1))
++        self.assertEqual(result['business']['sites'][1]['code'], 8)
++
++    def test_calibration_success_without_update_is_no_update(self):
++        self.calibration()
++        result = self.result(lines=[self.line(update='N')])
++        self.assertEqual(result['verdict'], 'no_update')
++
++    def test_calibration_solver_failure_not_success_even_zero_code(self):
++        self.calibration()
++        result = self.result(lines=[self.line(success='N', update='N')])
++        self.assertEqual(result['verdict'], 'failed')
++
++    def test_calibration_claimed_update_requires_changed_model(self):
++        self.calibration()
++        self.write(self.models / 'old.xml', '<Model/>')
++        baseline = self.api().snapshot(self.ctx)
++        self.write(self.dt / 'demo_cell_summary.csv', 'cell,update\na,yes\nb,no\n')
++        self.assertEqual(self.result(baseline, [self.line()])['verdict'], 'unconfirmed')
++
++    def test_calibration_history_and_completion_cannot_supply_current_counts(self):
++        self.calibration()
++        baseline = self.api().snapshot(self.ctx)
++        result = self.result(baseline, ['Propagation model calibration ends (Engine 7).'])
++        self.assertEqual(result['verdict'], 'unconfirmed')
++        self.assertEqual(result['business']['updated'], 0)
++
++    def test_calibration_scene_report_conditional_and_invalid_xml_rejected(self):
++        self.calibration(scene=True)
++        self.write(self.models / 'new.xml', '<Model>broken')
++        result = self.result(lines=[self.line()])
++        self.assertEqual(result['verdict'], 'failed')
++        self.assertIn('MODEL_XML', self.codes(result))
++        (self.dt / 'demo_scene_summary.csv').unlink()
++        self.assertIn('REQUIRED_FILE', self.codes(self.result(lines=[self.line()])))
++
++    def test_missing_baseline_cannot_make_existing_outputs_current(self):
++        self.outdoor()
++        self.assertEqual(self.api().validate(self.ctx, {}, [], 0)['verdict'], 'unconfirmed')
++
++    def test_known_floor_cap_without_observed_upper_output_is_unconfirmed(self):
++        self.ctx['mode'].update(effective='floor', layer_count=3)
++        self.outdoor()
++        self.assertEqual(self.result()['verdict'], 'unconfirmed')
++
++    def test_floor_stack_requires_intermediate_layers_only_for_computed_region(self):
++        self.ctx['mode'].update(effective='floor', layer_count=3)
++        self.outdoor(layers=(0, 2))
++        self.assertEqual(self.result()['verdict'], 'failed')
++
++    def test_indoor_companion_metric_grid_mismatch_fails(self):
++        self.indoor()
++        self.write(self.pred / 'index.txt', 'RSRP_1.dem 0 2 0 2 1\nDLRSSINR_1.dem 10 12 10 12 1\n')
++        self.assertIn('INDEX_GRID_MISMATCH', self.codes(self.result()))
++
++    def test_calibration_unrelated_xml_cannot_confirm_cell_model_updates(self):
++        self.calibration()
++        self.write(self.models / 'unrelated.xml', '<Model><ModelName>x</ModelName></Model>')
++        self.assertEqual(self.result(lines=[self.line()])['verdict'], 'unconfirmed')
++
++    def test_calibration_current_scene_rows_require_scene_model_persistence(self):
++        self.calibration(scene=True)
++        self.write(self.models / 'cells/model.xml', '<Model><ModelName>x</ModelName></Model>')
++        result = self.result(lines=[self.line(), 'The calibration of scene city completed.'])
++        self.assertNotEqual(result['verdict'], 'success')
++
++    def test_calibration_scene_header_only_does_not_require_scene_models(self):
++        self.calibration(scene=True)
++        self.write(self.dt / 'demo_scene_summary.csv', 'sceneNo,model_id\n')
++        self.write(self.models / 'cells/model.xml', '<Model><ModelName>x</ModelName></Model>')
++        self.assertEqual(self.result(lines=[self.line()])['verdict'], 'success')
++
++    def test_calibration_zero_grid_success_is_unconfirmed(self):
++        self.calibration()
++        result = self.result(lines=[self.line(update='N').replace('count=12', 'count=0')])
++        self.assertEqual(result['verdict'], 'unconfirmed')
++
++    def test_calibration_mixed_success_and_failure_without_updates_is_partial(self):
++        self.calibration()
++        result = self.result(lines=[self.line(update='N'), self.line('b', 'N', 'N', '8')])
++        self.assertEqual(result['verdict'], 'partial')
++
++    def test_calibration_empty_cell_report_does_not_prove_business_results(self):
++        self.calibration()
++        self.write(self.dt / 'demo_cell_summary.csv', 'cell,update\n')
++        self.assertNotEqual(self.result(lines=[self.line(update='N')])['verdict'], 'no_update')
++
++    def test_calibration_in_place_storage_uses_bin_models_and_ignores_temporary_models(self):
++        self.calibration()
++        self.write(self.models / 'cells/old.xml', '<Model><ModelName>x</ModelName></Model>')
++        self.ctx['params']['ModelTemporaryStorage'] = 'false'
++        self.ctx['models_dir'] = str(self.root / 'Bin/models')
++        self.assertEqual(self.result(lines=[self.line()])['verdict'], 'unconfirmed')
++        self.write(Path(self.ctx['models_dir']) / 'cells/demo.xml', '<Model><ModelName>x</ModelName></Model>')
++        self.assertEqual(self.result(lines=[self.line()])['verdict'], 'success')
++
++    def test_multichunk_raster_statistics_and_hashes(self):
++        self.outdoor()
++        values = (-900,) * (1024 * 1024 // 2 + 3)
++        self.raster('RSRP.dem', values)
++        self.write(self.pred / 'index.txt', 'UTM 50\nRSRP.dem 0 524291 0 1 1\nDLRSSINR.dem 0 524291 0 1 1\nBESTSERVER.dem 0 524291 0 1 1\n')
++        self.raster('DLRSSINR.dem', values)
++        self.raster('BESTSERVER.dem', (1,) * len(values))
++        result = self.result()
++        self.assertEqual(result['verdict'], 'success')
++        rsrp = next(entry for entry in result['artifacts']['checked'] if entry['path'].endswith('RSRP.dem'))
++        self.assertEqual((rsrp['valid'], rsrp['minimum'], rsrp['maximum']), (len(values), -900, -900))
++
++
++if __name__ == '__main__':
++    unittest.main()

@@ -1,0 +1,2076 @@
+diff --git a/platform/backend/core.py b/platform/backend/core.py
+index eb81bdf..5004cca 100644
+--- a/platform/backend/core.py
++++ b/platform/backend/core.py
+@@ -20,12 +20,17 @@ import subprocess
+ import sys
+ import threading
+ import hashlib
+ import tempfile
+ import math
+ import xml.etree.ElementTree as ET
++from copy import deepcopy
++import time
++import secrets
++from run_guard import RuntimeGuard
++from managed_process import ManagedProcess
+ from engineering import identify_engineering, validate_engineering, normalized
+ from vs_launch import sync_launch
+ 
+ HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
+ ROOT = os.path.dirname(os.path.dirname(HERE))          # 工作流根目录
+ SCRIPTS = os.path.join(ROOT, "scripts")
+@@ -49,13 +54,14 @@ CSV_ENCODINGS = ("utf-8-sig", "gb18030", "gbk")
+ 
+ # ----------------------------------------------------------------------
+ # 环境读写（平台选择持久化回 env 文件，保持 CLI 与 GUI 单一事实）
+ # ----------------------------------------------------------------------
+ 
+ def load_env():
+-    return dict(PROJECT_CONTEXT.get() or ProjectStore(ENV_FILE).load(allow_empty=True))
++    return dict(PROJECT_CONTEXT.get() or ProjectStore(ENV_FILE).load(
++        allow_empty=True, read_only=RUNTIME.snapshot()['busy']))
+ 
+ 
+ def save_env_keys(**kwargs):
+     """只写当前项目档案；legacy env 仅用作首次导入。"""
+     store = ProjectStore(ENV_FILE)
+     if 'PROJECT_DIR' in kwargs:
+@@ -79,13 +85,13 @@ def scan_projects():
+     found = []
+     if os.path.isfile(PROJECTS_FILE):
+         with open(PROJECTS_FILE, encoding='utf-8') as fh:
+             found = json.load(fh).get('projects', [])
+     current = to_slash(env.get("PROJECT_DIR", ""))
+     if env.get('PROJECT_PROFILE_ID'):
+-        found = found + ProjectStore(ENV_FILE).paths()
++        found = found + ProjectStore(ENV_FILE).paths(read_only=RUNTIME.snapshot()['busy'])
+     unique, seen = [], set()
+     for path in ([current] if current else []) + found:
+         key = os.path.normcase(os.path.abspath(to_native(path)))
+         if key not in seen:
+             seen.add(key)
+             unique.append(to_slash(path))
+@@ -837,99 +843,240 @@ def set_csv_column(path, column_key, value):
+ 
+ 
+ # ----------------------------------------------------------------------
+ # 进程运行器（lishuttle / 体检 / 编译 / 装配 共用）
+ # ----------------------------------------------------------------------
+ 
++RUNTIME = RuntimeGuard()
++
++
+ class Runner:
+-    def __init__(self):
++    def __init__(self, guard=None):
+         self.sessions = {}
+-        self.lock = threading.Lock()
+-        self.counter = 0
+-
+-    def start(self, cmd, cwd, label, env=None):
+-        with self.lock:
+-            self.counter += 1
+-            sid = self.counter
+-        proc = subprocess.Popen(
+-            cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+-            text=True, encoding="gbk", errors="replace", shell=False, env=env)
+-        self.sessions[sid] = {"proc": proc, "lines": [], "status": "running",
+-                              "label": label, "exit": None}
+-
+-        def pump():
+-            for line in proc.stdout:
++        self.lock = threading.RLock()
++        # Numeric for existing clients, unique across service restarts (< JS 2**53).
++        self.counter = secrets.randbits(51)
++        self.guard = guard if guard is not None else RUNTIME
++
++    def start(self, cmd, cwd, label, env=None, context=None, baseline=None, finalize=None):
++        context = deepcopy(context or {})
++        with self.guard.operation(label, context) as token:
++            tree = ManagedProcess(cmd, cwd, env=env)
++            proc = tree.proc
++            try:
++                with self.lock:
++                    self.counter += 1
++                    sid = self.counter
++                    self.sessions[sid] = {"proc": proc, "tree": tree, "lines": [], "status": "running",
++                                          "label": label, "exit": None, "context": context,
++                                          "cancelled": False, "internal_error": '', "result": None,
++                                          "token": token}
++                    self.guard.bind(token, sid, context)
++            except BaseException:
++                tree.terminate()
++                tree.wait()
++                tree.close()
++                raise
++
++            def pump():
++                s = self.sessions[sid]
++                try:
++                    for line in proc.stdout:
++                        with self.lock:
++                            s['lines'].append(line.rstrip('\r\n'))
++                except Exception as exc:
++                    with self.lock:
++                        s['internal_error'] = f'日志读取失败：{exc}'
++                    try:
++                        tree.terminate()
++                    except OSError as stop_error:
++                        with self.lock:
++                            s['internal_error'] += f'；终止失败：{stop_error}'
++                finally:
++                    try:
++                        proc.stdout.close()
++                    except Exception:
++                        pass
++                # A root process can exit while build/engine children still run.
++                # Keep the lease, even on a monitoring error, until exit is confirmed.
++                while True:
++                    try:
++                        code = tree.wait()
++                        break
++                    except Exception as exc:
++                        with self.lock:
++                            s['internal_error'] = f'等待进程树退出失败：{exc}'
++                        time.sleep(.1)
++                self.guard.set_phase(token, 'finalizing')
+                 with self.lock:
+-                    self.sessions[sid]["lines"].append(line.rstrip("\r\n"))
+-            proc.wait()
+-            with self.lock:
+-                self.sessions[sid]["status"] = "done"
+-                self.sessions[sid]["exit"] = proc.returncode
++                    s.update(status='finalizing', exit=code)
++                    lines, cancelled = list(s['lines']), s['cancelled']
++                try:
++                    if finalize:
++                        result = finalize(context, baseline, lines, code, cancelled=cancelled)
++                    else:
++                        verdict = ('cancelled' if cancelled else 'failed' if code else
++                                   'unconfirmed' if context.get('func') else 'success')
++                        result = {'verdict': verdict, 'process': {'exit': code, 'status': 'done'},
++                                  'artifacts': {'status': 'unconfirmed' if context.get('func') else 'not_applicable'},
++                                  'business': {'status': 'unconfirmed' if context.get('func') else 'not_applicable'}}
++                    if s['internal_error'] and result.get('verdict') == 'success':
++                        result['verdict'] = 'unconfirmed'
++                except Exception as exc:
++                    with self.lock:
++                        s['internal_error'] = f'结果验证失败：{exc}'
++                    result = {'verdict': 'cancelled' if cancelled else 'failed' if code else 'unconfirmed',
++                              'process': {'exit': code, 'status': 'done'},
++                              'artifacts': {'status': 'unconfirmed'}, 'business': {'status': 'unconfirmed'},
++                              'issues': [{'severity': 'error', 'code': 'VALIDATION_ERROR',
++                                          'message': str(exc), 'path': context.get('out_dir', '')}]}
++                finally:
++                    tree.close()
++                with self.lock:
++                    s.update(result=result, status='done')
++                    self.guard.release(token)
+ 
+-        threading.Thread(target=pump, daemon=True).start()
+-        return sid
++            try:
++                threading.Thread(target=pump, daemon=True).start()
++            except BaseException:
++                tree.terminate()
++                tree.wait()
++                tree.close()
++                self.guard.release(token)
++                with self.lock:
++                    self.sessions.pop(sid, None)
++                raise
++            return sid
+ 
+     def output(self, sid, since):
+         with self.lock:
+             s = self.sessions.get(sid)
+             if not s:
+                 return {"error": "会话不存在"}
+-            return {"lines": s["lines"][since:], "total": len(s["lines"]),
+-                    "status": s["status"], "exit": s["exit"], "label": s["label"]}
++            return deepcopy({"lines": s["lines"][max(0, since):], "total": len(s["lines"]),
++                             "status": s["status"], "exit": s["exit"], "label": s["label"],
++                             'context': s.get('context', {}), 'result': s.get('result'),
++                             'cancelled': s.get('cancelled', False), 'internal_error': s.get('internal_error', '')})
+ 
+     def stop(self, sid):
+         with self.lock:
+             s = self.sessions.get(sid)
+-        if s and s["status"] == "running":
+-            s["proc"].terminate()
++            if not s or s['status'] in ('done', 'finalizing'):
++                return False
++            if s.get('cancelled'):
++                return True
++            s.update(cancelled=True, status='cancelling')
++            self.guard.set_phase(s['token'], 'cancelling')
++            try:
++                s['tree'].terminate()
++            except Exception as exc:
++                s.update(cancelled=False, status='running', internal_error=f'停止失败，可重试：{exc}')
++                self.guard.set_phase(s['token'], 'running')
++                raise
+             return True
+-        return False
++
++    def shutdown(self):
++        with self.lock:
++            active = [sid for sid, s in self.sessions.items() if s['status'] != 'done']
++        for sid in active:
++            self.stop(sid)
+ 
+ 
+ RUNNER = Runner()
+ 
+ 
+ def sync_vs_launch(project_env, schema_name, func, task_id, city_kind, previous_schema=''):
+     return sync_launch(project_env, schema_name, func, task_id, city_kind,
+                        scan_functions(project_env['PROJECT_DIR']), previous_schema=previous_schema)
+ 
+ 
++class PreflightRejected(ValueError):
++    def __init__(self, report):
++        self.report = report
++        errors = [item['message'] for item in report['issues'] if item['severity'] == 'error']
++        super().__init__('运行前检查未通过：' + ('；'.join(errors[:3]) or '输入无法确认'))
++
++
++def check_run(schema_name, func, task_id):
++    from preflight import check_run as inspect_run
++    if (not schema_name or os.path.basename(schema_name) != schema_name or
++            '/' in schema_name or '\\' in schema_name or not schema_name.lower().endswith('.xml')):
++        return {'ok': False, 'issues': [{'severity': 'error', 'code': 'SCHEMA_NAME_INVALID',
++                'message': '请选择 runtimelibrary 中的运行 XML 文件名', 'field': 'schema', 'path': schema_name}],
++                'context': {}}
++    report = inspect_run(load_env(), schema_path(schema_name), func, str(task_id))
++    report['context']['schema_name'] = schema_name
++    return report
++
++
+ def start_lishuttle(schema_name, func, task_id):
+     """直接起 lishuttle.exe（工作目录=exe 目录），不经 bat。"""
+-    env = load_env()
+-    try:
+-        validate_operation(env, 'run')
+-    except ValueError as exc:
+-        return None, str(exc)
+-    exe = os.path.join(env["PROJECT_DIR"].replace("/", os.sep),
+-                       *env["BUILD_SUBDIR"].split("/"), "Bin", env["EXE_NAME"])
+-    if not os.path.isfile(exe):
+-        return None, f"找不到 {exe}，先编译"
+-    cmd = [exe, "-f", func, "-t", str(task_id), "-c", schema_name]
+-    cwd = os.path.dirname(exe)
+-    return RUNNER.start(cmd, cwd, f"-f {func} -t {task_id} -c {schema_name}"), to_slash(exe)
++    with RUNTIME.operation('运行 ' + func):
++        env = load_env()
++        try:
++            validate_operation(env, 'run')
++        except ValueError as exc:
++            return None, str(exc)
++        report = check_run(schema_name, func, task_id)
++        if not report['ok']:
++            raise PreflightRejected(report)
++        from result_validation import snapshot, validate
++        context = deepcopy(report['context'])
++        context['project_config'] = dict(env)
++        context['preflight_issues'] = report['issues']
++        baseline = snapshot(context)
++        exe, cwd = context['exe'], context['bin_dir']
++        cmd = [exe, '-f', func, '-t', str(task_id), '-c', schema_name]
++        sid = RUNNER.start(cmd, cwd, f'-f {func} -t {task_id} -c {schema_name}',
++                           context=context, baseline=baseline, finalize=validate)
++        return sid, to_slash(exe)
+ 
+ 
+ def start_toolkit(step):
+     """doctor/build/stage：批处理封装。"""
+-    env = load_env()
+-    try:
+-        validate_operation(env, step)
+-    except ValueError as exc:
+-        return None, str(exc)
+-    bat = os.path.join(SCRIPTS, {"doctor": "doctor_local.bat", "build": "build_local.bat",
+-                                 "stage": "stage_local.bat"}[step])
+-    child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env))
+-    sid = RUNNER.start(["cmd", "/c", bat], ROOT, step, env=child_env)
+-    return sid, to_slash(bat)
++    with RUNTIME.operation(step):
++        env = load_env()
++        try:
++            validate_operation(env, step)
++        except ValueError as exc:
++            return None, str(exc)
++        bat = os.path.join(SCRIPTS, {"doctor": "doctor_local.bat", "build": "build_local.bat",
++                                     "stage": "stage_local.bat"}[step])
++        child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env))
++        binary = os.path.realpath(os.path.join(env['PROJECT_DIR'], env.get('BUILD_SUBDIR', ''), 'Bin'))
++        sid = RUNNER.start(["cmd", "/d", "/c", bat], ROOT, step, env=child_env,
++                           context={'project': env['PROJECT_DIR'], 'bin_dir': binary, 'operation': step})
++        return sid, to_slash(bat)
+ 
+ 
+ # ----------------------------------------------------------------------
+ # 结果查看
+ # ----------------------------------------------------------------------
+ 
++def session_results(sid):
++    with RUNNER.lock:
++        session = RUNNER.sessions.get(sid)
++        if not session:
++            return {'error': '会话不存在；重启服务后的目录浏览无法确认本次运行'}
++        context = deepcopy(session.get('context', {}))
++        report = deepcopy(session.get('result'))
++        if report is None:
++            report = {'verdict': 'pending', 'process': {'status': session['status'], 'exit': session['exit']},
++                      'artifacts': {'status': 'pending'}, 'business': {'status': 'pending'},
++                      'files': [], 'log_tail': session['lines'][-40:], 'errors': [], 'issues': []}
++        report.update(sid=sid, associated=True, context=context, dir=context.get('out_dir', ''),
++                      status=session['status'], exit=session['exit'], label=session['label'],
++                      internal_error=session.get('internal_error', ''))
++        report.setdefault('exists', bool(context.get('out_dir') and os.path.isdir(context['out_dir'])))
++        report.setdefault('files', [])
++        report.setdefault('log_tail', session['lines'][-40:])
++        report.setdefault('errors', [])
++        report.setdefault('log_file', '')
++        return report
++
++
+ def results(job_name):
+     env = load_env()
+     out_dir = os.path.join(env["OUT_ROOT"].replace("/", os.sep), job_name)
+     manifest_path = schema_path(job_name + '.xml') + '.manifest.json'
+     if os.path.isfile(manifest_path):
+         with open(manifest_path, encoding='utf-8') as fh:
+@@ -938,13 +1085,16 @@ def results(job_name):
+             out_dir = runtime_details(schema_path(job_name + '.xml'),
+                                       os.path.dirname(os.path.dirname(manifest_path)))['out_dir']
+     exe_dir = os.path.join(env["PROJECT_DIR"].replace("/", os.sep),
+                            *env["BUILD_SUBDIR"].split("/"), "Bin")
+     info = {"dir": to_slash(out_dir), "exists": os.path.isdir(out_dir),
+             "files": [], "status": "", "log_tail": [], "errors": [],
+-            "log_file": ""}
++            "log_file": "", 'associated': False, 'verdict': 'unconfirmed',
++            'association_note': '目录浏览：未关联本次运行',
++            'process': {'status': 'unassociated', 'exit': None},
++            'artifacts': {'status': 'unconfirmed'}, 'business': {'status': 'unconfirmed'}}
+     if not info["exists"]:
+         return info
+     for base, dirs, files in os.walk(out_dir):
+         rel = os.path.relpath(base, out_dir)
+         for f in files:
+             p = os.path.join(base, f)
+diff --git a/platform/backend/server.py b/platform/backend/server.py
+index 8460211..2aeb175 100644
+--- a/platform/backend/server.py
++++ b/platform/backend/server.py
+@@ -24,22 +24,41 @@ from urllib.parse import urlparse, parse_qs
+ HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
+ PLATFORM = os.path.dirname(HERE)                       # platform/
+ ROOT = os.path.dirname(PLATFORM)                       # 工作流根目录
+ sys.path.insert(0, HERE)
+ 
+ import core  # noqa: E402
++from run_guard import RuntimeBusy
+ 
+ STATIC = os.path.join(PLATFORM, "frontend")
+ MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+         ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8",
+         ".png": "image/png", ".svg": "image/svg+xml"}
+ 
+ 
+ PROJECT_LOCK = threading.RLock()
+ 
+ 
++def runtime_operation(fn):
++    """Reserve before any project/config read that might persist a migration."""
++    @wraps(fn)
++    def wrapped(payload):
++        try:
++            labels = {'run':'运行', 'toolkit':'工具任务', 'render':'装配', 'select_project':'切换项目',
++                      'csv_save':'保存工参', 'csv_column':'修改工参', 'param_write':'修改参数',
++                      'param_default':'恢复参数', 'cleanup_configs':'清理配置'}
++            label = labels.get(fn.__name__, '更新配置')
++            if fn.__name__ == 'toolkit' and isinstance(payload, dict):
++                label = {'build':'编译','stage':'装配','doctor':'体检'}.get(payload.get('step'), label)
++            with core.RUNTIME.operation(label):
++                return fn(payload)
++        except RuntimeBusy as exc:
++            return exc.response()
++    return wrapped
++
++
+ def project_operation(fn):
+     """项目切换与依赖当前项目的操作串行执行，拒绝旧页面的写入。"""
+     @wraps(fn)
+     def wrapped(payload):
+         with PROJECT_LOCK:
+             env = core.load_env()
+@@ -65,15 +84,21 @@ class Api:
+     """路由表：method + path 前缀 → 处理函数。"""
+ 
+     @staticmethod
+     @project_operation
+     def state(_):
+         store = core.ProjectStore(core.ENV_FILE)
+-        machine = store.setup_machine()
+-        # setup may persist tool discovery and invalidate the request's initial revision.
+-        core.PROJECT_CONTEXT.set(store.load(allow_empty=True))
++        try:
++            with core.RUNTIME.operation('检测本机工具'):
++                machine = store.setup_machine()
++                # Tool discovery can update the revision, but never while a run owns it.
++                core.PROJECT_CONTEXT.set(store.load(allow_empty=True))
++        except RuntimeBusy:
++            env = core.load_env()
++            machine = {'values': {key: env.get(key, '') for key in core.MACHINE_FIELDS},
++                       'candidates': {}, 'filled': [], 'deferred': True}
+         projects, current_project = core.scan_projects()
+         cities, map_root = core.scan_cities()
+         tasks, gongcan_root = core.scan_tasks()
+         env = core.load_env()
+         funcs = core.ordered_functions() if current_project else []
+         return {"projects": projects, "project": current_project,
+@@ -86,15 +111,17 @@ class Api:
+                 "machine_detection": machine,
+                 "build_workflow": core.describe_build(env),
+                 "profile_id": env.get('PROJECT_PROFILE_ID', ''),
+                 "profile_revision": env.get('PROJECT_PROFILE_REVISION', ''),
+                 "function_info": funcs,
+                 "functions": [f["name"] for f in funcs],
+-                "func_source": "来自 " + current_project + "/SwanUtility/incl/LiShuttleTypes.h"}
++                "func_source": "来自 " + current_project + "/SwanUtility/incl/LiShuttleTypes.h",
++                'runtime': core.RUNTIME.snapshot()}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def select_project(body):
+         path = body.get("path", "")
+         result = core.add_project(path)
+         if not result['ok']:
+             return result
+@@ -103,12 +130,13 @@ class Api:
+ 
+     @staticmethod
+     def add_project(body):
+         return Api.select_project(body)
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def save_project_config(body):
+         try:
+             env = core.ProjectStore(core.ENV_FILE).save(body.get('values', {}),
+                 body.get('_revision'), project=core.load_env()['PROJECT_DIR'])
+             core.PROJECT_CONTEXT.set(env)
+@@ -131,31 +159,38 @@ class Api:
+         return {'ok': not issues, 'issues': issues}
+ 
+     @staticmethod
+     @project_operation
+     def build_status(body):
+         try:
+-            env = core.sync_executable(core.ProjectStore(core.ENV_FILE), core.load_env())
++            env = core.load_env()
++            try:
++                with core.RUNTIME.operation('刷新构建状态'):
++                    env = core.sync_executable(core.ProjectStore(core.ENV_FILE), env)
++            except RuntimeBusy:
++                pass  # Describe the pinned configuration without implicit persistence.
+             core.PROJECT_CONTEXT.set(env)
+             return {'build_workflow': core.describe_build(env),
+                     'build_values': {key:env.get(key,'') for key in core.BUILD_FIELDS},
+                     'profile_revision': env['PROJECT_PROFILE_REVISION']}
+         except (ValueError, OSError) as exc:
+             return {'error': str(exc)}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def save_machine_config(body):
+         try:
+             store = core.ProjectStore(core.ENV_FILE)
+             store.save_machine(body.get('values', {}), body.get('_machine_revision'))
+             return Api.state(None)
+         except (ValueError, OSError) as exc:
+             return {'error': str(exc)}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def detect_machine_config(body):
+         try:
+             store = core.ProjectStore(core.ENV_FILE)
+             machine = store.setup_machine(force=True)
+             return dict(Api.state(None), machine_detection=machine)
+@@ -225,12 +260,13 @@ class Api:
+                     unresolved[tag] = reason
+             return {'values': values, 'warnings': warnings, 'unresolved': unresolved}
+         except (ValueError, OSError) as exc:
+             return {'error': str(exc)}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def save_task_binding(body):
+         try:
+             _, key, engineering, schema = Api._binding_task(body)
+             cities, _ = core.scan_cities()
+             city = next((c for c in cities if c['name'] == body.get('city')), None)
+@@ -248,32 +284,35 @@ class Api:
+             core.ProjectStore(core.ENV_FILE).binding(key, binding, project=env['PROJECT_DIR'])
+             return {'ok': True, 'binding': binding}
+         except (ValueError, OSError) as exc:
+             return {'error': str(exc)}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def set_map_root(body):
+         path = body.get("path", "").replace("\\", "/")
+         if not os.path.isdir(path):
+             return {"error": f"目录不存在：{path}"}
+         core.save_env_keys(MAP_ROOT=path)
+         cities, map_root = core.scan_cities()
+         return {"map_root": map_root, "cities": cities, "profile_revision": core.load_env().get('PROJECT_PROFILE_REVISION', '')}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def set_gongcan_root(body):
+         path = body.get("path", "").replace("\\", "/")
+         if not os.path.isdir(path):
+             return {"error": f"目录不存在：{path}"}
+         core.save_env_keys(GONGCAN_ROOT=path)
+         tasks, gongcan_root = core.scan_tasks()
+         return {"gongcan_root": gongcan_root, "tasks": tasks, "profile_revision": core.load_env().get('PROJECT_PROFILE_REVISION', '')}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def render(body):
+         """装配并渲染：写 web-*.env → 调渲染脚本 → 可选复制共用文件。"""
+         env = core.load_env()
+         if env.get('PROJECT_PROFILE_ID'):
+             issues = core.required_issues(env, 'render')
+@@ -363,12 +402,13 @@ class Api:
+ 
+     @staticmethod
+     def preview_render(body):
+         return Api.render(dict(body, use_existing_schema=True, preview_only=True))
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def cleanup_configs(body):
+         from runtime_cleanup import cleanup_plan, apply_cleanup
+         with core.RUNNER.lock:
+             if any(s.get('status') == 'running' for s in core.RUNNER.sessions.values()):
+                 return {'error': '平台仍有运行或编译进程，请结束后再清理'}
+@@ -400,24 +440,26 @@ class Api:
+             catalog['profile']['source_review'] = source_review(func, core.load_env().get('PROJECT_DIR', ''))
+         return {**catalog, "file": path, "schema_name": document['name'], "values": document['values'],
+                 "param_sources": {'DefaultCalcRadius': core.radius_source(schema)},
+                 "thirdpart_defaults": core.thirdpart_defaults()}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def param_default(body):
+         tag = body.get('tag', '')
+         if tag == 'DefaultCalcRadius':
+             return {'ok': False, 'message': '小区计算半径以 CSV 为准，请修改工参半径；XML 仅提供默认值'}
+         default = core.thirdpart_defaults().get(tag)
+         if not default or not default['available']:
+             return {'ok': False, 'message': (default or {}).get('reason', '当前项目样例没有此参数的默认值')}
+         ok, msg = core.write_schema_param(body.get('schema', ''), tag, default['value'])
+         return dict(ok=ok, message=msg, value=default['value'], source=default['source'])
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def param_write(body):
+         schema = body.get("schema", "")
+         tag = body.get("tag", "")
+         value = str(body.get("value", ""))
+         try:
+@@ -430,35 +472,55 @@ class Api:
+ 
+     @staticmethod
+     def csv_get(query):
+         return core.read_csv_grid(query.get("path", [""])[0])
+ 
+     @staticmethod
++    @runtime_operation
++    @project_operation
+     def csv_save(body):
+         ok, msg = core.save_csv_grid(body["path"], body["header_zh"],
+                                      body["header_en"], body["rows"])
+         return {"ok": ok, "message": msg}
+ 
+     @staticmethod
++    @runtime_operation
++    @project_operation
+     def csv_column(body):
+         ok, msg = core.set_csv_column(body["path"], body["column"], body["value"])
+         return {"ok": ok, "message": msg}
+ 
+     @staticmethod
++    @runtime_operation
+     @project_operation
+     def run(body):
+         schema = body.get("schema", "")
+         func = body.get("func", "pl")
+         task_id = str(body.get("task_id", "1"))
+-        sid, exe = core.start_lishuttle(schema, func, task_id)
++        try:
++            sid, exe = core.start_lishuttle(schema, func, task_id)
++        except core.PreflightRejected as exc:
++            return {'error': str(exc), 'code': 'PREFLIGHT_FAILED', 'preflight': exc.report,
++                    'issues': exc.report['issues']}
+         if sid is None:
+             return {"error": exe}
+-        return {"sid": sid, "exe": exe}
++        return {"sid": sid, "exe": exe, 'runtime': core.RUNTIME.snapshot(),
++                'context': core.RUNNER.output(sid, 0).get('context', {})}
+ 
+     @staticmethod
+     @project_operation
++    def preflight(body):
++        return core.check_run(body.get('schema', ''), body.get('func', 'pl'), str(body.get('task_id', '1')))
++
++    @staticmethod
++    def runtime_state(_):
++        return core.RUNTIME.snapshot()
++
++    @staticmethod
++    @runtime_operation
++    @project_operation
+     def toolkit(body):
+         if body.get('step') == 'build':
+             try:
+                 env = core.load_env()
+                 values = core.prepare_build(env, body.get('preset') or env.get('PRESET',''))
+                 issues = core.required_issues(dict(env, **values), 'build')
+@@ -487,15 +549,21 @@ class Api:
+ 
+     @staticmethod
+     def stop(body):
+         return {"stopped": core.RUNNER.stop(int(body.get("sid", "0")))}
+ 
+     @staticmethod
+-    @project_operation
+     def results(query):
+-        return core.results(query.get("job", [""])[0])
++        if query.get('sid'):
++            return core.session_results(int(query['sid'][0]))
++        return Api.job_results(query)
++
++    @staticmethod
++    @project_operation
++    def job_results(query):
++        return core.results(query.get('job', [''])[0])
+ 
+     @staticmethod
+     def open_folder(body):
+         path = body.get("path", "")
+         if os.path.isdir(path) and sys.platform == "win32":
+             os.startfile(path)  # noqa: S606
+@@ -525,12 +593,14 @@ ROUTES = {
+     ("POST", "param_write"): Api.param_write,
+     ("POST", "param_default"): Api.param_default,
+     ("GET", "csv"): Api.csv_get,
+     ("POST", "csv_save"): Api.csv_save,
+     ("POST", "csv_column"): Api.csv_column,
+     ("POST", "run"): Api.run,
++    ("POST", "preflight"): Api.preflight,
++    ("GET", "runtime_state"): Api.runtime_state,
+     ("POST", "toolkit"): Api.toolkit,
+     ("GET", "output"): Api.output,
+     ("POST", "stop"): Api.stop,
+     ("GET", "results"): Api.results,
+     ("POST", "open_folder"): Api.open_folder,
+ }
+@@ -538,12 +608,14 @@ ROUTES = {
+ 
+ class Handler(BaseHTTPRequestHandler):
+     def log_message(self, fmt, *args):  # 安静模式
+         pass
+ 
+     def _json(self, obj, code=200):
++        if isinstance(obj, dict) and obj.get('code') == 'RUNTIME_BUSY':
++            code = 409
+         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+         self.send_response(code)
+         self.send_header("Content-Type", "application/json; charset=utf-8")
+         self.send_header("Content-Length", str(len(data)))
+         self.end_headers()
+         self.wfile.write(data)
+@@ -602,10 +674,13 @@ def main():
+     if "--no-browser" not in args:
+         threading.Timer(0.5, webbrowser.open, args=(url,)).start()
+     try:
+         server.serve_forever()
+     except KeyboardInterrupt:
+         print("\n已停止")
++    finally:
++        core.RUNNER.shutdown()
++        server.server_close()
+ 
+ 
+ if __name__ == "__main__":
+     main()
+diff --git a/platform/frontend/app.js b/platform/frontend/app.js
+index 26c69b6..344d4e3 100644
+--- a/platform/frontend/app.js
++++ b/platform/frontend/app.js
+@@ -6,12 +6,13 @@ const S = {  // 全局状态
+   cities: [], tasks: [], functions: [],
+   city: null,          // {name, kind}
+   task: null,          // 任务对象
+   func: "pl",
+   job: null,           // {name, schema, func, taskId}
+   sid: 0, since: 0, pollTimer: null,
++  resultSid: 0, resultContext: null, runtime: {busy:false}, launchPending: false,
+ };
+ 
+ async function api(name, body, method) {
+   const writing = method !== "GET";
+   if (writing) S.pendingRequests = (S.pendingRequests || 0) + 1;
+   const opt = method === "GET" ? {} : {
+@@ -20,13 +21,15 @@ async function api(name, body, method) {
+       _machine_revision: S.machineRevision }),
+   };
+   try {
+     const suffix = method === 'GET' && S.project && name !== 'output' && name !== 'state'
+       ? `${body ? '&' : '?'}_project=${encodeURIComponent(S.project)}&_revision=${encodeURIComponent(S.profileRevision || '')}` : '';
+     const res = await fetch(`/api/${name}${method === "GET" ? body + suffix : ""}`, opt);
+-    return await res.json();
++    const result = await res.json();
++    if (result.code === 'RUNTIME_BUSY' && result.runtime) applyRuntimeState(result.runtime, true);
++    return result;
+   } finally {
+     if (writing) S.pendingRequests--;
+   }
+ }
+ 
+ const get = (name, qs) => api(name, qs ? `?${qs}` : "", "GET");
+@@ -55,12 +58,14 @@ async function init() {
+   };
+   $("project-add-form").onsubmit = async event => {
+     event.preventDefault();
+     await changeProject("add_project", $("project-path").value.trim());
+   };
+   bindActions();
++  await refreshRuntimeState(true);
++  S.runtimeTimer = setInterval(() => refreshRuntimeState(true), 1200);
+   $("btn-project-config").onclick = () => {
+     const open = $("project-config-form").classList.contains("hidden");
+     $("project-config-form").classList.toggle("hidden", !open);
+     $("btn-project-config").setAttribute("aria-expanded", String(open));
+   };
+   $("project-config-form").onsubmit = async event => {
+@@ -137,12 +142,13 @@ function applyProjectState(st, {preserveMachineDraft = false} = {}) {
+   $('params-toolbar').classList.add('hidden');
+   $("render-output").textContent = "";
+   $("render-output").classList.add("hidden");
+   $("run-info").textContent = "尚未渲染";
+   $("run-console").textContent = "";
+   S.sid = 0; S.since = 0;
++  S.resultSid = 0; S.resultContext = null;
+   $("btn-export-log").disabled = true;
+   $("run-status").classList.add("hidden");
+   $("result-files").innerHTML = "";
+   $("result-log").textContent = "";
+   $("result-status").classList.add("hidden");
+   $("result-job").value = "";
+@@ -156,12 +162,13 @@ function applyProjectState(st, {preserveMachineDraft = false} = {}) {
+   $("map-root").value = st.map_root;
+   $("gongcan-root").value = st.gongcan_root;
+   renderCities(st.cities);
+   renderTasks(st.tasks);
+   $("env-note").textContent = `预设 ${st.preset} · 输出根 ${st.out_root}`;
+   if (typeof fetch === 'function' && S.profileId) refreshProjectDetection();
++  if (st.runtime) applyRuntimeState(st.runtime, true);
+ }
+ 
+ const PROFILE_LABELS = {
+   PRESET:'构建预设', BUILD_SUBDIR:'构建目录（相对项目）', INSTALL_SUBDIR:'安装目录（相对项目）',
+   EXE_NAME:'程序文件名', VS_ROOT:'Visual Studio 目录', CMAKE:'CMake 程序', NINJA:'Ninja 程序',
+   VCVARS:'MSVC 环境脚本', CONFIG_SRC:'基础配置源目录', DLL_SRC:'动态库源目录',
+@@ -435,12 +442,13 @@ function bindActions() {
+   $("btn-build").onclick = () => toolkit("build");
+   $("btn-rescan-map").onclick = rescanMap;
+   $("btn-rescan-task").onclick = rescanTasks;
+   $("btn-render").onclick = doRender;
+   $("btn-cleanup-preview").onclick = previewCleanup;
+   $("btn-run").onclick = doRun;
++  $("btn-preflight").onclick = doPreflight;
+   $("btn-stop").onclick = () => post("stop", { sid: S.sid });
+   $("btn-export-log").onclick = exportRunLog;
+   $("btn-csv-load").onclick = loadCsv;
+   $("engineering-path").onchange = () => selectEngineering($("engineering-path").value, true);
+   $("csv-path").onchange = () => selectEngineering($("csv-path").value, true);
+   $("use-existing-schema").onchange = updateSchemaMode;
+@@ -1098,18 +1106,126 @@ function applyBuildStatus(result, sentDraft = {...S.projectDraft}) {
+   $('params-toolbar').classList.add('hidden');
+   $('run-info').textContent = '构建配置已更新，请重新装配并渲染';
+   renderProjectConfig();
+ }
+ 
+ async function doRun() {
++  if (S.launchPending || S.pollTimer || S.runtime?.busy) return toast('平台已有任务，请等待结束或取消', false);
+   if (!S.job) return toast("先在「功能与参数」页装配并渲染", false);
+   if (taskIdentityDirty()) return toast('任务名或任务 ID 已修改，请先重新装配并渲染', false);
+-  const r = await post("run", { schema: S.job.schema, func: S.job.func, task_id: S.job.taskId });
+-  if (r.error) return toast(r.error, false);
+-  attachConsole(r.sid, `运行 ${S.job.schema}：`);
+-  switchTab(document.querySelector('[data-tab="run"]'));
++  S.launchPending = true;
++  const epoch = S.projectEpoch;
++  const request = {schema:S.job.schema, func:S.job.func, task_id:S.job.taskId};
++  try {
++    const check = await post('preflight', request);
++    if (epoch !== S.projectEpoch) return;
++    showPreflight(check);
++    if (check.error || !check.ok) return toast(check.error || '运行前检查未通过，请查看具体缺项', false);
++    const r = await post('run', request);
++    if (epoch !== S.projectEpoch) return;
++    if (r.preflight) showPreflight(r.preflight);
++    if (r.error) return toast(r.error, false);
++    rememberRunContext(r.sid, r.context);
++    if (r.runtime) applyRuntimeState(r.runtime);
++    attachConsole(r.sid, `运行 ${request.schema}：`);
++    switchTab(document.querySelector('[data-tab="run"]'));
++  } catch (error) {
++    toast(`运行请求失败：${error.message}`, false);
++  } finally {
++    S.launchPending = false;
++  }
++}
++
++async function doPreflight() {
++  if (!S.job) return toast('请先装配并渲染运行配置', false);
++  if (taskIdentityDirty()) return toast('任务设置已修改，请先重新装配', false);
++  const epoch = S.projectEpoch;
++  const report = await post('preflight', {schema:S.job.schema,func:S.job.func,task_id:S.job.taskId});
++  if (epoch === S.projectEpoch) showPreflight(report);
++}
++
++function showPreflight(report) {
++  const mode = report.context?.mode;
++  $('preflight-report').textContent = (report.error || (report.ok ? '运行前检查通过' : '运行前检查未通过')) +
++    (mode ? `\n配置模式：${mode.requested ?? '缺省 ground'}；本功能使用：${mode.effective}` : '') +
++    (report.issues || []).map(issue => `\n${issue.severity === 'error' ? '阻断' : '提示'}：${issue.message}` +
++      (issue.field ? ` [${issue.field}]` : '') + (issue.path ? `\n  ${issue.path}` : '')).join('');
++}
++
++const runtimeDisabled = new WeakMap();
++function applyRuntimeState(state, restore = false) {
++  if (!state || state.error) return;
++  S.runtime = state;
++  S.runtimeSerial = (S.runtimeSerial || 0) + 1;
++  const phases = {preparing:'准备中',running:'运行中',cancelling:'取消中',finalizing:'验证结果中'};
++  $('runtime-status').textContent = state.busy
++    ? `${state.func || state.label || '任务'}：${phases[state.phase] || state.phase}；相关输入已锁定` : '平台空闲';
++  const controls = [...document.querySelectorAll('[data-runtime-write]'),
++    ...document.querySelectorAll('#params-area input, #params-area select, #params-area button, #csv-wrap input, #csv-wrap select, #project-config-form input, #project-config-form select, #machine-config-form input')];
++  controls.forEach(node => {
++    if (state.busy) {
++      if (!runtimeDisabled.has(node)) runtimeDisabled.set(node, !!node.disabled);
++      node.disabled = true;
++    } else if (runtimeDisabled.has(node)) {
++      node.disabled = runtimeDisabled.get(node);
++      runtimeDisabled.delete(node);
++    }
++  });
++  if (restore && state.busy && state.sid && S.sid !== state.sid) attachConsole(state.sid, `恢复会话 ${state.sid}：`);
++}
++
++async function refreshRuntimeState(restore = false) {
++  if (S.runtimeRefreshPending) return;
++  S.runtimeRefreshPending = true;
++  const serial = S.runtimeSerial || 0;
++  try {
++    const state = await get('runtime_state');
++    if (serial === (S.runtimeSerial || 0)) applyRuntimeState(state, restore);
++  } catch (error) {
++    $('runtime-status').textContent = `运行状态暂不可用：${error.message}`;
++  } finally {
++    S.runtimeRefreshPending = false;
++  }
++}
++
++function rememberRunContext(sid, context) {
++  if (!context?.func) return;
++  if (S.resultSid === sid) { S.resultContext = context; return; }
++  S.resultSid = sid;
++  S.resultContext = context;
++  $('result-job').value = context.task_name || '';
++}
++
++const VERDICTS = {success:'成功',partial:'部分成功',no_update:'无模型更新',unconfirmed:'未确认',failed:'失败',cancelled:'已取消',pending:'处理中'};
++function verdictClass(verdict) {
++  return verdict === 'success' ? 'ok' : ['failed','cancelled'].includes(verdict) ? 'fail' : verdict === 'pending' ? 'running' : 'unknown';
++}
++
++function showOutcome(id, report) {
++  const labels = {valid:'通过',invalid:'不完整或损坏',failed:'失败',unconfirmed:'未确认',pending:'待验证',
++    usable:'可用',unusable:'不可用',success:'成功',partial:'部分成功',no_update:'无模型更新',
++    not_applicable:'不适用',unassociated:'未关联',done:'已结束',exited:'已退出',running:'运行中',
++    cancelling:'取消中',finalizing:'结果验证中',cancelled:'已取消'};
++  const process = report.process || {}, artifacts = report.artifacts || {}, business = report.business || {};
++  const exit = process.exit ?? process.exit_code ?? report.exit;
++  const text = [`进程：${labels[process.status] || process.status || '未确认'}；退出码 ${exit ?? '尚未退出'}`,
++    `产物验证：${labels[artifacts.status] || artifacts.status || '未确认'}`,
++    `业务可用性：${labels[business.status] || business.status || '未确认'}`];
++  const mode = report.context?.mode;
++  if (mode) text.push(`配置模式：${mode.requested ?? '缺省 ground'}；实际计算：${mode.effective}`);
++  if (business.total != null) text.push(`校正对象：${business.total}；成功：${business.succeeded ?? 0}；更新：${business.updated ?? 0}；失败：${business.failed ?? 0}；未更新：${business.no_update ?? 0}`);
++  (business.sites || []).forEach(site => text.push(`${site.site}：${site.success ? '校正成功' : '校正失败'}，${site.update ? '有更新' : '未更新'}，网格 ${site.grids}，原因码 0x${Number(site.code).toString(16)}`));
++  if (business.counts) text.push('校正统计：' + Object.entries(business.counts).map(([key,value]) =>
++    `${({processed:'处理',total:'总数',succeeded:'成功',success:'成功',updated:'更新',skipped:'跳过',failed:'失败'})[key] || key} ${value}`).join('，'));
++  (artifacts.checked || []).forEach(item => {
++    if (item.valid != null) text.push(`${item.path || item.file || ''}：有效栅格 ${item.valid}` +
++      (item.total != null ? ` / ${item.total}` : '') + (item.current === false ? '；本次归属未确认' : ''));
++  });
++  (report.issues || []).forEach(issue => text.push(`${issue.severity === 'error' ? '问题' : '提示'}：${issue.message}` + (issue.path ? `\n  ${issue.path}` : '')));
++  if (report.internal_error) text.push(report.internal_error);
++  $(id).textContent = text.join('\n');
+ }
+ 
+ function taskIdentityDirty() {
+   return !!S.job && ($('job-name').value.trim() !== S.job.name ||
+     ($('task-id').value || '1') !== String(S.job.taskId));
+ }
+@@ -1168,18 +1284,20 @@ async function previewCleanup() {
+ 
+ function attachConsole(sid, title, onDone = null) {
+   S.sid = sid; S.since = 0;
+   $("btn-export-log").disabled = false;
+   const con = $("run-console");
+   con.textContent = title + "\n";
++  $('run-outcome').textContent = '';
+   $("run-status").className = "badge running hidden";
+   if (S.pollTimer) clearInterval(S.pollTimer);
+   S.pollTimer = setInterval(async () => {
+     const r = await get("output", `sid=${sid}&since=${S.since}`);
+     if (sid !== S.sid) return;
+     if (r.error) return;
++    rememberRunContext(sid, r.context);
+     if (r.lines.length) {
+       S.since = r.total;
+       const frag = r.lines.map(l => {
+         const cls = /FATAL|ERROR/.test(l) ? "err" : /WARN/.test(l) ? "warn" : "";
+         return cls ? `<span class="${cls}">${esc(l)}</span>` : esc(l);
+       }).join("\n");
+@@ -1188,15 +1306,18 @@ function attachConsole(sid, title, onDone = null) {
+     }
+     if (r.status === "done") {
+       clearInterval(S.pollTimer);
+       S.pollTimer = null;
+       const b = $("run-status");
+       b.classList.remove("hidden");
+-      b.className = "badge " + (r.exit === 0 ? "ok" : "fail");
+-      b.textContent = `退出码 ${r.exit}`;
+-      toast(`${r.label} 结束，退出码 ${r.exit}`, r.exit === 0);
++      const result = r.result || {verdict:r.exit === 0 ? 'unconfirmed' : 'failed',process:{status:'done',exit:r.exit}};
++      b.className = 'badge ' + verdictClass(result.verdict);
++      b.textContent = `${VERDICTS[result.verdict] || '未确认'} · 退出码 ${r.exit}`;
++      showOutcome('run-outcome', {...result, context:r.context, internal_error:r.internal_error});
++      toast(`${r.label}：${VERDICTS[result.verdict] || '未确认'}，退出码 ${r.exit}`, result.verdict === 'success');
++      await refreshRuntimeState();
+       if (onDone) await onDone(r);
+     }
+   }, 700);
+ }
+ 
+ async function exportRunLog() {
+@@ -1239,31 +1360,32 @@ async function exportRunLog() {
+ 
+ let lastResultsDir = "";
+ 
+ async function loadResults() {
+   const epoch = S.projectEpoch;
+   const job = $("result-job").value.trim() || (S.job && S.job.name);
+-  if (!job) return toast("填任务名", false);
+-  const r = await get("results", `job=${encodeURIComponent(job)}`);
++  const sid = !$("result-directory-only").checked && S.resultSid && (!job || job === S.resultContext?.task_name) ? S.resultSid : 0;
++  if (!job && !sid) return toast("填任务名或先运行任务", false);
++  const r = await get("results", sid ? `sid=${sid}` : `job=${encodeURIComponent(job)}`);
+   if (epoch !== S.projectEpoch) return;
++  if (r.error) return toast(r.error, false);
+   lastResultsDir = r.dir || "";
+   const b = $("result-status");
++  showOutcome('result-validation', r);
+   if (!r.exists) {
+     b.className = "badge fail"; b.textContent = "输出目录不存在";
+     $("result-files").innerHTML = ""; $("result-log").textContent = "";
+     return;
+   }
+   b.classList.remove("hidden");
+-  const empty = r.empty_run;
+-  b.className = "badge " + (empty ? "fail" : r.status === "end" ? "ok" : r.status ? "fail" : "unknown");
+-  b.textContent = empty ? "假完成(无产物)"
+-    : r.status ? ({ end: "完成", failed: "失败", processing: "进行中" }[r.status] || r.status) : "无状态文件";
++  b.className = 'badge ' + (r.associated ? verdictClass(r.verdict) : 'unknown');
++  b.textContent = r.associated ? `会话 ${sid}：${VERDICTS[r.verdict] || '未确认'}` : '目录浏览：未关联本次运行';
+   $("result-files").innerHTML = r.files.map(f =>
+-    `<div><span>${f.rel}</span><span class="muted">${f.size}</span></div>`).join("");
++    `<div><span>${esc(f.rel)}</span><span class="muted">${f.size}</span></div>`).join("");
+   const src = r.log_file
+-    ? `\n（日志来源：${r.log_file}${r.log_file.includes("Bin") ? "，exe目录实时日志" : "，输出目录归档日志"}）` : "";
++    ? `\n（历史目录日志：${esc(r.log_file)}；不作为本次成功证据）` : "";
+   $("result-log").innerHTML =
+     r.log_tail.map(l => {
+       const cls = /FATAL|ERROR/.test(l) ? "err" : /WARN/.test(l) ? "warn" : "";
+       return cls ? `<span class="${cls}">${esc(l)}</span>` : esc(l);
+     }).join("\n") + src || "（无日志）";
+ }
+diff --git a/platform/frontend/index.html b/platform/frontend/index.html
+index b2950b3..eaebce9 100644
+--- a/platform/frontend/index.html
++++ b/platform/frontend/index.html
+@@ -7,50 +7,51 @@
+ <link rel="stylesheet" href="style.css">
+ </head>
+ <body>
+ <header>
+   <div class="header-main">
+     <span class="logo">lishuttle <span>本地运行平台</span></span>
+-    <label class="project-picker" for="project">当前项目 <select id="project"></select></label>
+-    <button id="btn-project-add" aria-expanded="false" aria-controls="project-add-form">添加项目</button>
++    <label class="project-picker" for="project">当前项目 <select id="project" data-runtime-write></select></label>
++    <button id="btn-project-add" data-runtime-write aria-expanded="false" aria-controls="project-add-form">添加项目</button>
+     <button id="btn-project-config" aria-expanded="false" aria-controls="project-config-form">项目配置</button>
+     <button id="btn-machine-config" aria-expanded="false" aria-controls="machine-config-form">本机工具链（全局）</button>
+     <div class="header-tools" aria-label="项目工具">
+-      <button id="btn-doctor">体检</button>
+-      <button id="btn-build">编译所选配置</button>
++      <button id="btn-doctor" data-runtime-write>体检</button>
++      <button id="btn-build" data-runtime-write>编译所选配置</button>
+     </div>
+   </div>
+   <form id="project-add-form" class="project-add-form hidden">
+     <label for="project-path">项目根目录</label>
+     <input id="project-path" class="txt" placeholder="输入或粘贴 LiShuttle 项目所在文件夹的完整路径" required>
+-    <button type="submit" class="primary">验证并添加</button>
++    <button type="submit" data-runtime-write class="primary">验证并添加</button>
+     <span class="field-help">按目录内容识别，不限制项目名称。添加后保存在本机列表。</span>
+   </form>
+   <span id="env-note" class="muted"></span>
++  <p id="runtime-status" class="runtime-status" role="status" aria-live="polite">正在获取运行状态</p>
+   <section id="build-panel" class="setup-card build-panel" aria-label="项目编译">
+-    <label for="build-mode">构建模式 <select id="build-mode"></select></label>
+-    <label for="build-preset">项目预设 <select id="build-preset"></select></label>
++    <label for="build-mode">构建模式 <select id="build-mode" data-runtime-write></select></label>
++    <label for="build-preset">项目预设 <select id="build-preset" data-runtime-write></select></label>
+     <p id="build-summary" class="field-help" role="status"></p>
+     <p class="field-help">选择 Debug 或 Release 后点击上方「编译所选配置」。平台调用本机工具链生成构建目录，并自动识别程序文件名。</p>
+   </section>
+   <section class="project-guide" aria-label="项目操作指南">
+     <strong>新项目操作指南</strong>
+     <ol id="workflow-steps"></ol>
+     <p id="setup-validation" role="alert" aria-live="assertive"></p>
+   </section>
+   <form id="machine-config-form" class="hidden">
+     <p class="field-help">VS、CMake、Ninja 和 MSVC 环境脚本属于本机全局配置，所有项目和本地脚本共用。首次打开会自动搜索并保存空缺项；换项目无需重复配置。重新检测只补空缺，已有值可手动修改后保存。</p>
+     <div id="machine-config-fields" class="profile-fields"></div>
+-    <button type="submit" class="primary">保存本机工具链</button>
+-    <button type="button" id="btn-machine-detect">自动检测并保存本机工具链</button>
++    <button type="submit" data-runtime-write class="primary">保存本机工具链</button>
++    <button type="button" id="btn-machine-detect" data-runtime-write>自动检测并保存本机工具链</button>
+     <span id="machine-config-note" role="status"></span>
+   </form>
+   <form id="project-config-form" class="hidden">
+     <p class="field-help">打开项目时自动检测本项目的预设和资源目录，确定的值直接填入，多个候选可下拉选择或手动填写。每项下方显示来源；保存后仅对当前项目生效。本机工具链请在上方全局入口配置。</p>
+     <div id="project-config-fields" class="profile-fields"></div>
+-    <button type="submit" class="primary">保存当前项目配置</button>
++    <button type="submit" data-runtime-write class="primary">保存当前项目配置</button>
+     <button type="button" id="btn-project-detect">重新检测</button>
+     <span id="project-config-note" role="status"></span>
+   </form>
+ </header>
+ 
+ <div id="hint" class="hint">把鼠标放到参数上，这里显示说明</div>
+@@ -58,20 +59,20 @@
+ <div class="layout">
+   <aside>
+     <div class="panel">
+       <div class="panel-title">地图与场景</div>
+       <label class="field-label" for="map-root">地图工作目录</label>
+       <input id="map-root" class="path">
+-      <button id="btn-rescan-map" class="mini">重新扫描</button>
++      <button id="btn-rescan-map" data-runtime-write class="mini">重新扫描</button>
+       <div id="city-list" tabindex="-1" aria-label="地图场景选择"></div>
+     </div>
+     <div class="panel">
+       <div class="panel-title">任务文件</div>
+       <label class="field-label" for="gongcan-root">工参任务目录</label>
+       <input id="gongcan-root" class="path">
+-      <button id="btn-rescan-task" class="mini">重新扫描</button>
++      <button id="btn-rescan-task" data-runtime-write class="mini">重新扫描</button>
+       <div id="task-list" tabindex="-1" aria-label="工参任务选择"></div>
+     </div>
+   </aside>
+ 
+   <main>
+     <nav class="tabs">
+@@ -91,13 +92,13 @@
+             <label for="job-name">任务名</label>
+             <input id="job-name" class="txt" placeholder="如 pl-guangzhou">
+             <span id="task-name-note" class="field-help" role="status">装配后同步运行 XML 名称、输出子目录和 Visual Studio 启动项；修改后需重新装配。</span>
+           </div>
+           <div class="field task-id-field">
+             <label for="task-id">任务 ID <span class="muted">-t</span></label>
+-            <input id="task-id" class="txt" value="1" title="本次运行的编号标签，不影响输出目录，通常保持默认即可">
++            <input id="task-id" class="txt" value="1" title="本次运行编号；预测结果位于任务输出目录的 pred/编号 下">
+           </div>
+         </div>
+         <div class="field">
+           <span class="field-label">运行功能 <span class="muted">-f</span></span>
+           <div id="func-radios"></div>
+         </div>
+@@ -124,39 +125,39 @@
+             <p class="field-help">根据当前项目、地图和工参任务自动填入本机路径，可手动调整。区域文件统一使用上方选择。留空恢复自动值；不会修改源 XML。</p>
+             <p id="local-path-status" class="field-help" role="status" aria-live="polite">选择地图与任务运行配置后识别本地路径。</p>
+             <div id="local-path-fields"></div>
+           </details>
+         </div>
+         <div class="field">
+-          <button id="btn-save-task-binding" type="button">保存当前工参与地图对应关系</button>
++          <button id="btn-save-task-binding" data-runtime-write type="button">保存当前工参与地图对应关系</button>
+           <span id="task-binding-note" class="field-help" role="status">选择工参及地图后可保存；对应关系仅在当前项目生效。</span>
+         </div>
+       </section>
+ 
+       <section class="setup-card assembly-card" aria-labelledby="assembly-heading">
+         <h2 id="assembly-heading">资源与装配</h2>
+         <div class="assembly-actions">
+           <div class="resource-options">
+             <label id="antenna-option" class="check-option hidden"><input type="checkbox" id="copy-antennas" disabled> 装配任务天线 <span class="field-help">整目录，带备份</span></label>
+             <label class="check-option"><input type="checkbox" id="copy-files" checked> 装配任务模型 <span class="field-help">带备份</span></label>
+           </div>
+-          <button id="btn-render" class="primary">装配并渲染</button>
++          <button id="btn-render" data-runtime-write class="primary">装配并渲染</button>
+         </div>
+         <details id="cleanup-options">
+           <summary>清理平台历史配置</summary>
+           <p class="field-help">检查当前项目所选构建目录。保留当前运行单；未装配时保留最近一次生成的运行单。仅归档可确认由平台生成的历史 XML、备份、渲染记录、任务 env 和对应平台启动项，原始数据及仿真结果保留。归档位于工作流 docs/runtime-config-archives，可按 restore.json 恢复。</p>
+-          <button id="btn-cleanup-preview" type="button">预览可清理配置</button>
++          <button id="btn-cleanup-preview" data-runtime-write type="button">预览可清理配置</button>
+           <div id="cleanup-preview" class="hidden">
+             <pre id="cleanup-preview-text" class="console"></pre>
+-            <button id="btn-cleanup-apply" type="button" disabled>归档并清理以上配置</button>
++            <button id="btn-cleanup-apply" data-runtime-write type="button" disabled>归档并清理以上配置</button>
+           </div>
+           <p id="cleanup-note" class="field-help" role="status"></p>
+         </details>
+         <div id="schema-preview" class="hidden">
+           <pre id="schema-preview-text" class="console"></pre>
+-          <button id="btn-apply-schema" class="primary">确认装配此配置</button>
++          <button id="btn-apply-schema" data-runtime-write class="primary">确认装配此配置</button>
+         </div>
+         <pre id="render-output" class="console hidden"></pre>
+       </section>
+ 
+       <section class="parameters-section" aria-labelledby="parameters-heading">
+         <div class="section-heading">
+@@ -176,40 +177,45 @@
+     </section>
+ 
+     <section id="tab-csv" class="tab">
+       <div class="row">
+         <select id="csv-path" class="path"></select>
+         <button id="btn-csv-load" class="mini">加载</button>
+-        <button id="btn-csv-save" class="mini primary">保存(备份.bak)</button>
++        <button id="btn-csv-save" data-runtime-write class="mini primary">保存(备份.bak)</button>
+         <span class="lbl">整列设置：</span>
+         <input id="csv-col" class="txt s" placeholder="列名(中英文均可)">
+         <input id="csv-val" class="txt s" placeholder="值">
+-        <button id="btn-csv-col" class="mini">应用整列</button>
++        <button id="btn-csv-col" data-runtime-write class="mini">应用整列</button>
+         <span id="csv-msg" class="muted"></span>
+       </div>
+       <div id="csv-wrap" class="csv-wrap"><span class="muted">选择上方加载，或在「功能与参数」页选任务后自动带入</span></div>
+     </section>
+ 
+     <section id="tab-run" class="tab">
+       <div class="row">
+         <span id="run-info" class="muted">尚未渲染</span>
+-        <button id="btn-run" class="primary">运行 lishuttle</button>
++        <button id="btn-preflight">运行前检查</button>
++        <button id="btn-run" data-runtime-write class="primary">运行 lishuttle</button>
+         <button id="btn-stop">停止</button>
+         <button id="btn-export-log" disabled title="导出当前会话截至此刻的全部控制台日志">导出运行日志</button>
+         <span id="run-status" class="badge hidden"></span>
+       </div>
++      <pre id="preflight-report" class="validation-report" aria-live="polite">运行前检查会定位缺失输入；启动时将再次检查。</pre>
++      <pre id="run-outcome" class="validation-report" aria-live="polite"></pre>
+       <pre id="run-console" class="console"></pre>
+     </section>
+ 
+     <section id="tab-results" class="tab">
+       <div class="row">
+         <span class="lbl">任务名：</span><input id="result-job" class="txt" placeholder="与运行时的任务名一致">
+         <button id="btn-results" class="mini">查看</button>
++        <label><input id="result-directory-only" type="checkbox">仅浏览任务目录</label>
+         <button id="btn-open-dir" class="mini">打开目录</button>
+         <span id="result-status" class="badge hidden"></span>
+       </div>
++      <pre id="result-validation" class="validation-report" aria-live="polite"></pre>
+       <div class="cols2">
+         <div><div class="panel-title">输出文件</div><div id="result-files"></div></div>
+         <div><div class="panel-title">日志尾部（红=ERROR/FATAL）</div><pre id="result-log" class="console short"></pre></div>
+       </div>
+     </section>
+   </main>
+diff --git a/platform/frontend/style.css b/platform/frontend/style.css
+index 14454e1..df12ecb 100644
+--- a/platform/frontend/style.css
++++ b/platform/frontend/style.css
+@@ -66,12 +66,16 @@ main { flex: 1; min-width: 0; background: #fff; border: 1px solid #e2e5ea; borde
+ .badge.outdoor { background: #16a34a; }
+ .badge.indoor { background: #9333ea; }
+ .badge.unknown { background: #9ca3af; }
+ .badge.ok { background: #16a34a; }
+ .badge.fail { background: #dc2626; }
+ .badge.running { background: #d97706; }
++.runtime-status { margin: 4px 0; color: #92400e; font-size: 13px; }
++.validation-report { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow: auto;
++  padding: 10px; margin: 8px 0; background: #f8fafc; border: 1px solid #dbe3ed; border-radius: 6px; font-size: 13px; }
++.validation-report:empty { display: none; }
+ .city .mark { font-size: 11px; }
+ 
+ .tabs { display: flex; gap: 2px; border-bottom: 2px solid #e2e5ea; padding: 6px 10px 0; }
+ .tabs button { border: 1px solid #e2e5ea; border-bottom: none; border-radius: 4px 4px 0 0; }
+ .tabs button.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+ .tab { display: none; padding: 18px; }
+diff --git a/scripts/project_config.py b/scripts/project_config.py
+index f95ee8f..f0176bc 100644
+--- a/scripts/project_config.py
++++ b/scripts/project_config.py
+@@ -88,13 +88,13 @@ class ProjectStore:
+                 lock.seek(0)
+                 if os.name == 'nt':
+                     msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+                 else:
+                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+ 
+-    def _read(self):
++    def _read(self, persist=True):
+         legacy = {}
+         if self.file.is_file():
+             data = json.loads(self.file.read_text(encoding='utf-8'))
+             if data.get('version') != 1 or not isinstance(data.get('profiles'), dict):
+                 raise ValueError('项目档案格式不支持，请检查 project-profiles.json')
+         else:
+@@ -104,34 +104,36 @@ class ProjectStore:
+                 path = legacy['PROJECT_DIR']
+                 key = project_id(path)
+                 data['active'] = key
+                 data['profiles'][key] = self._blank(path)
+                 data['profiles'][key]['values'].update({k: legacy[k] for k in FIELDS if k in legacy})
+             backup = Path(str(self.env_file) + '.profiles.bak')
+-            if self.env_file.is_file() and not backup.exists():
++            if persist and self.env_file.is_file() and not backup.exists():
+                 shutil.copy2(self.env_file, backup)
+         if 'machine' not in data:
+             # Use the active profile only; never combine conflicting old toolchains.
+             backup = Path(str(self.file) + '.machine.bak')
+-            if self.file.is_file() and not backup.exists():
++            if persist and self.file.is_file() and not backup.exists():
+                 shutil.copy2(self.file, backup)
+             active = data['profiles'].get(data['active'], {}).get('values', legacy)
+             data['machine'] = {'revision': 1, 'values': {key: active.get(key, '') for key in MACHINE_FIELDS}}
+             for profile in data['profiles'].values():
+                 for key in MACHINE_FIELDS:
+                     profile['values'].pop(key, None)
+-            atomic_json(self.file, data)
++            if persist:
++                atomic_json(self.file, data)
+         retired = [profile for profile in data['profiles'].values() if 'CASE_ROOT' in profile['values']]
+         if retired:
+             backup = Path(str(self.file) + '.retired-fields.bak')
+-            if not backup.exists():
++            if persist and not backup.exists():
+                 shutil.copy2(self.file, backup)
+             for profile in retired:
+                 profile['values'].pop('CASE_ROOT')
+                 profile['revision'] += 1
+-            atomic_json(self.file, data)
++            if persist:
++                atomic_json(self.file, data)
+         return data
+ 
+     @staticmethod
+     def _blank(path):
+         return {'path': os.path.realpath(os.path.expanduser(str(path))).replace('\\', '/'),
+                 'revision': 1, 'values': {key: '' for key in PROJECT_FIELDS}, 'bindings': {}}
+@@ -139,26 +141,28 @@ class ProjectStore:
+     @staticmethod
+     def _env(key, profile, data):
+         return dict(profile['values'], **data['machine']['values'],
+                     MACHINE_CONFIG_REVISION=str(data['machine'].get('revision', 1)), PROJECT_DIR=profile['path'],
+                     PROJECT_PROFILE_ID=key, PROJECT_PROFILE_REVISION=str(profile['revision']))
+ 
+-    def load(self, project=None, allow_empty=False):
+-        with self._locked():
+-            data = self._read()
++    def load(self, project=None, allow_empty=False, read_only=False):
++        # Runtime queries may interpret legacy configuration in memory, but
++        # must not create a lock, backup or migrated profile while inputs are held.
++        with LOCK if read_only else self._locked():
++            data = self._read(persist=not read_only)
+             key = project_id(project) if project else data['active']
+             if allow_empty and not project and not key:
+                 return dict(dict.fromkeys(FIELDS + IDENTITY, ''), **data['machine']['values'],
+                             MACHINE_CONFIG_REVISION=str(data['machine'].get('revision', 1)))
+             if key not in data['profiles']:
+                 raise ValueError('尚未配置本地项目，请在网页添加项目并保存配置')
+             return self._env(key, data['profiles'][key], data)
+ 
+-    def paths(self):
+-        with self._locked():
+-            return [p['path'] for p in self._read()['profiles'].values()]
++    def paths(self, read_only=False):
++        with LOCK if read_only else self._locked():
++            return [p['path'] for p in self._read(persist=not read_only)['profiles'].values()]
+ 
+     def select(self, path):
+         with self._locked():
+             data = self._read()
+             key = project_id(path)
+             if key not in data['profiles']:
+diff --git a/tests/test_project_defaults.py b/tests/test_project_defaults.py
+index 9233850..bdb6e0b 100644
+--- a/tests/test_project_defaults.py
++++ b/tests/test_project_defaults.py
+@@ -96,16 +96,17 @@ class ProjectDefaultsTests(unittest.TestCase):
+ 
+     def test_stale_project_write_is_rejected(self):
+         res = Api.param_default(dict(schema='job.xml', tag='CpuLoad', _project='/old-project'))
+         self.assertFalse(res['ok'])
+         self.assertIn('项目已切换', res['message'])
+ 
+-    def test_project_switch_waits_for_default_write(self):
++    def test_project_switch_is_busy_during_default_write_then_can_retry(self):
+         entered = threading.Event()
+         release = threading.Event()
+         switched = threading.Event()
++        switch_results = []
+         original_defaults = core.thirdpart_defaults
+         def defaults():
+             value = original_defaults()
+             entered.set()
+             if not release.wait(3):
+                 raise RuntimeError('test timeout')
+@@ -114,23 +115,26 @@ class ProjectDefaultsTests(unittest.TestCase):
+         target.parent.mkdir(parents=True)
+         target.write_text('<RuntimeSchema><CpuLoad>99</CpuLoad></RuntimeSchema>')
+         with patch.object(core, 'thirdpart_defaults', defaults), \
+              patch.object(core, 'save_env_keys', side_effect=lambda **kw: switched.set()), \
+              patch.object(Api, 'state', return_value={}):
+             writer = threading.Thread(target=lambda: Api.param_default(dict(schema='job.xml', tag='CpuLoad')))
+-            switch = threading.Thread(target=lambda: Api.select_project(dict(path=str(self.project))))
++            switch = threading.Thread(target=lambda: switch_results.append(Api.select_project(dict(path=str(self.project)))))
+             writer.start()
+             try:
+                 self.assertTrue(entered.wait(3))
+                 switch.start()
+                 self.assertFalse(switched.wait(.1))
+             finally:
+                 release.set()
+                 writer.join(3)
+                 if switch.ident is not None:
+                     switch.join(3)
++            self.assertEqual(switch_results[0]['code'], 'RUNTIME_BUSY')
++            self.assertFalse(switched.is_set())
++            Api.select_project(dict(path=str(self.project)))
+             self.assertTrue(switched.is_set())
+         self.assertIn('<CpuLoad>80</CpuLoad>', target.read_text())
+ 
+ 
+ if __name__ == '__main__':
+     unittest.main()
+diff --git a/platform/backend/run_guard.py b/platform/backend/run_guard.py
+new file mode 100644
+index 0000000..29c942d
+--- /dev/null
++++ b/platform/backend/run_guard.py
+@@ -0,0 +1,82 @@
++"""One service-wide lease for runtime resources and their input writers."""
++
++from contextlib import contextmanager
++from contextvars import ContextVar
++from copy import deepcopy
++import threading
++import time
++import uuid
++
++
++class RuntimeBusy(RuntimeError):
++    code = 'RUNTIME_BUSY'
++
++    def __init__(self, owner):
++        self.owner = owner
++        super().__init__(f"平台正在{owner.get('label', '执行任务')}，请结束或取消后再操作")
++
++    def response(self):
++        return {'ok': False, 'error': str(self), 'message': str(self),
++                'code': self.code, 'runtime': self.owner}
++
++
++class RuntimeGuard:
++    def __init__(self):
++        self._lock = threading.RLock()
++        self._owner = None
++        self._current = ContextVar('runtime_lease', default=None)
++
++    def snapshot(self):
++        with self._lock:
++            if self._owner is None:
++                return {'busy': False, 'phase': 'idle', 'sid': None}
++            return deepcopy({key: value for key, value in self._owner.items()
++                             if key not in ('token', 'retained')})
++
++    @contextmanager
++    def operation(self, label, context=None):
++        with self._lock:
++            current = self._current.get()
++            nested = self._owner is not None and self._owner['token'] == current
++            if self._owner is not None and not nested:
++                raise RuntimeBusy(self.snapshot())
++            if nested:
++                token = current
++            else:
++                token = uuid.uuid4().hex
++                metadata = {key:value for key,value in (context or {}).items() if key in
++                            ('project', 'bin_dir', 'schema_name', 'func', 'task_id', 'out_dir')}
++                self._owner = dict(metadata, token=token, busy=True,
++                                   phase='preparing', sid=None, label=label,
++                                   started_at=time.time(), retained=False)
++        reset = self._current.set(token)
++        try:
++            yield token
++        finally:
++            self._current.reset(reset)
++            if not nested:
++                with self._lock:
++                    if self._owner and self._owner['token'] == token and not self._owner['retained']:
++                        self.release(token)
++
++    def bind(self, token, sid, context=None):
++        with self._lock:
++            if not self._owner or self._owner['token'] != token:
++                raise RuntimeError('运行占用已失效')
++            # Only safe, descriptive fields are exposed in the busy response.
++            for key in ('project', 'bin_dir', 'schema_name', 'func', 'task_id', 'out_dir'):
++                if context and key in context:
++                    self._owner[key] = context[key]
++            self._owner.update(sid=sid, phase='running', retained=True)
++
++    def set_phase(self, token, phase):
++        with self._lock:
++            if self._owner and self._owner['token'] == token:
++                self._owner['phase'] = phase
++
++    def release(self, token):
++        with self._lock:
++            if not self._owner or self._owner['token'] != token:
++                return False
++            self._owner = None
++            return True
+diff --git a/platform/backend/managed_process.py b/platform/backend/managed_process.py
+new file mode 100644
+index 0000000..dca186a
+--- /dev/null
++++ b/platform/backend/managed_process.py
+@@ -0,0 +1,124 @@
++"""Own the process tree, including children whose original parent has exited."""
++
++import os
++import signal
++import subprocess
++import time
++
++
++class ManagedProcess:
++    def __init__(self, cmd, cwd, env=None):
++        self.job = None
++        self.proc = None
++        options = dict(cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
++                       text=True, encoding='gbk', errors='replace', shell=False, env=env)
++        if os.name == 'nt':
++            self._windows_job()
++            try:
++                # Assign before any engine/build code can spawn unowned children.
++                self.proc = subprocess.Popen(cmd, creationflags=0x4 | subprocess.CREATE_NEW_PROCESS_GROUP, **options)
++                if not self.kernel.AssignProcessToJobObject(self.job, int(self.proc._handle)):
++                    raise self.ctypes.WinError(self.ctypes.get_last_error())
++                ntdll = self.ctypes.WinDLL('ntdll')
++                ntdll.NtResumeProcess.argtypes = [self.wintypes.HANDLE]
++                ntdll.NtResumeProcess.restype = self.wintypes.LONG
++                status = ntdll.NtResumeProcess(int(self.proc._handle))
++                if status < 0:
++                    raise OSError(f'无法恢复受管进程：NTSTATUS {status:#x}')
++            except BaseException:
++                if self.proc is not None:
++                    self.proc.kill()
++                    self.proc.wait()
++                    if self.proc.stdout:
++                        self.proc.stdout.close()
++                self.close()
++                raise
++        else:
++            self.proc = subprocess.Popen(cmd, start_new_session=True, **options)
++
++    def _windows_job(self):
++        import ctypes
++        from ctypes import wintypes
++        self.ctypes, self.wintypes = ctypes, wintypes
++        self.kernel = ctypes.WinDLL('kernel32', use_last_error=True)
++
++        class Limits(ctypes.Structure):
++            _fields_ = [('process_time', ctypes.c_int64), ('job_time', ctypes.c_int64),
++                        ('flags', wintypes.DWORD), ('min_working', ctypes.c_size_t),
++                        ('max_working', ctypes.c_size_t), ('active_limit', wintypes.DWORD),
++                        ('affinity', ctypes.c_size_t), ('priority', wintypes.DWORD),
++                        ('scheduling', wintypes.DWORD)]
++
++        class IO(ctypes.Structure):
++            _fields_ = [(name, ctypes.c_uint64) for name in
++                        ('read_ops', 'write_ops', 'other_ops', 'read_bytes', 'write_bytes', 'other_bytes')]
++
++        class ExtendedLimits(ctypes.Structure):
++            _fields_ = [('basic', Limits), ('io', IO), ('process_memory', ctypes.c_size_t),
++                        ('job_memory', ctypes.c_size_t), ('peak_process', ctypes.c_size_t),
++                        ('peak_job', ctypes.c_size_t)]
++
++        class Accounting(ctypes.Structure):
++            _fields_ = [(name, ctypes.c_int64) for name in
++                        ('user_time', 'kernel_time', 'period_user', 'period_kernel')] + [
++                            ('faults', wintypes.DWORD), ('total', wintypes.DWORD),
++                            ('active', wintypes.DWORD), ('terminated', wintypes.DWORD)]
++
++        self.Accounting = Accounting
++        api = self.kernel
++        api.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
++        api.CreateJobObjectW.restype = wintypes.HANDLE
++        api.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
++        api.SetInformationJobObject.restype = wintypes.BOOL
++        api.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
++        api.AssignProcessToJobObject.restype = wintypes.BOOL
++        api.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
++                                                  wintypes.DWORD, ctypes.c_void_p]
++        api.QueryInformationJobObject.restype = wintypes.BOOL
++        api.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
++        api.TerminateJobObject.restype = wintypes.BOOL
++        api.CloseHandle.argtypes = [wintypes.HANDLE]
++        api.CloseHandle.restype = wintypes.BOOL
++        self.job = api.CreateJobObjectW(None, None)
++        if not self.job:
++            raise ctypes.WinError(ctypes.get_last_error())
++        limits = ExtendedLimits()
++        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
++        if not api.SetInformationJobObject(self.job, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
++            error = ctypes.WinError(ctypes.get_last_error())
++            self.close()
++            raise error
++
++    def active(self):
++        if os.name == 'nt':
++            accounting = self.Accounting()
++            if not self.kernel.QueryInformationJobObject(self.job, 1, self.ctypes.byref(accounting),
++                                                          self.ctypes.sizeof(accounting), None):
++                raise self.ctypes.WinError(self.ctypes.get_last_error())
++            return accounting.active > 0
++        try:
++            os.killpg(self.proc.pid, 0)
++            return True
++        except ProcessLookupError:
++            return False
++
++    def terminate(self):
++        if os.name == 'nt':
++            if not self.kernel.TerminateJobObject(self.job, 1):
++                raise self.ctypes.WinError(self.ctypes.get_last_error())
++        else:
++            try:
++                os.killpg(self.proc.pid, signal.SIGKILL)
++            except ProcessLookupError:
++                pass
++
++    def wait(self):
++        code = self.proc.wait()
++        while self.active():
++            time.sleep(.05)
++        return code
++
++    def close(self):
++        if self.job:
++            self.kernel.CloseHandle(self.job)
++            self.job = None
+diff --git a/tests/test_runtime_api.py b/tests/test_runtime_api.py
+new file mode 100644
+index 0000000..3f1254d
+--- /dev/null
++++ b/tests/test_runtime_api.py
+@@ -0,0 +1,99 @@
++import json
++from pathlib import Path
++import sys
++import tempfile
++import threading
++import unittest
++from unittest.mock import patch
++from urllib.error import HTTPError
++from urllib.request import Request, urlopen
++from http.server import ThreadingHTTPServer
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'platform/backend'))
++import core
++from server import Api, Handler
++
++
++class RuntimeApiTests(unittest.TestCase):
++    def setUp(self):
++        with core.RUNTIME.operation('fixture prediction', {'project': 'fixture', 'bin_dir': 'fixture/Bin'}) as token:
++            core.RUNTIME.bind(token, 123)
++        self.token = token
++        self.addCleanup(lambda: core.RUNTIME.release(token))
++
++    def test_all_input_and_config_writers_refuse_before_any_work(self):
++        names = ('select_project', 'add_project', 'save_project_config', 'save_machine_config',
++                 'detect_machine_config', 'set_map_root', 'set_gongcan_root', 'save_task_binding',
++                 'render', 'param_write', 'param_default', 'csv_save', 'csv_column', 'run', 'toolkit')
++        with patch.object(core, 'load_env', side_effect=AssertionError('must reject before reading/mutating config')):
++            for name in names:
++                with self.subTest(name=name):
++                    response = getattr(Api, name)({})
++                    self.assertEqual(response['code'], 'RUNTIME_BUSY')
++                    self.assertEqual(response['runtime']['sid'], 123)
++                    self.assertNotIn('token', response['runtime'])
++
++    def test_build_status_query_does_not_sync_executable_while_busy(self):
++        env = dict.fromkeys(core.FIELDS, '')
++        env.update(PROJECT_DIR='', PROJECT_PROFILE_REVISION='1')
++        with patch.object(core, 'load_env', return_value=env), \
++                patch.object(core, 'sync_executable', side_effect=AssertionError('query must not write')):
++            response = Api.build_status({})
++        self.assertNotIn('error', response)
++
++    def test_busy_config_reads_do_not_create_or_migrate_files(self):
++        with tempfile.TemporaryDirectory() as directory:
++            root = Path(directory)
++            legacy = root / 'local-win.env'
++            legacy.write_text('PROJECT_DIR=D:/fixture\nCASE_ROOT=D:/retired\n', encoding='utf-8')
++            with patch.object(core, 'ENV_FILE', str(legacy)), \
++                    patch.object(core, 'PROJECTS_FILE', str(root / 'projects.json')):
++                env = core.load_env()
++                core.scan_projects()
++            self.assertEqual(env['PROJECT_DIR'], 'D:/fixture')
++            self.assertEqual([path.name for path in root.iterdir()], ['local-win.env'],
++                             '占用期间只读查询不得创建档案、锁或迁移备份')
++
++    def test_busy_post_is_http409_and_runtime_query_is_available(self):
++        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
++        worker = threading.Thread(target=server.serve_forever, daemon=True)
++        worker.start()
++        self.addCleanup(server.server_close)
++        self.addCleanup(server.shutdown)
++        base = f'http://127.0.0.1:{server.server_port}/api/'
++        request = Request(base + 'csv_save', data=b'{}', headers={'Content-Type': 'application/json'})
++        with self.assertRaises(HTTPError) as raised:
++            urlopen(request, timeout=3)
++        self.assertEqual(raised.exception.code, 409)
++        self.assertEqual(json.loads(raised.exception.read())['code'], 'RUNTIME_BUSY')
++        with urlopen(base + 'runtime_state', timeout=3) as response:
++            state = json.load(response)
++        self.assertTrue(state['busy'])
++        self.assertEqual(state['sid'], 123)
++
++    def test_reservation_precedes_preflight_and_concurrent_start_is_rejected(self):
++        core.RUNTIME.release(self.token)
++        entered, finish = threading.Event(), threading.Event()
++        self.addCleanup(finish.set)
++        report = {'ok': False, 'issues': [{'severity':'error','message':'fixture missing input'}], 'context':{}}
++        def check(*args):
++            entered.set()
++            finish.wait(5)
++            return report
++        responses = []
++        env = {'PROJECT_DIR':'fixture','BUILD_SUBDIR':'build','EXE_NAME':'fixture.exe'}
++        with patch.object(core, 'load_env', return_value=env), patch.object(core, 'check_run', side_effect=check):
++            worker = threading.Thread(target=lambda: responses.append(Api.run({'schema':'fixture.xml','func':'pred'})))
++            worker.start()
++            self.assertTrue(entered.wait(3))
++            blocked = Api.run({'schema':'fixture.xml','func':'pred'})
++            self.assertEqual(blocked['code'], 'RUNTIME_BUSY')
++            self.assertEqual(core.RUNTIME.snapshot()['phase'], 'preparing')
++            finish.set()
++            worker.join(3)
++        self.assertEqual(responses[0]['code'], 'PREFLIGHT_FAILED')
++        self.assertFalse(core.RUNTIME.snapshot()['busy'])
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_runtime_lifecycle.py b/tests/test_runtime_lifecycle.py
+new file mode 100644
+index 0000000..9403420
+--- /dev/null
++++ b/tests/test_runtime_lifecycle.py
+@@ -0,0 +1,130 @@
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import threading
++import time
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'platform/backend'))
++import core
++from run_guard import RuntimeBusy, RuntimeGuard
++
++
++class RuntimeLifecycleTests(unittest.TestCase):
++    def setUp(self):
++        self.guard = RuntimeGuard()
++        self.runner = core.Runner(guard=self.guard)
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++
++    def start(self, code, **kwargs):
++        return self.runner.start([sys.executable, '-u', '-c', code], self.temp.name, 'fixture', **kwargs)
++
++    def until(self, predicate, timeout=10):
++        deadline = time.monotonic() + timeout
++        while time.monotonic() < deadline:
++            if predicate():
++                return
++            threading.Event().wait(.02)
++        self.fail('managed fixture did not reach expected state')
++
++    def test_exit_code_is_preserved_and_lease_released(self):
++        sid = self.start('print("fixture"); raise SystemExit(7)')
++        self.until(lambda: self.runner.output(sid, 0)['status'] == 'done')
++        report = self.runner.output(sid, 0)
++        self.assertEqual(report['exit'], 7)
++        self.assertIn('fixture', report['lines'])
++        self.assertEqual(report['result']['verdict'], 'failed')
++        self.assertFalse(self.guard.snapshot()['busy'])
++
++    def test_result_finalization_retains_lease_and_duplicate_start_fails(self):
++        entered, finish = threading.Event(), threading.Event()
++        self.addCleanup(finish.set)
++        def finalize(*args, **kwargs):
++            entered.set()
++            finish.wait(5)
++            return {'verdict': 'unconfirmed'}
++        sid = self.start('print("done")', finalize=finalize, context={'func': 'pred'})
++        self.assertTrue(entered.wait(5))
++        self.assertEqual(self.guard.snapshot()['phase'], 'finalizing')
++        with self.assertRaises(RuntimeBusy):
++            self.start('print("must not execute")')
++        finish.set()
++        self.until(lambda: self.runner.output(sid, 0)['status'] == 'done')
++        self.assertFalse(self.guard.snapshot()['busy'])
++
++    def test_spawn_failure_and_validator_exception_release_lease(self):
++        with self.assertRaises(OSError):
++            self.runner.start(['nonexistent-p0-fixture-executable'], self.temp.name, 'bad')
++        self.assertFalse(self.guard.snapshot()['busy'])
++        def fail(*args, **kwargs):
++            raise ValueError('fixture validation failure')
++        sid = self.start('pass', finalize=fail, context={'func': 'pred'})
++        self.until(lambda: self.runner.output(sid, 0)['status'] == 'done')
++        report = self.runner.output(sid, 0)
++        self.assertEqual(report['exit'], 0)
++        self.assertNotEqual(report['result']['verdict'], 'success')
++        self.assertIn('fixture validation failure', report['internal_error'])
++        self.assertFalse(self.guard.snapshot()['busy'])
++
++    def test_cancel_manages_child_even_after_parent_exits(self):
++        code = ('import subprocess,sys; '
++                'p=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"], '
++                'stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); '
++                'print("CHILD",p.pid,flush=True)')
++        sid = self.start(code)
++        self.addCleanup(lambda: self.runner.stop(sid))
++        self.until(lambda: any(line.startswith('CHILD ') for line in self.runner.output(sid, 0)['lines']))
++        threading.Event().wait(.1)
++        self.assertTrue(self.guard.snapshot()['busy'])
++        self.assertTrue(self.runner.stop(sid))
++        self.until(lambda: self.runner.output(sid, 0)['status'] == 'done')
++        self.assertEqual(self.runner.output(sid, 0)['result']['verdict'], 'cancelled')
++        self.assertFalse(self.guard.snapshot()['busy'])
++        self.assertFalse(self.runner.stop(sid))
++
++    def test_session_ids_do_not_alias_after_runner_restart(self):
++        first = self.start('pass')
++        self.until(lambda: self.runner.output(first, 0)['status'] == 'done')
++        other = core.Runner(guard=self.guard)
++        second = other.start([sys.executable, '-c', 'pass'], self.temp.name, 'fixture')
++        self.until(lambda: other.output(second, 0)['status'] == 'done')
++        self.assertNotEqual(first, second, '旧页面不能把重启后的其他运行当作原会话')
++
++    def test_failed_termination_can_be_retried_without_early_release(self):
++        sid = self.start('import time; time.sleep(30)')
++        self.addCleanup(lambda: self.runner.stop(sid))
++        tree = self.runner.sessions[sid]['tree']
++        with patch.object(tree, 'terminate', side_effect=OSError('fixture stop failed')):
++            with self.assertRaises(OSError):
++                self.runner.stop(sid)
++        self.assertTrue(self.guard.snapshot()['busy'])
++        self.assertFalse(self.runner.output(sid, 0)['cancelled'])
++        self.assertTrue(self.runner.stop(sid))
++        self.until(lambda: self.runner.output(sid, 0)['status'] == 'done')
++
++    def test_log_read_error_terminates_tree_and_reports_diagnostic(self):
++        real_tree = core.ManagedProcess
++        def broken_log(*args, **kwargs):
++            tree = real_tree(*args, **kwargs)
++            stream = tree.proc.stdout
++            class BadStream:
++                def __iter__(self):
++                    raise OSError('fixture log broken')
++                def close(self):
++                    stream.close()
++            tree.proc.stdout = BadStream()
++            return tree
++        with patch.object(core, 'ManagedProcess', side_effect=broken_log):
++            sid = self.start('import time; time.sleep(30)')
++        self.until(lambda: self.runner.output(sid, 0)['status'] == 'done')
++        report = self.runner.output(sid, 0)
++        self.assertIn('fixture log broken', report['internal_error'])
++        self.assertNotEqual(report['result']['verdict'], 'success')
++        self.assertFalse(self.guard.snapshot()['busy'])
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_run_guard.py b/tests/test_run_guard.py
+new file mode 100644
+index 0000000..66e0441
+--- /dev/null
++++ b/tests/test_run_guard.py
+@@ -0,0 +1,57 @@
++from pathlib import Path
++import sys
++import threading
++import unittest
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'platform/backend'))
++
++
++class RuntimeGuardTests(unittest.TestCase):
++    def guard(self):
++        import run_guard
++        self.assertTrue(hasattr(run_guard, 'RuntimeGuard'))
++        return run_guard.RuntimeGuard()
++
++    def test_duplicate_and_foreign_thread_edits_are_rejected(self):
++        guard = self.guard()
++        results = []
++        with guard.operation('pred', {'project': 'fixture', 'bin_dir': 'fixture/Bin', 'schema_text':'private input'}) as token:
++            def other():
++                try:
++                    with guard.operation('write'):
++                        results.append('incorrectly allowed')
++                except Exception as exc:
++                    results.append(exc.code)
++            worker = threading.Thread(target=other)
++            worker.start()
++            worker.join()
++            self.assertEqual(results, ['RUNTIME_BUSY'])
++            self.assertTrue(guard.snapshot()['busy'])
++            self.assertEqual(guard.snapshot()['label'], 'pred')
++            self.assertNotIn('schema_text', guard.snapshot())
++            with guard.operation('nested') as nested:
++                self.assertEqual(nested, token)
++        self.assertFalse(guard.snapshot()['busy'])
++
++    def test_handoff_retains_until_token_owner_releases(self):
++        guard = self.guard()
++        with guard.operation('pred') as token:
++            guard.bind(token, 4)
++        self.assertTrue(guard.snapshot()['busy'])
++        self.assertEqual(guard.snapshot()['sid'], 4)
++        self.assertFalse(guard.release('stale'))
++        guard.set_phase(token, 'finalizing')
++        self.assertEqual(guard.snapshot()['phase'], 'finalizing')
++        self.assertTrue(guard.release(token))
++        self.assertFalse(guard.snapshot()['busy'])
++
++    def test_preparation_exception_releases_occupancy(self):
++        guard = self.guard()
++        with self.assertRaisesRegex(ValueError, 'bad input'):
++            with guard.operation('preparing'):
++                raise ValueError('bad input')
++        self.assertFalse(guard.snapshot()['busy'])
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_run_sessions.py b/tests/test_run_sessions.py
+new file mode 100644
+index 0000000..4effc61
+--- /dev/null
++++ b/tests/test_run_sessions.py
+@@ -0,0 +1,67 @@
++from pathlib import Path
++import sys
++import tempfile
++import threading
++import time
++import unittest
++from unittest.mock import patch
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'platform/backend'))
++import core
++from server import Api
++from result_validation import snapshot, validate
++from run_guard import RuntimeGuard
++
++
++class RunSessionTests(unittest.TestCase):
++    def test_current_products_are_validated_in_pinned_session_not_current_project(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            pred = root / 'output/task/pred/4'
++            context = {'func':'pred', 'schema_name':'file.xml', 'task_name':'task', 'task_id':'4',
++                       'out_dir':str(root/'output/task'), 'pred_dir':str(pred),
++                       'mode':{'effective':'ground','layer_count':1}, 'regions':[{'id':0}]}
++            baseline = snapshot(context)
++            code = ('from pathlib import Path; import struct; '
++                    f'p=Path({str(pred)!r}); p.mkdir(parents=True); '
++                    '(p/"index.txt").write_text("UTM 50\\nRSRP.dem 0 2 0 2 1\\nDLRSSINR.dem 0 2 0 2 1\\nBESTSERVER.dem 0 2 0 2 1\\n"); '
++                    '(p/"cellid.csv").write_text("1,cell-a\\n"); '
++                    '(p/"RSRP.dem").write_bytes(struct.pack("<4h",-9000,-9100,-9200,-9300)); '
++                    '(p/"DLRSSINR.dem").write_bytes(struct.pack("<4h",100,200,300,400)); '
++                    '(p/"BESTSERVER.dem").write_bytes(struct.pack("<4h",1,1,1,1)); print("session fixture")')
++            guard = RuntimeGuard()
++            runner = core.Runner(guard=guard)
++            sid = runner.start([sys.executable,'-u','-c',code], temporary, 'fixture',
++                               context=context, baseline=baseline, finalize=validate)
++            context['out_dir'] = 'wrong-project'
++            deadline = time.monotonic() + 10
++            while runner.output(sid, 0)['status'] != 'done' and time.monotonic() < deadline:
++                threading.Event().wait(.02)
++            self.assertEqual(runner.output(sid, 0)['status'], 'done')
++            self.assertFalse(guard.snapshot()['busy'])
++            with patch.object(core,'RUNNER',runner), patch.object(core,'load_env',side_effect=AssertionError('must use session')):
++                report = Api.results({'sid':[str(sid)]})
++            self.assertTrue(report['associated'])
++            self.assertEqual(report['verdict'], 'success', report.get('issues'))
++            self.assertEqual(report['context']['schema_name'], 'file.xml')
++            self.assertNotEqual(report['dir'], 'wrong-project')
++            report['context']['task_name'] = 'tampered'
++            self.assertEqual(runner.output(sid,0)['context']['task_name'], 'task')
++
++    def test_directory_status_end_is_never_current_run_success(self):
++        with tempfile.TemporaryDirectory() as temporary:
++            root = Path(temporary)
++            output = root/'out/old'
++            output.mkdir(parents=True)
++            (output/'jobstatus_end').write_text('old')
++            (output/'arbitrary.txt').write_text('old product')
++            env = {'PROJECT_DIR':str(root), 'BUILD_SUBDIR':'build', 'OUT_ROOT':str(root/'out')}
++            with patch.object(core,'load_env',return_value=env):
++                report = core.results('old')
++            self.assertEqual(report['status'], 'end')
++            self.assertFalse(report['associated'])
++            self.assertEqual(report['verdict'], 'unconfirmed')
++
++
++if __name__ == '__main__':
++    unittest.main()
+diff --git a/tests/test_runtime_ui.cjs b/tests/test_runtime_ui.cjs
+new file mode 100644
+index 0000000..3eeccc1
+--- /dev/null
++++ b/tests/test_runtime_ui.cjs
+@@ -0,0 +1,79 @@
++const fs = require('node:fs');
++const vm = require('node:vm');
++const assert = require('node:assert/strict');
++const nodes = new Map(), timers = new Map();
++let nextTimer = 1;
++const element = id => {
++  if (!nodes.has(id)) nodes.set(id, {value:'', checked:false, textContent:'', innerHTML:'', className:'', style:{},
++    disabled:false, dataset:{}, classList:{add(){},remove(){},toggle(){}},
++    querySelectorAll(){return [];}, insertAdjacentHTML(_, text){this.innerHTML += text;}});
++  return nodes.get(id);
++};
++const protectedIds = ['btn-run', 'btn-build', 'btn-render', 'btn-csv-save'];
++const context = vm.createContext({
++  document:{getElementById:element, querySelector(){return {dataset:{tab:'run'},classList:{add(){}}};},
++    querySelectorAll(selector){return selector === '[data-runtime-write]' ? protectedIds.map(element) : [];}},
++  setTimeout(){}, setInterval(fn){const id=nextTimer++; timers.set(id,fn); return id;},
++  clearInterval(id){timers.delete(id);}, console,
++});
++vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/, ''), context);
++const run = code => vm.runInContext(code, context);
++
++(async () => {
++  assert.equal(run('typeof applyRuntimeState'), 'function', '运行状态必须由后端状态恢复');
++  run('applyRuntimeState({busy:true,phase:"running",sid:29,label:"pred"}, true)');
++  assert.equal(run('S.sid'), 29);
++  protectedIds.forEach(id=>assert.equal(element(id).disabled, true));
++  run('applyRuntimeState({busy:false,phase:"idle"})');
++  protectedIds.forEach(id=>assert.equal(element(id).disabled, false));
++  run('clearInterval(S.pollTimer); S.pollTimer=null; S.sid=0; S.resultSid=0; S.project="fixture"; S.projectEpoch=1; '
++    + 'S.job={name:"task",schema:"task.xml",func:"pred",taskId:"1"}');
++  element('job-name').value='task'; element('task-id').value='1';
++  let releaseCheck, runCalls=0;
++  const waitCheck = new Promise(resolve=>releaseCheck=resolve);
++  context.fetch = async url => {
++    if (url.endsWith('/preflight')) {await waitCheck; return {json:async()=>({ok:true,issues:[],context:{}})};}
++    if (url.endsWith('/run')) {runCalls++; return {json:async()=>({sid:31,context:{func:'pred',task_name:'task'}})};}
++    throw Error('unexpected '+url);
++  };
++  const first = run('doRun()');
++  await run('doRun()');
++  releaseCheck(); await first;
++  assert.equal(runCalls, 1, '预检查过程中连点也只能发起一次运行');
++  context.fetch = async url => ({json:async()=>url.includes('/output') ? {
++    status:'done',exit:0,total:0,lines:[],label:'pred',context:{func:'pred',task_name:'task'},
++    result:{verdict:'unconfirmed',process:{status:'done',exit:0},artifacts:{status:'unconfirmed'},
++      business:{status:'unconfirmed'},issues:[{message:'旧产物无法确认本次归属',path:'RSRP.dem'}]}
++  } : {busy:false,phase:'idle'}});
++  await timers.get(run('S.pollTimer'))();
++  assert.ok(!element('run-status').className.includes(' ok'), '退出 0、产物未确认不得显示绿色成功');
++  assert.match(element('run-outcome').textContent, /退出码.*0/);
++  assert.match(element('run-outcome').textContent, /产物/);
++  assert.match(element('run-outcome').textContent, /业务/);
++  run('showOutcome("run-outcome", {process:{status:"exited",exit_code:7}})');
++  assert.match(element('run-outcome').textContent, /退出码 7/);
++  assert.ok(!element('run-outcome').textContent.includes('正常退出'), '非零退出不能描述为正常退出');
++
++  let requested;
++  element('result-job').value='task';
++  context.fetch = async url => {
++    requested=url;
++    return {json:async()=>({associated:true,exists:true,dir:'fixture/out/task',files:[],log_tail:[],
++      verdict:'failed',process:{exit:0,status:'done'},artifacts:{status:'failed'},business:{status:'unusable'},
++      issues:[{message:'缺少指标文件',path:'10m/SCR.dem'}]})};
++  };
++  await run('loadResults()');
++  assert.match(requested, /sid=31/);
++  assert.match(element('result-validation').textContent, /10m\/SCR.dem/);
++  assert.ok(!element('result-status').className.includes(' ok'));
++  element('result-directory-only').checked=true;
++  context.fetch = async url => {
++    requested=url;
++    return {json:async()=>({associated:false,exists:true,files:[],log_tail:[],status:'end',verdict:'unconfirmed'})};
++  };
++  await run('loadResults()');
++  assert.match(requested, /job=task/);
++  assert.match(element('result-status').textContent, /未关联/);
++  assert.ok(!element('result-status').className.includes(' ok'));
++  console.log('PASS: restores runtime ownership, rejects duplicate launches, separates exit/artifacts/business, binds results by session');
++})().catch(error=>{console.error(error);process.exitCode=1;});

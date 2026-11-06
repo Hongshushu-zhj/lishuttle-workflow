@@ -1,0 +1,1429 @@
+diff --git a/platform/backend/function_profiles.py b/platform/backend/function_profiles.py
+index 637bf8c..a7f112e 100644
+--- a/platform/backend/function_profiles.py
++++ b/platform/backend/function_profiles.py
+@@ -86,13 +86,18 @@ def function_profile(func, values):
+             note='公共解析器读取；室内链从 .das 读取实际楼层，采用物理材料损耗，不使用室外场景楼层默认值。')
+         for tag in ('CityCode', 'DefaultFloorHeight', 'DefaultFloorLoss'):
+             rules[tag]['source'] += '; GIS/Data/src/IndoorGeoInfo.cpp:48-75; Propagation/Frame/src/PathLossofIndoorEngine.cpp:71-77'
+     else:
+         add('UsingBuildingPolygon MacroMinAntHeight CordPrecision SpatialCalcMode', 'common', 'common')
+         add('MaxCalcHeight', 'common', 'dependency', condition='SpatialCalcMode != ground',
+-            active=str(values.get('SpatialCalcMode', 'ground')).strip().lower() in ('floor', 'building', '3d'))
++            active=str(values.get('SpatialCalcMode', 'ground')).lower() in ('floor', 'building', '3d'))
++        if func == 'cali':
++            rules['SpatialCalcMode'].update(kind='startup',
++                note='公共解析器读取；校正实测射线显式使用 ground，不由室外预测空间模式决定。')
++            rules['MaxCalcHeight'].update(kind='startup', active=False,
++                note='校正实测射线显式使用 ground，不要求三维预测高度或楼层栈。')
+         add('ProjectionFilePath HeightIndexPath ClutterIndexPath ClutterMenuPath BuildingIndexPath BulidVectorIndexPath', 'geo', 'dependency',
+             condition='XML 不存在 MapPath 元素时使用逐项地图路径', active='MapPath' not in values)
+         for tag in ('ProjectionFilePath', 'HeightIndexPath', 'ClutterIndexPath'):
+             rules[tag]['required'] = True
+         add('MapPath', 'geo', 'dependency', condition='存在 MapPath 元素时使用地图目录（空元素也会进入此分支）')
+         add('BuildingPenetration ClutterMatchPath', 'geo', 'dependency')
+diff --git a/platform/backend/params_spec.json b/platform/backend/params_spec.json
+index f938df6..d1ed8ce 100644
+--- a/platform/backend/params_spec.json
++++ b/platform/backend/params_spec.json
+@@ -168,13 +168,13 @@
+    "name": "SpatialCalcMode",
+    "label": "计算模式",
+    "group": "计算范围与精度",
+    "type": "text",
+    "applies": "outdoor",
+    "default": "3d",
+-   "desc": "3d=分层立体计算，ground=仅地面。ground时高度层数自动归零"
++   "desc": "ground=仅地面基底层；floor/building=按实际建筑楼层；3d=按固定高度步长分层。pred/commsensing 生效，室内使用 DAS 实际楼层，cali 使用地面实测射线。引擎忽略大小写但不去除首尾空格"
+   },
+   {
+    "name": "MaxHops",
+    "label": "最大跳数",
+    "group": "计算范围与精度",
+    "type": "int",
+@@ -213,22 +213,22 @@
+    "name": "MaxCalcHeight",
+    "label": "最大计算高度(米)",
+    "group": "高度分层",
+    "type": "int",
+    "applies": "outdoor",
+    "default": "3",
+-   "desc": "层数=MaxCalcHeight/DefaultFloorHeight。100/10=10m到100m共10层；3/3=只有3m一层"
++   "desc": "3d 总层数=floor(MaxCalcHeight/DefaultFloorHeight)+1，包含0米基底层。例如10/3为0、3、6、9米共4层；不会补出10米层。floor/building 还受实际建筑楼层限制；ground仅1层"
+   },
+   {
+    "name": "DefaultFloorHeight",
+    "label": "层高(米)",
+    "group": "高度分层",
+    "type": "int",
+    "applies": "outdoor",
+    "default": "3",
+-   "desc": "每层高度，与MaxCalcHeight一起决定输出层数"
++   "desc": "室外楼层/3d 高度步长，必须大于0；3d 包含0米基底层，总层数=floor(MaxCalcHeight/DefaultFloorHeight)+1。室内预测采用 DAS 中实际楼层，不由此项生成楼层"
+   },
+   {
+    "name": "UsingBuildingPolygon",
+    "label": "使用建筑轮廓",
+    "group": "传播与阈值",
+    "type": "bool",
+diff --git a/platform/backend/preflight.py b/platform/backend/preflight.py
+new file mode 100644
+index 0000000..df90923
+--- /dev/null
++++ b/platform/backend/preflight.py
+@@ -0,0 +1,771 @@
++"""Read-only checks for the reviewed engine's real inputs and layer semantics.
++
++Paths in XML are interpreted from Bin, exactly like the launched process. This
++module deliberately does not stage files, create output folders or repair XML.
++"""
++import csv
++import codecs
++import hashlib
++import io
++import math
++import os
++from pathlib import Path
++import re
++import shlex
++import struct
++import xml.etree.ElementTree as ET
++
++from engineering import engineering_kind, normalized
++
++
++def _path(value, base):
++    if not value:
++        return ''
++    return str(Path(os.path.abspath(os.path.join(str(base), str(value).replace('\\', os.sep)))))
++
++
++def _text(path):
++    raw = Path(path).read_bytes()
++    for encoding in ('utf-8-sig', 'gb18030'):
++        try:
++            return raw.decode(encoding)
++        except UnicodeError:
++            pass
++    raise ValueError('文件不是 UTF-8 或 GB18030 文本')
++
++
++def _number(value):
++    try:
++        result = float(value)
++        return result if math.isfinite(result) else None
++    except (TypeError, ValueError, OverflowError):
++        return None
++
++
++def _bool(params, tag, default=True):
++    value = str(params.get(tag, str(default))).lower()
++    if value in ('false', '0'):
++        return False
++    if value in ('true', '1'):
++        return True
++    return default
++
++
++def _open_text(path):
++    """Choose supported text encoding without loading large data into memory."""
++    with open(path, 'rb') as fh:
++        sample = fh.read(65536)
++    for encoding in ('utf-8-sig', 'gb18030'):
++        try:
++            codecs.getincrementaldecoder(encoding)().decode(sample, final=False)
++            return open(path, encoding=encoding, newline='')
++        except UnicodeError:
++            pass
++    raise ValueError('文件不是 UTF-8 或 GB18030 文本')
++
++
++def _xml_fragments(path):
++    text = re.sub(r'<\?xml\b.*?\?>', '', _text(path), flags=re.S)
++    return ET.fromstring('<Document>' + text + '</Document>')
++
++
++def _cell_columns(bin_dir, issue):
++    # CellLoader.h defaults remain in force if parsing Bin/cellformat.xml fails.
++    columns = dict(CellId=0, PCI=7, BandWidth=17, ChannelNumber=18, MaxPower=15, EPRE=16,
++        SensePower=16, PropagationModel=19, CalcRadius=23, SiteId=2, Longitude=4, Latitude=5,
++        TxNumber=13, RxNumber=14, Antenna=12, SenseAntenna=12, AntennaHeight=8,
++        Azimuth=9, Tilt=10, ElecTilt=11, SenseTilt=11, CellType=34, CityCode=-1)
++    headers = 2
++    path = str(Path(bin_dir) / 'cellformat.xml')
++    try:
++        document = _xml_fragments(path)
++        parsed = {}
++        for root in document.findall('TableFormat'):
++            for node in root:
++                value = node.text or ''
++                if node.tag == 'HeaderLines':
++                    try:
++                        count = int(value)
++                        if count >= 0:
++                            headers = count
++                    except ValueError:
++                        pass
++                elif re.fullmatch('[A-Za-z]+', value):
++                    col = 0
++                    for ch in value.upper():
++                        col = col * 26 + ord(ch) - 64
++                    parsed.setdefault(node.tag, col - 1)
++        columns.update(parsed)
++        for target, fallback in (('SensePower', 'EPRE'), ('SenseAntenna', 'Antenna'), ('SenseTilt', 'ElecTilt')):
++            if target not in parsed:
++                columns[target] = columns[fallback]
++    except (OSError, ValueError, ET.ParseError) as exc:
++        issue('warning', 'ENGINEERING_FORMAT_DEFAULT', f'未加载 Bin/cellformat.xml，使用 CellLoader.h 默认列布局：{exc}', 'EngineeringFilePath', path)
++    return columns, headers
++
++
++_COLUMN_LABELS = {
++    'CellId': ('Cell ID', '小区ID'), 'SiteId': ('Site ID', '基站ID'),
++    'Longitude': ('Longitude', '经度'), 'Latitude': ('Latitude', '纬度'),
++    'AntennaHeight': ('Height (m)', 'Antenna Height', '天线高度'),
++    'Azimuth': ('Azimuth (°)', 'Azimuth', '天线方位角'),
++    'Tilt': ('Mechanical Downtilt (°)', '机械下倾角'),
++    'Antenna': ('Antenna', '天线型号'), 'EPRE': ('EPRE per antenna port', '参考信号功率'),
++    'ChannelNumber': ('Channel Number', '频点'), 'PropagationModel': ('Main Propagation Model', '预测模型'),
++    'TxNumber': ('Number of Transmission Antennas', '天线发射端口数量'),
++    'RxNumber': ('Number of Reception Antennas', '天线接收端口数量'),
++    'MaxPower': ('Max Power (dBm)', '最大发射功率'), 'CellType': ('Cell Type', '小区类型'),
++    'ApId': ('AP ID',), 'Floor': ('Floor', '楼层'), 'x': ('x', 'x坐标'), 'y': ('y', 'y坐标'),
++}
++
++
++def _engineering(path, expected, issue, bin_dir=None):
++    info = dict(path=path, kind='', rows=0, ids=[], floors=[], antennas=[], sensing_antennas=[], models=[])
++    if not path or not Path(path).is_file():
++        issue('error', 'ENGINEERING_MISSING', '工参 CSV 不存在', 'EngineeringFilePath', path)
++        return info
++    info['kind'] = engineering_kind(path)
++    if info['kind'] != expected:
++        issue('error', 'ENGINEERING_KIND', f'工参表头需要 {expected}，实际为 {info["kind"] or "无法识别"}', 'EngineeringFilePath', path)
++        return info
++    try:
++        if expected == 'indoor':
++            columns, headers = dict(ApId=0, CellId=2, Floor=3, x=4, y=5, AntennaHeight=6, Azimuth=7,
++                Tilt=8, ElecTilt=9, Antenna=10, TxNumber=11, RxNumber=12, MaxPower=13,
++                EPRE=14, ChannelNumber=16, PropagationModel=17, ULTrafficLoad=20, CellType=31), 2
++        else:
++            columns, headers = _cell_columns(bin_dir or Path(path).parent, issue)
++        strings = ['CellId', 'Antenna', 'PropagationModel', 'CellType'] + (['ApId'] if expected == 'indoor' else ['SiteId'])
++        if columns.get('CityCode', -1) >= 0:
++            strings.append('CityCode')
++        numeric = ['ChannelNumber', 'EPRE', 'TxNumber', 'RxNumber', 'AntennaHeight', 'Azimuth', 'Tilt']
++        numeric += ['Floor', 'x', 'y', 'ULTrafficLoad'] if expected == 'indoor' else ['Longitude', 'Latitude', 'SensePower']
++        info['format'] = dict(columns=columns, header_lines=headers, source='indoor fixed offsets' if expected == 'indoor' else str(Path(bin_dir or Path(path).parent) / 'cellformat.xml'))
++        ids, floors, antennas, sensing_antennas, models = set(), set(), set(), set(), set()
++        with _open_text(path) as fh:
++            rows = list(csv.reader(fh, strict=True))
++        # Known labels are checked against configured positions, never used to reorder data.
++        for tag, aliases in _COLUMN_LABELS.items():
++            if tag not in columns:
++                continue
++            labels = {normalized(a) for a in aliases}
++            for header in rows[:headers]:
++                found = [i for i, value in enumerate(header) if normalized(value) in labels]
++                if found and columns[tag] not in found:
++                    issue('error', 'ENGINEERING_LAYOUT', f'{tag} 表头位于列 {found[0] + 1}，引擎实际读取列 {columns[tag] + 1}', 'EngineeringFilePath', path)
++        for line, row in enumerate(rows[headers:], headers + 1):
++            if not any(c.strip() for c in row):
++                continue
++            try:
++                for tag in strings:
++                    if not row[columns[tag]]:
++                        raise ValueError(f'{tag} 不能为空')
++                cell_id = row[columns['CellId']]
++                for label in numeric:
++                    value = _number(row[columns[label]])
++                    if value is None:
++                        raise ValueError(f'{label} 不是有限数值')
++                    if label in ('ChannelNumber', 'TxNumber', 'RxNumber', 'Floor') and value != int(value):
++                        raise ValueError(f'{label} 必须为整数')
++                    if label == 'ChannelNumber' and value < 0:
++                        raise ValueError('ChannelNumber 不能为负')
++                    if label == 'Longitude' and not -180 <= value <= 180:
++                        raise ValueError('经度超出范围')
++                    if label == 'Latitude' and not -90 <= value <= 90:
++                        raise ValueError('纬度超出范围')
++                    if label == 'Floor':
++                        floors.add(int(value))
++                ids.add(cell_id)
++                antennas.add((row[columns['Antenna']], _number(row[columns['ElecTilt']]) or 0))
++                if expected != 'indoor' and columns.get('SenseAntenna', -1) >= 0:
++                    sense = row[columns['SenseAntenna']] or row[columns['Antenna']]
++                    sensing_antennas.add((sense, _number(row[columns['SenseTilt']]) or 0))
++                models.add(row[columns['PropagationModel']])
++                info['rows'] += 1
++            except (IndexError, ValueError) as exc:
++                issue('error', 'ENGINEERING_ROW', f'工参第 {line} 行：{exc}', 'EngineeringFilePath', path)
++        info.update(ids=sorted(ids), floors=sorted(floors), antennas=[dict(name=name, tilt=tilt) for name, tilt in sorted(antennas)],
++            sensing_antennas=[dict(name=name, tilt=tilt) for name, tilt in sorted(sensing_antennas)], models=sorted(models))
++        if not info['rows']:
++            issue('error', 'ENGINEERING_EMPTY', '工参 CSV 没有可用数据行（表头不计为数据）', 'EngineeringFilePath', path)
++    except (OSError, ValueError, csv.Error, StopIteration) as exc:
++        issue('error', 'ENGINEERING_INVALID', f'工参读取失败：{exc}', 'EngineeringFilePath', path)
++    return info
++
++
++def _index(path, tag, issue, required=True, vector=False):
++    """PLANET indices refer to files relative to their own directory."""
++    entries = []
++    if not path or not Path(path).is_file():
++        issue('error' if required else 'warning', 'MAP_INDEX_MISSING', '地图索引不存在', tag, path)
++        return entries
++    try:
++        for line, text in enumerate(_text(path).splitlines(), 1):
++            if not text.strip():
++                continue
++            parts = text.split()
++            count, start = (7, 2) if vector else (6, 1)
++            bounds = [_number(v) for v in parts[start:start + 4]]
++            valid = len(parts) >= count and len(bounds) == 4 and None not in bounds
++            if valid:
++                valid = bounds[0] < bounds[1] and bounds[2] < bounds[3]
++            resolution = None if vector or len(parts) < 6 else _number(parts[5])
++            if not vector:
++                valid = valid and resolution is not None and resolution > 0
++            if not valid:
++                issue('error' if required else 'warning', 'MAP_INDEX_INVALID', f'地图索引第 {line} 行格式或范围无效', tag, path)
++                continue
++            references = [_path(parts[i], Path(path).parent) for i in range(2 if vector else 1)]
++            missing = [p for p in references if not Path(p).is_file() or Path(p).stat().st_size == 0]
++            for ref in missing:
++                issue('error' if required else 'warning', 'MAP_REFERENCE_MISSING', f'地图索引第 {line} 行引用文件不存在或为空', tag, ref)
++            needed = None
++            if not missing and not vector:
++                # GeoRasterData::InitDataBuffer quantizes resolution to 1/1024,
++                # shrinks right/top by EPSILON and reads signed 16-bit samples.
++                scaled = resolution * 1024 + 0.5
++                if not math.isfinite(scaled):
++                    issue('error' if required else 'warning', 'MAP_INDEX_INVALID', f'地图索引第 {line} 行分辨率量化超出可表示范围', tag, path)
++                    continue
++                step = math.floor(scaled) / 1024
++                width, height = bounds[1] - bounds[0] - 1e-9, bounds[3] - bounds[2] - 1e-9
++                if step <= 0 or not all(math.isfinite(v) and v > 0 and math.isfinite(v / step) for v in (width, height)):
++                    issue('error' if required else 'warning', 'MAP_INDEX_INVALID', f'地图索引第 {line} 行分辨率不能构成有效栅格', tag, path)
++                    continue
++                needed = math.ceil(width / step) * math.ceil(height / step) * 2
++                if needed <= 0 or Path(references[0]).stat().st_size < needed:
++                    issue('error' if required else 'warning', 'MAP_RASTER_TRUNCATED', f'地图索引第 {line} 行栅格需要至少 {needed} 字节', tag, references[0])
++                    continue
++            if not missing:
++                entries.append(dict(paths=references, bounds=bounds, resolution=resolution, raster_bytes=needed))
++        if not entries:
++            issue('error' if required else 'warning', 'MAP_INDEX_EMPTY', '地图索引没有可用的引用记录', tag, path)
++    except (OSError, ValueError, OverflowError) as exc:
++        issue('error' if required else 'warning', 'MAP_INDEX_INVALID', f'无法读取地图索引：{exc}', tag, path)
++    return entries
++
++
++def _building_height(entries, vector=False):
++    """Return one usable height as evidence; never scan a whole large raster."""
++    for entry in entries:
++        try:
++            if vector:
++                # PLANET attribute: id, quoted name, building height, clutter.
++                with _open_text(entry['paths'][1]) as attributes:
++                    for line in attributes:
++                        fields = shlex.split(line, posix=True)
++                        height = _number(fields[2]) if len(fields) >= 4 else None
++                        if height is None or height <= 0:
++                            continue
++                        building_id = int(fields[0])
++                        # Require geometry for the same positive-height building.
++                        with _open_text(entry['paths'][0]) as geometry:
++                            for line in geometry:
++                                header = line.split()
++                                if len(header) < 3:
++                                    continue
++                                try:
++                                    identifier, count = int(header[0]), int(header[-1])
++                                except ValueError:
++                                    continue
++                                if count < 3:
++                                    continue
++                                valid = True
++                                for _ in range(count):
++                                    point = next(geometry, '').split()
++                                    if len(point) < 2 or any(_number(v) is None for v in point[:2]):
++                                        valid = False
++                                if identifier == building_id and valid:
++                                    return height
++            else:
++                with open(entry['paths'][0], 'rb') as raster:
++                    remaining = entry['raster_bytes']
++                    while remaining:
++                        block = raster.read(min(65536, remaining))
++                        if not block or len(block) % 2:
++                            break
++                        remaining -= len(block)
++                        for (height,) in struct.iter_unpack('>h', block):
++                            if 0 < height <= 20000:  # GIS_MAX_ALTITUDE; larger samples become invalid.
++                                return height
++        except (OSError, ValueError):
++            continue
++    return None
++
++
++def _projection(path, issue):
++    try:
++        with _open_text(path) as fh:
++            lines = [next(fh, '').split() for _ in range(4)]
++        if any(not line for line in lines) or not re.fullmatch(r'[+-]?\d+', lines[1][0]) or len(lines[3]) < 4 or any(_number(v) is None for v in lines[3][:4]):
++            raise ValueError('至少需要4行，第二行为整数分区，第四行含4个有限投影数值')
++    except (OSError, ValueError) as exc:
++        issue('error', 'MAP_PROJECTION_INVALID', f'PLANET 投影布局无效：{exc}', 'ProjectionFilePath', path)
++
++
++def _output_access(path, issue, field='PathlossDirectory'):
++    """Check existing parents without write probes or creating directories."""
++    if not path:
++        return
++    target = Path(path)
++    current = target
++    while not current.exists() and current.parent != current:
++        current = current.parent
++    if current.exists() and not current.is_dir():
++        issue('error', 'OUTPUT_NOT_DIRECTORY', '输出路径或父路径与现有文件冲突', field, current)
++    elif not current.exists() or not os.access(current, os.W_OK | os.X_OK):
++        issue('error', 'OUTPUT_NOT_ACCESSIBLE', '输出目录或最近存在的父目录不可写/不可访问', field, current)
++
++
++def _gain_valid(path, three_dimensional=False):
++    """Validate just the numeric shape read by AntennaLoader, using bounded memory."""
++    try:
++        with _open_text(path) as fh:
++            lines = (line.split() for line in fh if line.strip())
++            if three_dimensional:
++                next(lines, None)  # Loader skips exactly one header.
++                for _ in range(64800):
++                    values = next(lines, [])
++                    if len(values) < 3:
++                        return False
++                    phi, theta, gain = (_number(v) for v in values[:3])
++                    if phi is None or theta is None or gain is None or not -179 <= phi <= 180 or not -90 <= theta <= 90:
++                        return False
++            else:
++                for marker in ('HORIZONTAL', 'VERTICAL'):
++                    if not any(values and values[0] == marker for values in lines):
++                        return False
++                    for _ in range(360):
++                        values = next(lines, [])
++                        if len(values) < 2 or _number(values[1]) is None:
++                            return False
++        return True
++    except (OSError, ValueError):
++        return False
++
++
++def _resources(context, engineering, indoor, issue):
++    params, bin_dir = context['params'], context['bin_dir']
++    scene = _path(params.get('SceneSettingsPath') or 'config/scenesettings.xml', bin_dir)
++    resources = dict(scene_settings=scene, antenna_settings='', model_files=[])
++    resources['dynamic_runtime'] = 'unconfirmed'
++    resources['log_config'] = str(Path(bin_dir) / 'log4cpp.conf')
++    resources['log_config_exists'] = Path(resources['log_config']).is_file()
++    issue('warning', 'RUNTIME_RESOURCES_UNCONFIRMED', '未运行 ShuttleInit；动态链接库、授权和日志初始化尚未确认，不能据此保证程序可启动', 'BIN_DIR', bin_dir)
++    if not Path(scene).is_file():
++        issue('error', 'SCENE_SETTINGS_MISSING', '场景配置不存在（空值回退 Bin/config/scenesettings.xml）', 'SceneSettingsPath', scene)
++    else:
++        try:
++            _xml_fragments(scene)
++        except (OSError, ValueError, ET.ParseError) as exc:
++            issue('error', 'SCENE_SETTINGS_INVALID', f'场景配置 XML 无法解析：{exc}', 'SceneSettingsPath', scene)
++    # The indoor chain constructs its own physical model; its CSV model label is
++    # required by AP parsing but does not request a Bin/models propagation model.
++    if not indoor:
++        available = {('LiShuttleAuto', 0), ('LiShuttleSceneModel', 0), ('LiShuttleCellModel', 0)}
++        model_dir = Path(bin_dir) / 'models'
++        required_numbers = ('K0', 'Knear', 'Kfar', 'K0_nlos', 'Knear_nlos', 'Kfar_nlos')
++        for path in sorted(model_dir.glob('*.xml')):
++            try:
++                doc = _xml_fragments(path)
++                resources['model_files'].append(str(path))
++                for category in doc.findall('PropagationCategory'):
++                    name = category.get('name', '')
++                    if name != 'LiShuttleModel':
++                        continue  # This reviewed subsystem registers this creator only.
++                    for model in category.findall('Model'):
++                        try:
++                            identifier = int(model.get('ID', ''))
++                        except ValueError:
++                            continue
++                        if all(_number(model.findtext(tag)) is not None for tag in required_numbers):
++                            available.add((name, identifier))
++            except (OSError, ValueError, ET.ParseError) as exc:
++                issue('warning', 'MODEL_FILE_INVALID', f'模型文件无法解析：{exc}', 'EngineeringFilePath', path)
++        for reference in engineering['models']:
++            category, sep, identifier_text = reference.rpartition('_')
++            if not sep:
++                category, identifier = reference, 0
++            else:
++                match = re.match(r'[+-]?\d+', identifier_text)
++                identifier = int(match[0]) if match else 0  # upl_atoi semantics.
++            if (category, identifier) not in available:
++                issue('error', 'MODEL_REFERENCE_MISSING', f'工参传播模型 {reference} 在 Bin/models 中没有可加载定义', 'EngineeringFilePath', model_dir)
++    antennas = engineering['antennas'] + (engineering['sensing_antennas'] if context['func'] == 'commsensing' else [])
++    if antennas and (not indoor or _bool(params, 'AntGainCalced')):
++        ant_file = str(Path(bin_dir) / 'antennas/antenna.xml')
++        resources['antenna_settings'] = ant_file
++        try:
++            document = _xml_fragments(ant_file)
++            entities = {node.get('name', ''): node for settings in document.findall('AntennaSettings') for node in settings.findall('AntennaEntity')}
++            checked = {}
++            for antenna in antennas:
++                name, tilt = antenna['name'], antenna['tilt']
++                entity = entities.get(name)
++                exact_tilt = None
++                if entity is None:
++                    # A pre-suffixed name can directly reference a loaded beam.
++                    base, sep, suffix = name.rpartition('_')
++                    if sep and re.fullmatch(r'[+-]?\d+', suffix) and base in entities:
++                        entity, exact_tilt = entities[base], int(suffix)
++                if entity is None:
++                    issue('error', 'ANTENNA_REFERENCE_MISSING', f'工参天线 {name} 在 Bin/antennas/antenna.xml 中不存在', 'EngineeringFilePath', ant_file)
++                    continue
++                if _number(entity.findtext('MaxGain')) is None:
++                    issue('error', 'ANTENNA_GAIN_INVALID', f'天线 {name} 缺少有效 MaxGain', 'EngineeringFilePath', ant_file)
++                    continue
++                candidates = []
++                for beam in entity.findall('Broadcast_Beam_FILE'):
++                    try:
++                        beam_tilt = int(beam.get('electilt', '0'))
++                    except ValueError:
++                        beam_tilt = 0
++                    beam_path = _path((beam.text or '').lstrip(' \t'), Path(ant_file).parent)
++                    three_dimensional = (entity.findtext('GainMode') or '').lower() == '3d'
++                    key = (beam_path, three_dimensional)
++                    if key not in checked:
++                        checked[key] = bool(beam_path) and _gain_valid(beam_path, three_dimensional)
++                    if checked[key]:
++                        candidates.append((beam_tilt, beam_path))
++                if exact_tilt is not None:
++                    candidates = [item for item in candidates if item[0] == exact_tilt and exact_tilt != 0]
++                    if not candidates:
++                        issue('error', 'ANTENNA_REFERENCE_MISSING', f'工参天线 {name} 没有同名已加载波束；带后缀名称不使用邻近倾角替代', 'EngineeringFilePath', ant_file)
++                        continue
++                elif any(item[0] != 0 for item in candidates):
++                    candidates = [item for item in candidates if item[0] != 0]
++                if not candidates:
++                    issue('error', 'ANTENNA_GAIN_INVALID', f'天线 {name} 没有可加载的增益文件（2D 需双360行；3D 需64800点）', 'EngineeringFilePath', ant_file)
++                else:
++                    selected = min(candidates, key=lambda item: abs(item[0] - tilt))
++                    resources.setdefault('antenna_gains', []).append(dict(name=name, tilt=selected[0], path=selected[1]))
++        except (OSError, ValueError, ET.ParseError) as exc:
++            issue('error', 'ANTENNA_SETTINGS_INVALID', f'天线配置无法读取：{exc}', 'EngineeringFilePath', ant_file)
++    context['resources'] = resources
++
++
++def _map_directory(folder):
++    """Use the filename alternatives and priority in PlanetMapInfo."""
++    def choose(base, names, directory=False):
++        for name in names:
++            path = Path(base) / name
++            if path.is_dir() if directory else path.is_file():
++                return str(path)
++        return str(Path(base) / names[0])
++
++    heights = choose(folder, ('heights', 'Heights', 'height', 'Height'), True)
++    clutter = choose(folder, ('clutter', 'Clutter', 'clutters', 'Clutters'), True)
++    buildings = choose(folder, ('buildings', 'Buildings', 'building', 'Building'), True)
++    vectors = choose(folder, ('buildvector', 'buildingvector', 'buildVector', 'buildingVector', 'Buildvector', 'Buildingvector', 'BuildVector', 'BuildingVector'), True)
++    indexes = ('index', 'index.txt', 'Index', 'Index.txt')
++    return dict(ProjectionFilePath=choose(heights, ('projection', 'projection.txt', 'Projection', 'Projection.txt')),
++        HeightIndexPath=choose(heights, indexes), ClutterIndexPath=choose(clutter, indexes),
++        ClutterMenuPath=choose(clutter, ('menu', 'menu.txt', 'Menu', 'Menu.txt')),
++        BuildingIndexPath=choose(buildings, indexes), BulidVectorIndexPath=choose(vectors, indexes))
++
++
++def _floor_caches(out_dir, mode, issue):
++    """Inspect actual engine floor cache headers, without asserting C++ hash parity.
++
++    The internal hash also depends on converted antennas, model serialization and
++    geometry digests. A matching step/header alone cannot establish compatibility.
++    """
++    details = []
++    if not out_dir or not Path(out_dir).is_dir():
++        return details
++    for path in Path(out_dir).rglob('*.loss3d.csv'):
++        try:
++            with path.open('rb') as fh:
++                head = fh.read(1024)
++            step, version = None, None
++            if head.startswith(b'PATHLOSS3D') and len(head) >= 66:
++                version, decimeters = struct.unpack_from('<II', head, 10)
++                step = decimeters / 10
++                file_format = 'PATHLOSS3D'
++            elif head.startswith(b'version:'):
++                fields = next(csv.reader([head.splitlines()[0].decode('ascii')]))
++                version = int(fields[0].split(':')[1])
++                step = _number(fields[2])
++                file_format = 'floor_csv'
++            else:
++                file_format = 'unknown'
++            details.append(dict(path=str(path), format=file_format, version=version, floor_height=step, compatibility='unconfirmed'))
++            if version != 1 or step is None:
++                issue('warning', 'CACHE_FORMAT_UNCONFIRMED', '楼层缓存格式/版本无法确认，不能用来证明当前楼层输入可用', 'SpatialCalcMode', path)
++            elif mode['floor_height'] is not None and not math.isclose(step, mode['floor_height'], rel_tol=0, abs_tol=1e-6):
++                issue('warning', 'CACHE_LAYER_MISMATCH', f'旧楼层缓存步长 {step} 与当前 {mode["floor_height"]} 不同；未删除或重算缓存', 'DefaultFloorHeight', path)
++            else:
++                issue('warning', 'CACHE_COMPATIBILITY_UNCONFIRMED', '旧楼层缓存步长相同，但尚不能核对模型、天线及地图摘要；不能据此跳过建筑输入检查', 'SpatialCalcMode', path)
++        except (OSError, ValueError, IndexError, UnicodeError, csv.Error, struct.error) as exc:
++            issue('warning', 'CACHE_FORMAT_UNCONFIRMED', f'楼层缓存无法读取：{exc}', 'SpatialCalcMode', path)
++    return details
++
++
++def _indoor(map_dir, engineering, issue):
++    floors = []
++    paths = sorted(Path(map_dir).glob('*.das')) if map_dir and Path(map_dir).is_dir() else []
++    if not paths:
++        issue('error', 'INDOOR_MAP_MISSING', '室内地图目录没有 .das 楼层文件', 'MapPath', map_dir)
++    for path in paths:
++        try:
++            lines = _text(path).splitlines()
++            floor = int(lines[0].split()[1])
++            altitude = _number(lines[1].split()[1])
++            counts = [int(c) for c in lines[2].split()[:4]]
++            if not -100 <= floor <= 1000 or altitude is None or not -500 <= altitude <= 3000 or len(counts) != 4 or min(counts) < 0:
++                raise ValueError('楼层、高程或墙体数量无效')
++            if len(lines) < 3 + sum(counts):
++                raise ValueError('墙体/窗/柱数据被截断')
++            if sum(counts) == 0:
++                raise ValueError('楼层没有可用墙体或柱')
++            for line in lines[3:3 + counts[0]]:
++                fields = line.split()
++                if len(fields) < 14 or any(_number(v) is None for v in fields[:14]):
++                    raise ValueError('墙体坐标或材料无效')
++            if floor in floors:
++                raise ValueError(f'重复楼层 ID {floor}')
++            floors.append(floor)
++        except (OSError, ValueError, IndexError) as exc:
++            issue('error', 'INDOOR_MAP_INVALID', f'室内 DAS 地图无效：{exc}', 'MapPath', str(path))
++    for floor in engineering['floors']:
++        if floor not in floors:
++            issue('error', 'AP_FLOOR_MISSING', f'AP 工参楼层 {floor} 在 DAS 地图中不存在', 'EngineeringFilePath', engineering['path'])
++    return sorted(floors)
++
++
++def _regions(path, issue):
++    if not path:
++        issue('warning', 'REGION_MAP_FALLBACK', '未指定多边形，引擎使用地图范围', 'PolygonFilePath', '')
++        return []
++    if not Path(path).is_file():
++        issue('error', 'REGION_MISSING', '指定的区域文件不存在', 'PolygonFilePath', path)
++        return []
++    try:
++        text = _text(path)
++        if Path(path).suffix.lower() == '.kml':
++            root = ET.fromstring(text)
++            coordinates = [''.join(node.itertext()) for node in root.iter() if node.tag.rsplit('}', 1)[-1] == 'coordinates']
++        else:
++            coordinates = [text]
++        regions = []
++        for coordinates_text in coordinates:
++            points = []
++            for line in coordinates_text.splitlines():
++                # TXT accepts lon,lat lines; KML accepts space-delimited triples.
++                chunks = line.split() if Path(path).suffix.lower() == '.kml' else [line]
++                for chunk in chunks:
++                    fields = re.split(r'[,;\s]+', chunk.strip())
++                    if len(fields) >= 2:
++                        lon, lat = _number(fields[0]), _number(fields[1])
++                        if lon is not None and lat is not None and -180 <= lon <= 180 and -90 <= lat <= 90:
++                            points.append([lon, lat])
++            if len({tuple(p) for p in points}) >= 3:
++                regions.append(dict(id=len(regions), source=path, points=points))
++        if not regions:
++            issue('warning', 'REGION_MAP_FALLBACK', '区域文件没有有效多边形，引擎将回退到地图范围', 'PolygonFilePath', path)
++        return regions
++    except (OSError, ValueError, ET.ParseError) as exc:
++        issue('error', 'REGION_INVALID', f'区域文件无法读取：{exc}', 'PolygonFilePath', path)
++        return []
++
++
++def _dt(folder, cell_ids, issue):
++    index = Path(folder) / 'index.txt' if folder else None
++    if not index or not index.is_file():
++        issue('error', 'DT_INDEX_REQUIRED', '路测目录需要 index.txt 列出输入文件；不会将目录内任意 CSV 当作路测', 'DriverTestFileDictionaryPath', str(index or ''))
++        return []
++    files, usable = [], 0
++    try:
++        names = [line.rstrip('\r\n') for line in _text(index).splitlines() if line]
++        for name in names:
++            path = _path(name, folder)
++            files.append(path)
++            if not Path(path).is_file():
++                issue('error', 'DT_REFERENCE_MISSING', '路测 index.txt 引用文件不存在', 'DriverTestFileDictionaryPath', path)
++                continue
++            rows = list(csv.reader(io.StringIO(_text(path)), strict=True))
++            if not rows or len(rows[0]) < 5 or [normalized(c) for c in rows[0][:5]] != ['pctime', 'cellid', 'lon', 'lat', 'rsrp']:
++                issue('warning', 'DT_HEADER', '路测表头非标准名称；引擎跳过首行并按前5列读取时间、小区ID、经度、纬度、RSRP', 'DriverTestFileDictionaryPath', path)
++            for row in rows[1:]:
++                if len(row) < 5:
++                    continue
++                lon, lat, rsrp = (_number(row[i]) for i in (2, 3, 4))
++                if row[1] in cell_ids and lon is not None and lat is not None and rsrp is not None and -180 <= lon <= 180 and -90 <= lat <= 90:
++                    usable += 1
++        if not usable:
++            issue('error', 'DT_NO_USABLE_ROWS', '路测索引中没有坐标/RSRP 有效且匹配工参 Cell ID 的数据行', 'DriverTestFileDictionaryPath', str(index))
++    except (OSError, ValueError, csv.Error) as exc:
++        issue('error', 'DT_INVALID', f'路测输入无法读取：{exc}', 'DriverTestFileDictionaryPath', str(index))
++    return files
++
++
++def _calibration(params, issue):
++    for low, high in (('MinPower', 'MaxPower'), ('MinK0', 'MaxK0'), ('MinKnear', 'MaxKnear'), ('MinDiff', 'MaxDiff'), ('MinRef', 'MaxRef')):
++        lower, upper = _number(params.get(low)), _number(params.get(high))
++        if lower is None or upper is None or lower > upper:
++            issue('error', 'CALIBRATION_RANGE', f'{low}/{high} 必须是有限数值且最小值不大于最大值', low, '')
++    if any(tag in params for tag in ('MinDeltaKfar', 'MaxDeltaKfar')):
++        lower, upper = _number(params.get('MinDeltaKfar', '0')), _number(params.get('MaxDeltaKfar', '30'))
++        if lower is None or upper is None or lower > upper:
++            issue('error', 'CALIBRATION_RANGE', 'MinDeltaKfar/MaxDeltaKfar 范围无效', 'MinDeltaKfar', '')
++    for tag in ('MinSamples', 'Epoch'):
++        if tag in params:
++            value = _number(params[tag])
++            if value is None or value <= 0 or value != int(value):
++                issue('error', 'CALIBRATION_PARAMETER', f'{tag} 必须为正整数', tag, '')
++    if not params.get('CalNewModelName'):
++        issue('error', 'CALIBRATION_MODEL_NAME', '缺少校正模型名 CalNewModelName', 'CalNewModelName', '')
++    if not (_bool(params, 'IsLosCalibrated') or _bool(params, 'IsNLosCalibrated')):
++        issue('warning', 'CALIBRATION_DISABLED', 'LOS 与 NLOS 校正均关闭，可能没有模型更新', 'IsLosCalibrated', '')
++
++
++def check_run(env, schema_path, func, task_id):
++    """Return a JSON-safe report; never write or launch any process."""
++    issues = []
++
++    def issue(severity, code, message, field='', path=''):
++        issues.append(dict(severity=severity, code=code, message=message, field=field, path=str(path or '')))
++
++    project = _path(env.get('PROJECT_DIR', ''), os.getcwd())
++    bin_dir = _path(env.get('BIN_DIR') or env.get('EXE_DIR') or os.path.join(env.get('BUILD_SUBDIR', ''), 'Bin'), project or os.getcwd())
++    exe = _path(env.get('EXE_NAME', 'lishuttle.exe'), bin_dir)
++    schema_path = _path(schema_path, bin_dir)
++    context = dict(project=project, bin_dir=bin_dir, exe=exe, schema_path=schema_path,
++        schema_name='', schema_digest='', schema_text='', func=str(func), task_id=str(task_id), task_name='',
++        out_dir='', pred_dir='', dt_dir='', models_dir='', params={}, mode=dict(requested=None,
++        parsed='', effective='', applies=False, max_height=None, floor_height=None, layer_count=None),
++        regions=[], indoor_floors=[])
++    if not project or not Path(project).is_dir():
++        issue('error', 'PROJECT_MISSING', '项目目录不存在', 'PROJECT_DIR', project)
++    if not Path(exe).is_file():
++        issue('error', 'EXE_MISSING', '程序文件不存在，请先编译和装配', 'EXE_NAME', exe)
++    try:
++        raw = Path(schema_path).read_bytes()
++        context['schema_digest'] = hashlib.sha256(raw).hexdigest()
++        context['schema_text'] = raw.decode('utf-8-sig')
++        root = ET.fromstring(raw)
++        if root.tag != 'RuntimeSchema':
++            raise ValueError('根节点不是 RuntimeSchema')
++    except (OSError, ValueError, UnicodeError, ET.ParseError) as exc:
++        issue('error', 'SCHEMA_INVALID', f'运行配置无法读取：{exc}', 'schema_path', schema_path)
++        return dict(ok=False, issues=issues, context=context)
++    params = {}
++    for node in root:
++        if node.tag in params:
++            same = not list(node) and (node.text or '') == params[node.tag]
++            issue('warning' if same else 'error', 'SCHEMA_DUPLICATE_FIELD', f'重复字段 {node.tag}；引擎读取首项' + ('，值相同' if same else '，值不同需先消除歧义'), node.tag, schema_path)
++        elif not list(node):
++            params[node.tag] = node.text or ''
++    context['params'] = params
++    name = root.get('name', '')
++    context.update(schema_name=Path(schema_path).name, task_name=name)
++    if not name or next(iter(root.attrib), '') != 'name':
++        issue('error', 'SCHEMA_NAME', '引擎按根节点首属性读取任务名；name 必须存在且为首属性', 'RuntimeSchema@name', schema_path)
++    for value, field in ((name, 'RuntimeSchema@name'), (str(task_id), 'task_id')):
++        if not value or value in ('.', '..') or any(c in value for c in '/\\\0<>:"|?*'):
++            issue('error', 'INVALID_TASK_NAME', '任务名/编号不能为空或包含 Windows 非法路径字符', field, schema_path)
++    output = _path(params.get('PathlossDirectory'), bin_dir)
++    if output and name:
++        context['out_dir'] = _path(name, output)
++        context['pred_dir'] = _path('pred/' + str(task_id), context['out_dir'])
++        context['models_dir'] = _path('models_task' + str(task_id), context['out_dir']) if _bool(params, 'ModelTemporaryStorage') else _path('models', bin_dir)
++        _output_access(context['out_dir'], issue)
++        if not Path(output).exists() and not Path(output).parent.is_dir():
++            issue('error', 'OUTPUT_PARENT_MISSING', '引擎只创建 PathlossDirectory 及任务目录；PathlossDirectory 的父目录必须已存在', 'PathlossDirectory', Path(output).parent)
++    else:
++        issue('error', 'OUTPUT_REQUIRED', '缺少 PathlossDirectory 或任务名', 'PathlossDirectory', schema_path)
++    context['dt_dir'] = _path(params.get('DriverTestFileDictionaryPath'), bin_dir)
++    indoor_family = func in ('predindoor', 'plindoor', 'indoorrays')
++    reviewed = func in ('pred', 'commsensing', 'predindoor', 'cali', 'acp')
++    context['function_contract'] = 'reviewed' if reviewed else 'unconfirmed'
++    if not reviewed:
++        issue('warning', 'FUNCTION_UNREVIEWED', '该功能的完整输入与结果契约尚未审查，预检通过不能自动判为业务成功', 'func', '')
++        if not indoor_family:
++            return dict(ok=not any(i['severity'] == 'error' for i in issues), issues=issues, context=context)
++    applies = func in ('pred', 'commsensing', 'acp')
++    requested = params.get('SpatialCalcMode')
++    parsed = (requested if requested is not None else 'ground').lower()
++    effective = 'floor' if parsed == 'building' else parsed if parsed in ('ground', 'floor', '3d') else 'ground'
++    mode = context['mode']
++    mode.update(requested=requested, parsed=parsed, effective=effective if applies else 'indoor' if indoor_family else 'ground', applies=applies,
++        max_height=_number(params.get('MaxCalcHeight', '0')), configured_max_height=_number(params.get('MaxCalcHeight', '0')),
++        floor_height=_number(params.get('DefaultFloorHeight', '3')))
++    if applies and parsed not in ('ground', 'floor', 'building', '3d'):
++        issue('error', 'INVALID_SPATIAL_MODE', 'SpatialCalcMode 只接受 ground、floor/building、3d；引擎不会去除首尾空格', 'SpatialCalcMode', schema_path)
++    if not applies and (indoor_family or func == 'cali'):
++        issue('warning', 'SPATIAL_MODE_IGNORED', '室内预测使用 DAS 楼层；校正使用地面实测射线，室外空间模式不决定其层数', 'SpatialCalcMode', schema_path)
++    if mode['effective'] == 'ground':
++        mode.update(max_height=0, layer_count=1, heights=[0])
++    if applies and effective in ('3d', 'floor'):
++        height, step = mode['max_height'], mode['floor_height']
++        if height is None or height < 0 or step is None or step <= 0 or not math.isfinite(height / step) or height / step >= 2 ** 32:
++            issue('error', 'INVALID_LAYER_GEOMETRY', '分层计算要求 MaxCalcHeight>=0 且 DefaultFloorHeight>0，二者须为有限数值', 'MaxCalcHeight', schema_path)
++        elif effective == '3d':
++            mode['layer_count'] = math.floor(height / step) + 1
++            mode['configured_layer_count'] = mode['layer_count']
++            # Avoid allocating an enormous array merely to describe a bad request.
++            mode['heights'] = [i * step for i in range(mode['layer_count'])] if mode['layer_count'] <= 10000 else []
++    expected = 'indoor' if indoor_family else 'outdoor'
++    resolution = _number(params.get('DefaultCalcResolution', '5'))
++    if resolution is None or resolution <= 0:
++        issue('error', 'INVALID_RESOLUTION', 'DefaultCalcResolution 必须为有限正数', 'DefaultCalcResolution', schema_path)
++    engineering = _engineering(_path(params.get('EngineeringFilePath'), bin_dir), expected, issue, bin_dir)
++    context['engineering'] = engineering
++    _resources(context, engineering, expected == 'indoor', issue)
++    actual_map = params.get('MapFormat', 'PLANET').lower()
++    if actual_map not in ('planet', 'plannet', 'indoor'):
++        issue('error', 'MAP_FORMAT_UNSUPPORTED', '地图格式须为 PLANET/PLANNET 或 indoor；引擎不去除空格', 'MapFormat', schema_path)
++    if (actual_map == 'indoor') != (expected == 'indoor'):
++        issue('error', 'MAP_KIND', f'{func} 与 MapFormat={params.get("MapFormat", "PLANET")} 不匹配', 'MapFormat', schema_path)
++    if expected == 'indoor':
++        floors = _indoor(_path(params.get('MapPath'), bin_dir), engineering, issue)
++        context['indoor_floors'] = floors
++        mode['layer_count'] = len(floors)
++    else:
++        defaults = dict(ProjectionFilePath='heights/projection.txt', HeightIndexPath='heights/index.txt', ClutterIndexPath='clutter/index.txt', ClutterMenuPath='clutter/menu.txt', BuildingIndexPath='buildings/index.txt', BulidVectorIndexPath='buildvector/index.txt')
++        maps = _map_directory(_path(params['MapPath'], bin_dir)) if params.get('MapPath') else {tag: _path(params.get(tag), bin_dir) for tag in defaults}
++        if 'MapPath' in params and not params['MapPath']:
++            issue('error', 'MAP_DIRECTORY_EMPTY', 'MapPath 元素存在但为空；引擎不会回退到逐项地图路径', 'MapPath', schema_path)
++        projection = maps['ProjectionFilePath']
++        if not projection or not Path(projection).is_file() or Path(projection).stat().st_size == 0:
++            issue('error', 'MAP_PROJECTION_MISSING', '地图投影文件不存在或为空', 'ProjectionFilePath', projection)
++        else:
++            _projection(projection, issue)
++        for tag in ('HeightIndexPath', 'ClutterIndexPath'):
++            _index(maps[tag], tag, issue)
++        context['map_paths'] = maps
++        if not maps['ClutterMenuPath'] or not Path(maps['ClutterMenuPath']).is_file():
++            issue('error', 'MAP_MENU_MISSING', 'PLANET 地图需要杂波菜单文件（MapPath 分支从杂波目录寻找 menu/menu.txt）', 'ClutterMenuPath', maps['ClutterMenuPath'])
++        vector = _bool(params, 'UsingBuildingPolygon')
++        building_tag = 'BulidVectorIndexPath' if vector else 'BuildingIndexPath'
++        building_path = maps[building_tag]
++        building_entries = []
++        if not vector or (building_path and Path(building_path).is_file()):
++            building_entries = _index(building_path, building_tag, issue, vector=vector)
++        if applies and effective != 'ground':
++            context['floor_caches'] = _floor_caches(context['out_dir'], mode, issue)
++        if applies and effective == 'floor':
++            if mode['max_height'] is not None and mode['max_height'] >= 0 and mode['floor_height'] is not None and mode['floor_height'] > 0 and math.isfinite(mode['max_height'] / mode['floor_height']) and mode['max_height'] / mode['floor_height'] < 2 ** 32:
++                mode['layer_cap'] = math.floor(mode['max_height'] / mode['floor_height']) + 1
++                mode['configured_layer_count'] = mode['layer_cap']
++            tag = building_tag
++            height = _building_height(building_entries, vector)
++            mode['building_source'] = tag
++            if height is None:
++                issue('error', 'FLOOR_DATA_REQUIRED', f'floor/building 模式缺少 UsingBuildingPolygon 所选 {tag} 中可用建筑；未使用另一路或旧高层目录替代', tag, maps[tag])
++            elif mode['floor_height'] and mode['floor_height'] > 0 and mode['max_height'] is not None and mode['max_height'] >= 0:
++                mode['building_sample_height'] = height
++                # GeoBuildingPolygon computes Floors from each scene's FloorHeight.
++                # Global default step supplies only the prediction cap and labels.
++                mode['layer_count'] = None
++        if func in ('pred', 'commsensing', 'acp'):
++            if 'PolygonFilePath' not in params:
++                issue('error', 'REGION_ELEMENT_REQUIRED', '预测解析器要求存在 PolygonFilePath 元素；允许显式空值使用地图范围', 'PolygonFilePath', schema_path)
++            else:
++                context['regions'] = _regions(_path(params.get('PolygonFilePath'), bin_dir), issue)
++    if func == 'cali':
++        _calibration(params, issue)
++        context['dt_files'] = _dt(context['dt_dir'], engineering['ids'], issue)
++        _output_access(context['dt_dir'], issue, 'DriverTestFileDictionaryPath')
++        _output_access(context['models_dir'], issue, 'ModelTemporaryStorage')
++    return dict(ok=not any(i['severity'] == 'error' for i in issues), issues=issues, context=context)
+diff --git a/tests/test_preflight.py b/tests/test_preflight.py
+new file mode 100644
+index 0000000..35440fa
+--- /dev/null
++++ b/tests/test_preflight.py
+@@ -0,0 +1,578 @@
++"""Read-only, source-aligned run checks on isolated synthetic inputs."""
++import csv
++import importlib
++import importlib.util
++import json
++from pathlib import Path
++import sys
++import tempfile
++import unittest
++import xml.etree.ElementTree as ET
++
++BACKEND = Path(__file__).resolve().parents[1] / 'platform/backend'
++sys.path.insert(0, str(BACKEND))
++PROJECTION = 'WGS-84\n50\nUTM\n0 117 500000 0\n'
++OUTDOOR_HEADER = ['Cell ID', 'Cell Name', 'Site ID', 'Site Name', 'Longitude', 'Latitude', 'Layer', 'Physical Cell ID', 'Height (m)', 'Azimuth (°)', 'Mechanical Downtilt (°)', 'Additional Electrical Downtilt (°)', 'SenseTilt', 'Antenna', 'SenseAntenna', 'Number of Transmission Antennas', 'Number of Reception Antennas', 'Max Power (dBm)', 'EPRE per antenna port', 'Bandwidth', 'Channel Number', 'Main Propagation Model', 'Main Resolution', 'Traffic Load (DL) (%)', 'Traffic Load (UL) (%)', 'Main Calculation Radius (m)', 'Transmission losses (dB)', 'Reception losses (dB)', 'Noise Figure (dB)', 'Miscellaneous Losses', 'Feeder Equipment', 'Feeder Length(m)', 'TMA Equipment', 'Transmitter Equipment', 'Active', 'Transmitter Type', 'Cell Type', 'Channel Allocation Status', 'Frequency Band', 'SenseActive', 'SensePower', 'CityCode']
++OUTDOOR_ROW = ['c1', 'cell', 'site1', 'site', '119.000000', '26.000000', '1', '1', '20', '90', '0', '0', '0', 'omni', 'omni', '4', '4', '40', '14', '100', '504990', 'LiShuttleModel_1', '5', '15', '15', '800', '2', '2', '4', '0', '', '0', '', '0', '1', '1', 'NR', '0', '20', '1', '14', '350900']
++INDOOR_HEADER = ['AP ID', 'AP Name', 'Cell ID', 'Floor', 'x', 'y', 'Height (m)', 'Azimuth (°)', 'Mechanical Downtilt (°)', 'Additional Electrical Downtilt (°)', 'Antenna', 'Number of Transmission Antennas', 'Number of Reception Antennas', 'Max Power (dBm)', 'EPRE per antenna port', 'Frequency Band', 'Channel Number', 'Main Propagation Model', 'Main Resolution', 'Traffic Load (DL) (%)', 'Traffic Load (UL) (%)', 'Main Calculation Radius (m)', 'Transmission losses (dB)', 'Reception losses (dB)', 'Noise Figure (dB)', 'Miscellaneous Losses', 'Feeder Equipment', 'Feeder Length(m)', 'Transmitter Equipment', 'Active', 'Transmitter Type', 'Cell Type']
++INDOOR_ROW = ['AP1', 'AP', 'c1', '1', '2', '2', '2', '90', '0', '0', 'omni', '4', '4', '20', '14', '30', '1300', 'LiShuttleIndoorModel_1', '0.2', '15', '15', '800', '2', '2', '4', '0', '', '0', '', '1', '1', 'LTE-FDD']
++CELL_FORMAT = dict(CellId='A', SiteId='C', Longitude='E', Latitude='F', PCI='H', AntennaHeight='I', Azimuth='J', Tilt='K', ElecTilt='L', SenseTilt='M', Antenna='N', SenseAntenna='O', TxNumber='P', RxNumber='Q', MaxPower='R', EPRE='S', BandWidth='T', ChannelNumber='U', PropagationModel='V', Resolution='W', DLTrafficLoad='X', ULTrafficLoad='Y', CalcRadius='Z', TxLoss='AA', RxLoss='AB', NoiseFigure='AC', MiscellaneousLoss='AD', FeederEquipment='AE', FeederLength='AF', TMAEquipment='AG', Active='AI', CellType='AK', SenseActive='AN', SensePower='AO', SenseNoiseFigure='AC')
++
++
++class PreflightTests(unittest.TestCase):
++    def setUp(self):
++        self.assertIsNotNone(importlib.util.find_spec('preflight'), 'preflight module must exist')
++        self.check = importlib.import_module('preflight').check_run
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.root = Path(self.temp.name)
++        self.bin = self.root / 'out/build/test/Bin'
++        self.bin.mkdir(parents=True)
++        self.put('lishuttle.exe', b'fixture')
++        self.env = dict(PROJECT_DIR=str(self.root), BUILD_SUBDIR='out/build/test', EXE_NAME='lishuttle.exe')
++        self.values = dict(EngineeringFilePath='cells.csv', PathlossDirectory='results',
++            ProjectionFilePath='map/heights/projection.txt', HeightIndexPath='map/heights/index.txt',
++            ClutterIndexPath='map/clutter/index.txt', PolygonFilePath='area.txt',
++            ClutterMenuPath='map/clutter/menu.txt',
++            MapFormat='PLANET', SpatialCalcMode='ground', DefaultFloorHeight='3', MaxCalcHeight='10')
++        self.put('map/heights/projection.txt', PROJECTION)
++        self.put('cellformat.xml', '<TableFormat><HeaderLines>2</HeaderLines>' + ''.join(f'<{k}>{v}</{k}>' for k, v in CELL_FORMAT.items()) + '</TableFormat>')
++        self.put('config/scenesettings.xml', '<Cluttersettings><SceneInformation><SceneID>0</SceneID><OtoIModel>0</OtoIModel><PenetrationLoss>20</PenetrationLoss><LinearLoss>0.2</LinearLoss><FloorHeight>3</FloorHeight><FloorLoss>10</FloorLoss></SceneInformation></Cluttersettings>')
++        self.put('models/LiShuttleModel.xml', '<PropagationCategory name="LiShuttleModel"><Model ID="1"><ModelName>Sub6G</ModelName><K0>28</K0><Knear>22</Knear><Kfar>40</Kfar><Kh>-9</Kh><K0_nlos>28</K0_nlos><Knear_nlos>22</Knear_nlos><Kfar_nlos>40</Kfar_nlos><Kh_nlos>-9</Kh_nlos></Model></PropagationCategory>')
++        self.put('antennas/antenna.xml', '<AntennaSettings><AntennaEntity name="omni"><MaxGain>11</MaxGain><Broadcast_Beam_FILE>omni.txt</Broadcast_Beam_FILE></AntennaEntity></AntennaSettings>')
++        self.put('antennas/omni.txt', 'HORIZONTAL 360\n' + ''.join(f'{i} 0\n' for i in range(360)) + 'VERTICAL 360\n' + ''.join(f'{i} 0\n' for i in range(360)))
++        for kind in ('heights', 'clutter'):
++            self.put(f'map/{kind}/index.txt', 'tile.dat 0 10 0 10 5\n')
++            self.put(f'map/{kind}/tile.dat', b'\x01' * 8)
++        self.put('area.txt', '119,26\n119.01,26\n119.01,26.01\n')
++        self.put('map/clutter/menu.txt', '1 urban\n')
++        self.cells()
++        self.schema = self.bin / 'runtimelibrary/schema.xml'
++
++    def put(self, path, data):
++        path = self.bin / path
++        path.parent.mkdir(parents=True, exist_ok=True)
++        path.write_bytes(data if isinstance(data, bytes) else data.encode('utf-8'))
++        return path
++
++    def cells(self, indoor=False, rows=True):
++        header = INDOOR_HEADER if indoor else OUTDOOR_HEADER
++        row = INDOOR_ROW if indoor else OUTDOOR_ROW
++        with self.put('cells.csv', '').open('w', encoding='utf-8', newline='') as fh:
++            writer = csv.writer(fh)
++            writer.writerow(header)
++            writer.writerow(header)
++            if rows:
++                writer.writerow(row)
++
++    def run_check(self, func='pred', **values):
++        self.values.update(values)
++        root = ET.Element('RuntimeSchema', name='fixture')
++        for key, value in self.values.items():
++            if value is not None:
++                ET.SubElement(root, key).text = str(value)
++        self.schema.parent.mkdir(exist_ok=True)
++        self.schema.write_bytes(ET.tostring(root, encoding='utf-8'))
++        return self.check(self.env, str(self.schema), func, '007')
++
++    def codes(self, report):
++        return {issue['code'] for issue in report['issues']}
++
++    def test_ground_context_is_json_serializable_and_read_only(self):
++        self.run_check()
++        before = {str(p): (p.stat().st_mtime_ns, p.read_bytes()) for p in self.root.rglob('*') if p.is_file()}
++        report = self.check(self.env, str(self.schema), 'pred', '007')
++        self.assertTrue(report['ok'], report['issues'])
++        context = report['context']
++        self.assertEqual(context['mode']['layer_count'], 1)
++        self.assertEqual(context['mode']['effective'], 'ground')
++        self.assertEqual(context['task_id'], '007')
++        self.assertEqual(context['schema_name'], 'schema.xml')
++        self.assertEqual(context['task_name'], 'fixture')
++        self.assertIn('RuntimeSchema', context['schema_text'])
++        self.assertEqual(Path(context['pred_dir']), self.bin / 'results/fixture/pred/007')
++        self.assertEqual(Path(context['models_dir']), self.bin / 'results/fixture/models_task007')
++        self.assertEqual(context['params']['MaxCalcHeight'], '10')
++        self.assertEqual(len(context['schema_digest']), 64)
++        json.dumps(report, allow_nan=False)
++        after = {str(p): (p.stat().st_mtime_ns, p.read_bytes()) for p in self.root.rglob('*') if p.is_file()}
++        self.assertEqual(before, after)
++
++    def test_3d_layers_include_base_and_stop_at_last_full_step(self):
++        report = self.run_check(SpatialCalcMode='3D', MaxCalcHeight='10', DefaultFloorHeight='3')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertEqual(report['context']['mode']['layer_count'], 4)
++        self.assertEqual(report['context']['mode']['heights'], [0, 3, 6, 9])
++
++    def test_3d_zero_height_is_one_base_layer(self):
++        report = self.run_check(SpatialCalcMode='3d', MaxCalcHeight='0')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertEqual(report['context']['mode']['layer_count'], 1)
++
++    def test_unrepresentable_layer_ratio_returns_error_instead_of_raising(self):
++        report = self.run_check(SpatialCalcMode='3d', MaxCalcHeight='1e308', DefaultFloorHeight='1e-308')
++        self.assertFalse(report['ok'])
++        self.assertIn('INVALID_LAYER_GEOMETRY', self.codes(report))
++
++    def test_missing_or_invalid_resolution_is_checked_without_mutation(self):
++        report = self.run_check(DefaultCalcResolution='0')
++        self.assertIn('INVALID_RESOLUTION', self.codes(report))
++
++    def test_ground_does_not_treat_old_floor_cache_as_current_layer_evidence(self):
++        self.put('results/fixture/site/c1.loss3d.csv', b'old unknown cache')
++        report = self.run_check()
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertNotIn('CACHE_FORMAT_UNCONFIRMED', self.codes(report))
++
++    def test_unknown_map_format_blocks(self):
++        report = self.run_check(MapFormat='mystery')
++        self.assertIn('MAP_FORMAT_UNSUPPORTED', self.codes(report))
++
++    def test_3d_invalid_height_or_step_blocks(self):
++        for values in ({'MaxCalcHeight': '-1'}, {'DefaultFloorHeight': '0'}, {'MaxCalcHeight': 'nan'}, {'DefaultFloorHeight': 'inf'}):
++            with self.subTest(values=values):
++                self.values.update(MaxCalcHeight='10', DefaultFloorHeight='3')
++                report = self.run_check(SpatialCalcMode='3d', **values)
++                self.assertFalse(report['ok'])
++                self.assertIn('INVALID_LAYER_GEOMETRY', self.codes(report))
++                json.dumps(report, allow_nan=False)
++
++    def test_whitespace_mode_is_invalid_and_missing_mode_defaults_ground(self):
++        report = self.run_check(SpatialCalcMode=' ground ')
++        self.assertFalse(report['ok'])
++        self.assertIn('INVALID_SPATIAL_MODE', self.codes(report))
++        report = self.run_check(SpatialCalcMode=None)
++        self.assertEqual(report['context']['mode']['parsed'], 'ground')
++        self.assertTrue(report['ok'], report['issues'])
++
++    def test_floor_alias_without_usable_buildings_blocks(self):
++        report = self.run_check(SpatialCalcMode='BUILDING')
++        self.assertEqual(report['context']['mode']['effective'], 'floor')
++        self.assertFalse(report['ok'])
++        self.assertIn('FLOOR_DATA_REQUIRED', self.codes(report))
++
++    def test_arbitrary_elevated_directory_is_not_floor_cache_evidence(self):
++        self.put('results/fixture/prediction/007/3m/RSRP_0.dem', b'old')
++        report = self.run_check(SpatialCalcMode='floor')
++        self.assertIn('FLOOR_DATA_REQUIRED', self.codes(report))
++
++    def test_missing_executable_and_schema_are_located_errors(self):
++        (self.bin / 'lishuttle.exe').unlink()
++        report = self.check(self.env, str(self.schema), 'pred', '1')
++        self.assertFalse(report['ok'])
++        self.assertIn('EXE_MISSING', self.codes(report))
++        self.assertIn('SCHEMA_INVALID', self.codes(report))
++        for issue in report['issues']:
++            self.assertTrue({'severity', 'code', 'message', 'field', 'path'} <= set(issue))
++
++    def test_wrong_or_header_only_engineering_blocks(self):
++        self.cells(rows=False)
++        report = self.run_check()
++        self.assertIn('ENGINEERING_EMPTY', self.codes(report))
++        self.cells(indoor=True)
++        report = self.run_check()
++        self.assertIn('ENGINEERING_KIND', self.codes(report))
++
++    def test_bad_engineering_numeric_row_is_located(self):
++        text = (self.bin / 'cells.csv').read_text(encoding='utf-8')
++        (self.bin / 'cells.csv').write_text(text.replace('119.000000', 'nan'), encoding='utf-8')
++        report = self.run_check()
++        self.assertIn('ENGINEERING_ROW', self.codes(report))
++        self.assertTrue(any('3' in i['message'] for i in report['issues'] if i['code'] == 'ENGINEERING_ROW'))
++
++    def test_missing_map_index_reference_blocks(self):
++        (self.bin / 'map/heights/tile.dat').unlink()
++        report = self.run_check()
++        self.assertIn('MAP_REFERENCE_MISSING', self.codes(report))
++
++    def test_optional_building_data_does_not_block_ground(self):
++        report = self.run_check(BuildingIndexPath='absent/index.txt', BulidVectorIndexPath='absent/vector.txt')
++        self.assertTrue(report['ok'], report['issues'])
++
++    def test_map_directory_branch_ignores_explicit_index_paths(self):
++        self.put('map/clutter/menu.txt', '1 urban\n')
++        report = self.run_check(MapPath='map', HeightIndexPath='absent', ClutterIndexPath='absent', ProjectionFilePath='absent')
++        self.assertTrue(report['ok'], report['issues'])
++
++    def test_map_directory_supports_engine_alternative_filenames(self):
++        self.put('alternate/height/projection', PROJECTION)
++        for kind in ('height', 'clutters'):
++            self.put(f'alternate/{kind}/index', 'tile.b 0 10 0 10 5\n')
++            self.put(f'alternate/{kind}/tile.b', b'12345678')
++        self.put('alternate/clutters/menu', '1 urban\n')
++        report = self.run_check(MapPath='alternate')
++        self.assertTrue(report['ok'], report['issues'])
++
++    def test_map_directory_and_explicit_indices_both_require_menu(self):
++        (self.bin / 'map/clutter/menu.txt').unlink()
++        report = self.run_check(MapPath='map')
++        self.assertIn('MAP_MENU_MISSING', self.codes(report))
++        self.values.pop('MapPath')
++        self.assertIn('MAP_MENU_MISSING', self.codes(self.run_check()))
++
++    def test_usable_buildings_leave_actual_floor_total_unknown_and_expose_cap(self):
++        import struct
++        self.put('map/buildings/index.txt', 'tile.b 0 10 0 10 5\n')
++        self.put('map/buildings/tile.b', struct.pack('>4h', 0, 6, 0, 3))
++        report = self.run_check(SpatialCalcMode='floor', BuildingIndexPath='map/buildings/index.txt', UsingBuildingPolygon='false')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertIsNone(report['context']['mode']['layer_count'])
++        self.assertEqual(report['context']['mode']['layer_cap'], 4)
++        self.assertEqual(report['context']['mode']['building_sample_height'], 6)
++
++    def test_stale_floor_cache_step_is_reported_without_deletion(self):
++        path = self.put('results/fixture/site/c1.loss3d.csv', b'PATHLOSS3D' + __import__('struct').pack('<II6q', 1, 60, 0, 1000, 500, 2, 2, 99))
++        before = path.read_bytes()
++        report = self.run_check(SpatialCalcMode='floor')
++        self.assertIn('CACHE_LAYER_MISMATCH', self.codes(report))
++        self.assertEqual(path.read_bytes(), before)
++
++    def test_same_step_cache_still_requires_demonstrable_input_compatibility(self):
++        self.put('results/fixture/site/c1.loss3d.csv', b'PATHLOSS3D' + __import__('struct').pack('<II6q', 1, 30, 0, 1000, 500, 2, 2, 99))
++        report = self.run_check(SpatialCalcMode='floor')
++        self.assertIn('CACHE_COMPATIBILITY_UNCONFIRMED', self.codes(report))
++        self.assertIn('FLOOR_DATA_REQUIRED', self.codes(report))
++
++    def test_duplicate_scalar_parameters_block_instead_of_last_wins(self):
++        self.run_check()
++        raw = self.schema.read_bytes().replace(b'</RuntimeSchema>', b'<SpatialCalcMode>3d</SpatialCalcMode></RuntimeSchema>')
++        self.schema.write_bytes(raw)
++        report = self.check(self.env, str(self.schema), 'pred', '007')
++        self.assertIn('SCHEMA_DUPLICATE_FIELD', self.codes(report))
++
++    def test_empty_polygon_falls_back_to_map_extent(self):
++        report = self.run_check(PolygonFilePath='')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertIn('REGION_MAP_FALLBACK', self.codes(report))
++
++    def indoor(self):
++        self.cells(indoor=True)
++        self.put('indoor/floor1.das', 'FloorID: 1\nAltitude: 3\n1 0 0 0\n0 0 0 4 0 0 4 0 3 0 0 3 0.2 1\n')
++
++    def test_indoor_uses_actual_das_floors_and_ignores_spatial_mode(self):
++        self.indoor()
++        report = self.run_check('predindoor', MapFormat='indoor', MapPath='indoor', SpatialCalcMode=' invalid ', DefaultFloorHeight='0', MaxCalcHeight='nan')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertEqual(report['context']['indoor_floors'], [1])
++        self.assertEqual(report['context']['mode']['effective'], 'indoor')
++        self.assertFalse(report['context']['mode']['applies'])
++        self.assertEqual(report['context']['mode']['layer_count'], 1)
++
++    def test_ap_floor_missing_from_das_blocks(self):
++        self.indoor()
++        self.put('indoor/floor1.das', 'FloorID: 2\nAltitude: 3\n1 0 0 0\n0 0 0 4 0 0 4 0 3 0 0 3 0.2 1\n')
++        report = self.run_check('predindoor', MapFormat='indoor', MapPath='indoor')
++        self.assertIn('AP_FLOOR_MISSING', self.codes(report))
++
++    def test_truncated_das_blocks(self):
++        self.indoor()
++        self.put('indoor/floor1.das', 'FloorID: 1\nAltitude: 3\n2 0 0 0\n')
++        report = self.run_check('predindoor', MapFormat='indoor', MapPath='indoor')
++        self.assertIn('INDOOR_MAP_INVALID', self.codes(report))
++
++    def calibration(self):
++        self.values.update({tag: value for tag, value in (
++            ('MaxPower', '0'), ('MinPower', '-140'), ('MinK0', '1'), ('MaxK0', '60'),
++            ('MinKnear', '0'), ('MaxKnear', '20'), ('MinDiff', '0'), ('MaxDiff', '20'),
++            ('MinRef', '0'), ('MaxRef', '20'), ('CalNewModelName', 'fixture'),
++            ('DriverTestFileDictionaryPath', 'dt'))})
++        self.put('dt/index.txt', 'measured.csv\n')
++        self.put('dt/measured.csv', 'PCTime,cellID,Lon,Lat,RSRP\n20250101,c1,119,26,-90\n')
++
++    def test_cali_uses_ground_rays_without_3d_or_polygon_requirements(self):
++        self.calibration()
++        report = self.run_check('cali', SpatialCalcMode='3d', DefaultFloorHeight='0', MaxCalcHeight='nan', PolygonFilePath='missing')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertEqual(report['context']['mode']['effective'], 'ground')
++        self.assertFalse(report['context']['mode']['applies'])
++
++    def test_cali_requires_index_references_not_arbitrary_csvs(self):
++        self.calibration()
++        (self.bin / 'dt/index.txt').unlink()
++        report = self.run_check('cali')
++        self.assertIn('DT_INDEX_REQUIRED', self.codes(report))
++
++    def test_cali_dt_unknown_cell_or_invalid_measurement_blocks(self):
++        self.calibration()
++        self.put('dt/measured.csv', 'PCTime,cellID,Lon,Lat,RSRP\n20250101,unknown,119,26,-90\n')
++        report = self.run_check('cali')
++        self.assertIn('DT_NO_USABLE_ROWS', self.codes(report))
++
++    def test_cali_constraint_pairs_and_disabled_targets_are_checked(self):
++        self.calibration()
++        report = self.run_check('cali', MinK0='100', IsLosCalibrated='false', IsNLosCalibrated='false')
++        self.assertIn('CALIBRATION_RANGE', self.codes(report))
++        self.assertIn('CALIBRATION_DISABLED', self.codes(report))
++
++    def test_permanent_models_use_bin_models(self):
++        self.calibration()
++        report = self.run_check('cali', ModelTemporaryStorage='false')
++        self.assertEqual(Path(report['context']['models_dir']), self.bin / 'models')
++
++    def test_cali_invalid_sampling_constraints_block(self):
++        self.calibration()
++        report = self.run_check('cali', MinSamples='0', Epoch='-1', MinDeltaKfar='20', MaxDeltaKfar='10')
++        self.assertIn('CALIBRATION_PARAMETER', self.codes(report))
++        self.assertIn('CALIBRATION_RANGE', self.codes(report))
++
++    def test_parameter_help_includes_base_and_floor_alias_without_default_edits(self):
++        spec = json.loads((BACKEND / 'params_spec.json').read_text(encoding='utf-8'))
++        params = {item['name']: item for item in spec['params']}
++        self.assertIn('floor', params['SpatialCalcMode']['desc'])
++        self.assertIn('building', params['SpatialCalcMode']['desc'])
++        self.assertIn('+1', params['MaxCalcHeight']['desc'])
++        self.assertEqual(params['SpatialCalcMode']['default'], '3d')
++        from function_profiles import function_profile
++        rules, _ = function_profile('cali', {'SpatialCalcMode': '3d'})
++        self.assertEqual(rules['SpatialCalcMode']['kind'], 'startup')
++        self.assertFalse(rules['MaxCalcHeight']['active'])
++
++    def rewrite_cells(self, header, rows):
++        with (self.bin / 'cells.csv').open('w', encoding='utf-8', newline='') as fh:
++            writer = csv.writer(fh)
++            writer.writerow(header)
++            writer.writerow(header)
++            writer.writerows(rows)
++
++    def test_floor_ignores_inactive_raster_when_vector_selected(self):
++        import struct
++        self.put('map/buildings/index.txt', 'tile.b 0 10 0 10 5\n')
++        self.put('map/buildings/tile.b', struct.pack('>4h', 0, 6, 0, 3))
++        report = self.run_check(SpatialCalcMode='floor', BuildingIndexPath='map/buildings/index.txt', UsingBuildingPolygon='true')
++        self.assertIn('FLOOR_DATA_REQUIRED', self.codes(report))
++
++    def test_floor_ignores_inactive_vector_when_raster_selected(self):
++        self.put('map/vector/index.txt', 'buildings attribute 0 10 0 10 buildings\n')
++        self.put('map/vector/buildings', '1 buildings 4\n0 0\n4 0\n4 4\n0 4\n')
++        self.put('map/vector/attribute', '1 "building" 6 129\n')
++        report = self.run_check(SpatialCalcMode='floor', BulidVectorIndexPath='map/vector/index.txt', UsingBuildingPolygon='false')
++        self.assertIn('FLOOR_DATA_REQUIRED', self.codes(report))
++
++    def test_missing_polygon_element_blocks_but_empty_element_remains_valid(self):
++        for func in ('pred', 'commsensing'):
++            report = self.run_check(func, PolygonFilePath=None)
++            self.assertIn('REGION_ELEMENT_REQUIRED', self.codes(report))
++
++    def test_dt_unfamiliar_header_is_warning_and_valid_positional_data_passes(self):
++        self.calibration()
++        self.put('dt/measured.csv', 'Time,ServingCell,Longitude,Latitude,Signal\n20250101,c1,119,26,-90\n')
++        report = self.run_check('cali')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertTrue(any(i['code'] == 'DT_HEADER' and i['severity'] == 'warning' for i in report['issues']))
++
++    def test_projection_requires_four_lines_and_finite_numeric_fields(self):
++        for text in ('UTM\n', 'WGS-84\n50\nUTM\n0 117 500000\n', 'WGS-84\n50\nUTM\n0 nan 500000 0\n'):
++            with self.subTest(text=text):
++                self.put('map/heights/projection.txt', text)
++                self.assertIn('MAP_PROJECTION_INVALID', self.codes(self.run_check()))
++
++    def test_identical_scalar_duplicates_warn_and_keep_engine_first_value(self):
++        self.run_check()
++        self.schema.write_bytes(self.schema.read_bytes().replace(b'</RuntimeSchema>', b'<DefaultFloorHeight>3</DefaultFloorHeight></RuntimeSchema>'))
++        report = self.check(self.env, str(self.schema), 'pred', '007')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertTrue(any(i['code'] == 'SCHEMA_DUPLICATE_FIELD' and i['severity'] == 'warning' for i in report['issues']))
++
++    def test_outdoor_loader_mandatory_columns_cannot_be_empty(self):
++        for tag in ('Site ID', 'Antenna', 'EPRE per antenna port', 'SensePower', 'Main Propagation Model', 'Channel Number', 'Mechanical Downtilt (°)', 'Number of Transmission Antennas', 'Number of Reception Antennas', 'Cell Type'):
++            with self.subTest(tag=tag):
++                row = OUTDOOR_ROW.copy()
++                row[OUTDOOR_HEADER.index(tag)] = ''
++                self.rewrite_cells(OUTDOOR_HEADER, [row])
++                self.assertIn('ENGINEERING_ROW', self.codes(self.run_check()))
++
++    def test_fixed_indoor_loader_mandatory_columns_cannot_be_empty(self):
++        self.indoor()
++        for tag in ('AP ID', 'Antenna', 'EPRE per antenna port', 'Main Propagation Model', 'Channel Number', 'Mechanical Downtilt (°)', 'Number of Transmission Antennas', 'Number of Reception Antennas', 'Traffic Load (UL) (%)', 'Cell Type'):
++            with self.subTest(tag=tag):
++                row = INDOOR_ROW.copy()
++                row[INDOOR_HEADER.index(tag)] = ''
++                self.rewrite_cells(INDOOR_HEADER, [row])
++                report = self.run_check('predindoor', MapFormat='indoor', MapPath='indoor')
++                self.assertIn('ENGINEERING_ROW', self.codes(report))
++
++    def test_unconfigured_reordered_engineering_layout_is_rejected(self):
++        header, row = OUTDOOR_HEADER.copy(), OUTDOOR_ROW.copy()
++        for values in (header, row):
++            values[13], values[18] = values[18], values[13]
++        self.rewrite_cells(header, [row])
++        self.assertIn('ENGINEERING_LAYOUT', self.codes(self.run_check()))
++
++    def test_configured_reordered_layout_uses_bin_cellformat(self):
++        header, row = OUTDOOR_HEADER.copy(), OUTDOOR_ROW.copy()
++        for values in (header, row):
++            values[13], values[18] = values[18], values[13]
++        self.rewrite_cells(header, [row])
++        path = self.bin / 'cellformat.xml'
++        path.write_text(path.read_text(encoding='utf-8').replace('<Antenna>N</Antenna>', '<Antenna>S</Antenna>').replace('<EPRE>S</EPRE>', '<EPRE>N</EPRE>'), encoding='utf-8')
++        report = self.run_check()
++        self.assertTrue(report['ok'], report['issues'])
++
++    def test_scene_settings_required_and_explicit_relative_path_is_used(self):
++        (self.bin / 'config/scenesettings.xml').unlink()
++        self.assertIn('SCENE_SETTINGS_MISSING', self.codes(self.run_check()))
++        self.put('custom-scene.xml', '<Cluttersettings/>')
++        self.assertTrue(self.run_check(SceneSettingsPath='custom-scene.xml')['ok'])
++
++    def test_output_path_colliding_with_a_file_blocks_without_creating_folders(self):
++        self.put('results', 'file blocks output directory')
++        self.assertIn('OUTPUT_NOT_DIRECTORY', self.codes(self.run_check()))
++
++    def test_outdoor_missing_model_reference_blocks_and_auto_model_needs_no_base_xml(self):
++        (self.bin / 'models/LiShuttleModel.xml').unlink()
++        self.assertIn('MODEL_REFERENCE_MISSING', self.codes(self.run_check()))
++        row = OUTDOOR_ROW.copy()
++        row[21] = 'LiShuttleAuto'
++        self.rewrite_cells(OUTDOOR_HEADER, [row])
++        self.assertTrue(self.run_check()['ok'])
++
++    def test_missing_antenna_or_gain_reference_blocks(self):
++        (self.bin / 'antennas/omni.txt').unlink()
++        self.assertIn('ANTENNA_GAIN_INVALID', self.codes(self.run_check()))
++        self.put('antennas/antenna.xml', '<AntennaSettings/>')
++        self.assertIn('ANTENNA_REFERENCE_MISSING', self.codes(self.run_check()))
++
++    def test_map_raster_shorter_than_declared_grid_blocks(self):
++        self.put('map/heights/tile.dat', b'12')
++        self.assertIn('MAP_RASTER_TRUNCATED', self.codes(self.run_check()))
++
++    def test_raster_building_branch_requires_input_even_for_ground(self):
++        report = self.run_check(UsingBuildingPolygon='false')
++        self.assertIn('MAP_INDEX_MISSING', self.codes(report))
++
++    def test_selected_vector_needs_matching_finite_geometry(self):
++        self.put('map/vector/index.txt', 'buildings attribute 0 10 0 10 buildings\n')
++        self.put('map/vector/buildings', '1 buildings 4\n0 0\n4 0\n4 4\n0 4\n')
++        self.put('map/vector/attribute', '1 "building" 5000 129\n')
++        report = self.run_check(SpatialCalcMode='floor', BulidVectorIndexPath='map/vector/index.txt')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertEqual(report['context']['mode']['building_sample_height'], 5000)
++        self.put('map/vector/buildings', '1 buildings 4\n0 0\n')
++        self.assertIn('FLOOR_DATA_REQUIRED', self.codes(self.run_check()))
++
++    def test_indoor_without_antenna_gain_does_not_require_gain_library_or_model_file(self):
++        self.indoor()
++        (self.bin / 'antennas/antenna.xml').unlink()
++        (self.bin / 'models/LiShuttleModel.xml').unlink()
++        report = self.run_check('predindoor', MapFormat='indoor', MapPath='indoor', AntGainCalced='false')
++        self.assertTrue(report['ok'], report['issues'])
++
++    def test_multiple_root_model_fragments_are_accepted(self):
++        path = self.bin / 'models/LiShuttleModel.xml'
++        path.write_text('<ModelVersion>1</ModelVersion>' + path.read_text(encoding='utf-8'), encoding='utf-8')
++        self.assertTrue(self.run_check()['ok'])
++
++    def test_ground_effective_height_preserves_configured_height(self):
++        mode = self.run_check()['context']['mode']
++        self.assertEqual(mode['max_height'], 0)
++        self.assertEqual(mode['configured_max_height'], 10)
++        self.calibration()
++        mode = self.run_check('cali', SpatialCalcMode='3d', MaxCalcHeight='10')['context']['mode']
++        self.assertEqual(mode['max_height'], 0)
++        self.assertEqual(mode['configured_max_height'], 10)
++
++    def test_presuffixed_antenna_requires_exact_loaded_beam(self):
++        row = OUTDOOR_ROW.copy()
++        row[13] = 'omni_6'
++        self.rewrite_cells(OUTDOOR_HEADER, [row])
++        self.put('antennas/antenna.xml', '<AntennaSettings><AntennaEntity name="omni"><MaxGain>11</MaxGain><Broadcast_Beam_FILE electilt="7">omni.txt</Broadcast_Beam_FILE></AntennaEntity></AntennaSettings>')
++        self.assertIn('ANTENNA_REFERENCE_MISSING', self.codes(self.run_check()))
++
++    def test_base_antenna_selects_nonzero_tilt_when_loaded(self):
++        self.put('antennas/antenna.xml', '<AntennaSettings><AntennaEntity name="omni"><MaxGain>11</MaxGain><Broadcast_Beam_FILE>omni.txt</Broadcast_Beam_FILE><Broadcast_Beam_FILE electilt="7">omni.txt</Broadcast_Beam_FILE></AntennaEntity></AntennaSettings>')
++        report = self.run_check()
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertEqual(report['context']['resources']['antenna_gains'][0]['tilt'], 7)
++
++    def test_sensing_antenna_is_required_only_for_commsensing(self):
++        row = OUTDOOR_ROW.copy()
++        row[14] = 'missing-sensing'
++        self.rewrite_cells(OUTDOOR_HEADER, [row])
++        self.assertTrue(self.run_check()['ok'])
++        self.assertIn('ANTENNA_REFERENCE_MISSING', self.codes(self.run_check('commsensing')))
++
++    def test_output_parent_must_exist_for_nonrecursive_engine_mkdir(self):
++        report = self.run_check(PathlossDirectory='missing/parent/results')
++        self.assertIn('OUTPUT_PARENT_MISSING', self.codes(report))
++        self.assertFalse((self.bin / 'missing').exists())
++
++    def test_task_components_reject_windows_reserved_characters(self):
++        self.run_check()
++        for char in '<>:"|?*':
++            with self.subTest(char=char):
++                self.assertIn('INVALID_TASK_NAME', self.codes(self.check(self.env, str(self.schema), 'pred', 'bad' + char)))
++                root = ET.parse(self.schema).getroot()
++                root.set('name', 'bad' + char)
++                self.schema.write_bytes(ET.tostring(root, encoding='utf-8'))
++                self.assertIn('INVALID_TASK_NAME', self.codes(self.check(self.env, str(self.schema), 'pred', '007')))
++
++    def test_dynamic_runtime_checks_are_explicitly_unconfirmed(self):
++        report = self.run_check()
++        self.assertTrue(any(i['code'] == 'RUNTIME_RESOURCES_UNCONFIRMED' and i['severity'] == 'warning' for i in report['issues']))
++
++    def test_legacy_35_column_layout_uses_defaults_when_format_file_missing(self):
++        (self.bin / 'cellformat.xml').unlink()
++        # Original CellLoader.h layout, before the sensing columns were added.
++        positions = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16,
++            17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
++            31, 32, 33, 34, 35, 36]
++        self.rewrite_cells([OUTDOOR_HEADER[i] for i in positions], [[OUTDOOR_ROW[i] for i in positions]])
++        report = self.run_check()
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertIn('ENGINEERING_FORMAT_DEFAULT', self.codes(report))
++
++    def test_unrepresentable_raster_geometry_returns_json_safe_error(self):
++        for line in ('tile.dat 0 10 0 10 1e308',
++                'tile.dat -1e308 1e308 0 10 5', 'tile.dat 0 10 0 10 1e-308'):
++            with self.subTest(line=line):
++                self.put('map/heights/index.txt', line + '\n')
++                try:
++                    report = self.run_check()
++                except (OverflowError, ValueError) as exc:
++                    self.fail(f'check_run must return an error report: {exc}')
++                self.assertFalse(report['ok'])
++                self.assertIn('MAP_INDEX_INVALID', self.codes(report))
++                json.dumps(report, allow_nan=False)
++
++    def test_building_evidence_ignores_samples_after_declared_grid(self):
++        import struct
++        self.put('map/buildings/index.txt', 'tile.b 0 10 0 10 5\n')
++        self.put('map/buildings/tile.b', struct.pack('>5h', 0, 0, 0, 0, 6))
++        report = self.run_check(SpatialCalcMode='floor', BuildingIndexPath='map/buildings/index.txt', UsingBuildingPolygon='false')
++        self.assertIn('FLOOR_DATA_REQUIRED', self.codes(report))
++
++    def test_building_evidence_accepts_valid_grid_with_odd_trailing_byte(self):
++        import struct
++        self.put('map/buildings/index.txt', 'tile.b 0 10 0 10 5\n')
++        self.put('map/buildings/tile.b', struct.pack('>4h', 0, 6, 0, 3) + b'X')
++        report = self.run_check(SpatialCalcMode='floor', BuildingIndexPath='map/buildings/index.txt', UsingBuildingPolygon='false')
++        self.assertTrue(report['ok'], report['issues'])
++        self.assertEqual(report['context']['mode']['building_sample_height'], 6)
++
++    def test_legacy_indoor_functions_use_indoor_family_and_remain_unconfirmed(self):
++        self.indoor()
++        for func in ('plindoor', 'indoorrays'):
++            with self.subTest(func=func):
++                report = self.run_check(func, MapFormat='indoor', MapPath='indoor', SpatialCalcMode='invalid')
++                self.assertTrue(report['ok'], report['issues'])
++                self.assertIn('FUNCTION_UNREVIEWED', self.codes(report))
++                self.assertEqual(report['context']['mode']['effective'], 'indoor')
++                self.assertEqual(report['context']['function_contract'], 'unconfirmed')
++
++    def test_unreviewed_functions_check_common_inputs_without_outdoor_contract(self):
++        for func in ('debug', 'test', 'custom-function'):
++            with self.subTest(func=func):
++                report = self.run_check(func, EngineeringFilePath=None, MapFormat='custom',
++                    MapPath='missing', PolygonFilePath=None, DefaultCalcResolution='0', SpatialCalcMode='invalid')
++                self.assertTrue(report['ok'], report['issues'])
++                self.assertIn('FUNCTION_UNREVIEWED', self.codes(report))
++                self.assertEqual(report['context']['function_contract'], 'unconfirmed')
++                self.assertIsNone(report['context']['mode']['layer_count'])
++        report = self.run_check('debug', PathlossDirectory=None)
++        self.assertIn('OUTPUT_REQUIRED', self.codes(report))
++        (self.bin / 'lishuttle.exe').unlink()
++        self.assertIn('EXE_MISSING', self.codes(self.run_check('test')))
++
++
++if __name__ == '__main__':
++    unittest.main()

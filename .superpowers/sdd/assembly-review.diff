@@ -1,0 +1,348 @@
+diff --git a/platform/backend/server.py b/platform/backend/server.py
+index d0aed2f..e5da717 100644
+--- a/platform/backend/server.py
++++ b/platform/backend/server.py
+@@ -359,21 +359,22 @@ class Api:
+         copy_antennas = copy_antennas and bool(task.get('has_antennas'))
+         preview = None
+         if reuse:
+             try:
+                 preview = core.preview_task_schema(body, task, city_kind)
+             except ValueError as exc:
+                 return {'error': str(exc)}
+             if body.get('preview_only'):
+                 return preview
+             if body.get('preview_token') != preview['token']:
+-                return {'error': '配置或路径选择已变化，请重新预览后确认装配'}
++                return {'error': '配置或路径选择已变化，请重新预览后确认装配',
++                        'code': 'PREVIEW_STALE'}
+         try:
+             base_resources = core.ensure_runtime_resources(core.load_env())
+         except (OSError, ValueError) as exc:
+             return {'error': f'基础运行资源装配失败：{exc}'}
+         job_file = core.build_job_env(job_name, func, task_id, task,
+                                       city_name, city_kind)
+         rc, output = core.run_render(job_file)
+         result = {"job_file": job_file, "render_exit": rc, "render_output": output,
+                   "schema_name": f"{job_name}.xml", "func": func, "task_id": task_id,
+                   "copied": [], "base_resources": base_resources}
+diff --git a/platform/frontend/app.js b/platform/frontend/app.js
+index 9b0bc27..4efcdb9 100644
+--- a/platform/frontend/app.js
++++ b/platform/frontend/app.js
+@@ -607,32 +607,55 @@ function renderTasks(tasks) {
+     $("schema-polygon").replaceChildren(new Option("不使用区域（将 PolygonFilePath 设为空）", ""));
+     (S.task.txts || []).forEach(p => $("schema-polygon").add(new Option(p.slice(S.task.dir.length + 1), p)));
+     updateSchemaMode();
+     refreshLocalPaths({});
+     restoreTaskBinding();
+     if (!$("job-name").value) $("job-name").value = `${S.task.name}-${S.func}`;
+   });
+ }
+ 
+ let schemaPreviewRevision = 0;
++let schemaPreview = null;
++let schemaSubmissionPending = false;
++function schemaPreviewContext() {
++  return JSON.stringify({project:S.project, epoch:S.projectEpoch, revision:S.profileRevision,
++    machineRevision:S.machineRevision, config:S.projectConfig, draft:S.projectDraft,
++    func:S.func, city:S.city, task:S.task,
++    fields:['job-name','task-id','schema-source','schema-polygon'].map(id=>$(id).value),
++    flags:['use-existing-schema','sync-engineering','copy-files','copy-antennas'].map(id=>$(id).checked),
++    paths:collectLocalPaths()});
++}
++function schemaPreviewCurrent(record = schemaPreview) {
++  return !!record && record === schemaPreview && record.revision === schemaPreviewRevision &&
++    record.context === schemaPreviewContext();
++}
++function refreshSchemaApplyState() {
++  const valid = schemaPreviewCurrent();
++  const reason = !valid ? '请重新预览当前配置' : schemaSubmissionPending ? '正在装配，请稍候' :
++    S.runtime?.busy ? '平台正在执行操作，请等待空闲' : '';
++  $('btn-apply-schema').disabled = !!reason;
++  $('btn-apply-schema').title = reason;
++  return !reason;
++}
+ function updateAntennaOption() {
+   const available = !!(S.task && S.task.has_antennas);
+   $("antenna-option").classList.toggle("hidden", !available);
+   $("copy-antennas").disabled = !available;
+   $("copy-antennas").checked = available;
+ }
+ 
+ function invalidateSchemaPreview() {
+   schemaPreviewRevision++;
++  schemaPreview = null;
+   bindingRevision++;
+   $("schema-preview").classList.add("hidden");
+-  $("btn-apply-schema").disabled = true;
++  refreshSchemaApplyState();
+ }
+ 
+ function updateSchemaMode() {
+   const reuse = $("use-existing-schema").checked;
+   $("schema-source").disabled = !reuse;
+   $("sync-engineering").disabled = !reuse;
+   $("copy-files").disabled = reuse;
+   $("existing-schema-options").classList.toggle("hidden", !reuse);
+   $("btn-render").textContent = reuse ? "预览路径修改" : "装配并渲染";
+   invalidateSchemaPreview();
+@@ -818,88 +841,116 @@ async function doRender() {
+   if (!S.city) return missing('city-list','先在左侧选择城市/场景');
+   if (!S.task) return missing('task-list','先在左侧选择工参任务');
+   const reuse = $("use-existing-schema").checked;
+   if ((!reuse || $("sync-engineering").checked) && !S.task.engineering_file)
+     return missing('engineering-path',S.task.engineering_reason || '请选择装配工参');
+   if (reuse && !$("schema-source").value) return missing('schema-source','请选择已有运行配置 XML');
+   const jobName = $("job-name").value.trim();
+   if (!jobName) return missing('job-name','先填任务名');
+   const body = {
+     job_name: jobName, func: S.func, task_id: $("task-id").value || "1",
+-    task: S.task, city: S.city.name, city_kind: S.city.kind,
++    task: JSON.parse(JSON.stringify(S.task)), city: S.city.name, city_kind: S.city.kind,
+     engineering_file: S.task.engineering_file,
+     copy_files: !reuse && $("copy-files").checked,
+     copy_antennas: !!S.task.has_antennas && $("copy-antennas").checked,
+     use_existing_schema: reuse, schema_source: $("schema-source").value,
+     sync_engineering: $("sync-engineering").checked, polygon_file: $("schema-polygon").value,
+     path_overrides: collectLocalPaths(),
+     previous_schema: S.job?.schema || '',
+   };
+   if (reuse) {
+     invalidateSchemaPreview();
+     const revision = schemaPreviewRevision;
+-    const p = await post("preview_render", body);
+-    if (revision !== schemaPreviewRevision) return;
++    const context = schemaPreviewContext();
++    let p;
++    try { p = await post("preview_render", body); }
++    catch (error) { if (revision === schemaPreviewRevision) toast(`预览失败：${error.message}，请重新预览`, false); return; }
++    if (revision !== schemaPreviewRevision || context !== schemaPreviewContext()) return;
+     if (p.error) return setupError(p);
+     $("schema-preview-text").textContent =
+       `源文件：${p.source}\n目标文件：${p.destination}\n任务 name：${p.runtime_name}\n实际输出目录：${p.out_dir}\n` +
+       `覆盖已有目标前备份为 .bak。源文件保持不变。\n\n` +
+       `确认后自动补齐当前项目 ThirdPart 基础运行资源，保留已存在文件。\n\n` +
+       (body.copy_antennas ? `另装配任务天线：${S.task.antenna_dir || S.task.antenna || "无任务天线，将按现有规则恢复项目默认天线 XML"}\n\n` : "不装配天线，保留项目现有天线文件。\n\n") +
+       p.changes.map(c => `${c.tag}\n  原：${c.old || "（空）"}\n  新：${c.new || "（空）"}`).join("\n") +
+       (p.warnings.length ? "\n\n提示：\n" + p.warnings.join("\n") : "");
+     $("schema-preview").classList.remove("hidden");
+-    $("btn-apply-schema").disabled = false;
+-    $("btn-apply-schema").onclick = async () => {
+-      $("btn-apply-schema").disabled = true;
+-      await submitRender({ ...body, preview_token: p.token });
++    const record = {revision, context, body:JSON.parse(JSON.stringify(body)), token:p.token};
++    schemaPreview = record;
++    refreshSchemaApplyState();
++    $('btn-apply-schema').onclick = async () => {
++      if (!schemaPreviewCurrent(record)) {
++        if (schemaPreview === record) invalidateSchemaPreview();
++        return;
++      }
++      if (!refreshSchemaApplyState()) return;
++      schemaSubmissionPending = true;
++      refreshSchemaApplyState();
++      try {
++        const outcome = await submitRender({...record.body, preview_token:record.token}, record);
++        if (['applied','preview_stale','outcome_unknown'].includes(outcome.status) && schemaPreview === record)
++          invalidateSchemaPreview();
++      } finally {
++        schemaSubmissionPending = false;
++        refreshSchemaApplyState();
++      }
+     };
+     return;
+   }
+   await submitRender(body);
+ }
+ 
+-async function submitRender(body) {
++async function submitRender(body, previewRecord = null) {
+   const epoch = S.projectEpoch;
+   const jobName = body.job_name;
+-  const r = await post("render", body);
+-  if (epoch !== S.projectEpoch) return;
+-  if (r.error) return setupError(r);
++  let r;
++  try { r = await post("render", body); }
++  catch (error) {
++    toast(`装配请求中断，结果待核对：${error.message}。请核对状态并重新预览后再确认`, false);
++    return {status:'outcome_unknown'};
++  }
++  if (epoch !== S.projectEpoch || (previewRecord && !schemaPreviewCurrent(previewRecord))) return {status:'preview_stale'};
++  if (r.error) {
++    if (r.code === 'RUNTIME_BUSY' && !r.runtime) applyRuntimeState({...S.runtime, busy:true});
++    setupError(r);
++    return {status:r.code === 'PREVIEW_STALE' ? 'preview_stale' : r.code === 'RUNTIME_BUSY' ? 'runtime_busy' : 'retryable_error'};
++  }
+   const ro = $("render-output");
+   ro.classList.remove("hidden");
+   const base = r.base_resources;
+   const baseLog = base ? `基础运行资源：补齐 ${base.copied.length} 个文件，保留 ${base.kept_count} 个已有文件\n` +
+     `配置来源：${base.config_source}\n动态库来源：${base.dll_source}\n目标：${base.exe_dir}\n` +
+     base.copied.map(c => `${c.from} → ${c.to}`).join("\n") + "\n\n" : "";
+   const launch = r.vs_launch;
+   const launchLog = launch ? `\n\nVisual Studio 启动项：${launch.path}\n` +
+     launch.entries.join("\n") + (launch.backup ? `\n原文件备份：${launch.backup}` : "") : "";
+   ro.textContent = baseLog + (r.render_output || "(无输出)") + launchLog +
+     (r.vs_launch_warning ? `\n\n${r.vs_launch_warning}` : "");
+   if (!r.schema_ok) {
+     toast("渲染失败：没生成运行单，看下方输出", false);
+-    return;
++    return {status:"retryable_error"};
+   }
+   if (r.render_exit !== 0) {
+     toast("运行单已生成，但有输入文件缺失（下方标 [缺失]）——参数面板仍可改路径", false);
+   }
+ 
+   S.job = { name: jobName, schema: r.schema_name, func: r.func, taskId: r.task_id, outDir: r.out_dir };
+   resetCleanupPreview();
+   taskIdentityChanged();
+   $('result-job').value = r.runtime_name || jobName;
+   const copied = (r.copied || []).map(c => `${c.file} → ${c.to} ${c.backup}`).join("\n");
+   toast(`渲染完成：${r.schema_name}${copied ? "\n已替换：" + copied : ""}`);
+   if (r.vs_launch_warning) toast(r.vs_launch_warning, false);
+   updateNote();
+   switchTab(document.querySelector('[data-tab="params"]'));
+   loadParams();
++  return {status:"applied"};
+ }
+ 
+ let parameterRequest = 0;
+ async function loadParams() {
+   const job = S.job;
+   if (!job) return;
+   const func = S.func || job.func, request = ++parameterRequest;
+   if (S.paramsForJob !== job) {
+     $('params-area').innerHTML = '';
+     $('params-toolbar').classList.add('hidden');
+@@ -1161,28 +1212,30 @@ const runtimeDisabled = new WeakMap();
+ function applyRuntimeState(state, restore = false) {
+   if (!state || state.error) return;
+   S.runtime = state;
+   S.runtimeSerial = (S.runtimeSerial || 0) + 1;
+   const phases = {preparing:'准备中',running:'运行中',cancelling:'取消中',finalizing:'验证结果中'};
+   $('runtime-status').textContent = state.busy
+     ? `${state.func || state.label || '任务'}：${phases[state.phase] || state.phase}；相关输入已锁定` : '平台空闲';
+   const controls = [...document.querySelectorAll('[data-runtime-write]'),
+     ...document.querySelectorAll('#params-area input, #params-area select, #params-area button, #csv-wrap input, #csv-wrap select, #project-config-form input, #project-config-form select, #machine-config-form input')];
+   controls.forEach(node => {
++    if (node === $('btn-apply-schema')) { runtimeDisabled.delete(node); return; }
+     if (state.busy) {
+       if (!runtimeDisabled.has(node)) runtimeDisabled.set(node, !!node.disabled);
+       node.disabled = true;
+     } else if (runtimeDisabled.has(node)) {
+       node.disabled = runtimeDisabled.get(node);
+       runtimeDisabled.delete(node);
+     }
+   });
++  refreshSchemaApplyState();
+   if (restore && state.busy && state.sid && S.sid !== state.sid) attachConsole(state.sid, `恢复会话 ${state.sid}：`);
+ }
+ 
+ async function refreshRuntimeState(restore = false) {
+   if (S.runtimeRefreshPending) return;
+   S.runtimeRefreshPending = true;
+   const serial = S.runtimeSerial || 0;
+   try {
+     const state = await get('runtime_state');
+     if (serial === (S.runtimeSerial || 0)) applyRuntimeState(state, restore);
+diff --git a/tests/test_task_schema.py b/tests/test_task_schema.py
+index fdb8314..153c283 100644
+--- a/tests/test_task_schema.py
++++ b/tests/test_task_schema.py
+@@ -209,20 +209,21 @@ class TaskSchemaTests(unittest.TestCase):
+ 
+     def test_api_preview_does_not_write_and_rejects_changed_source(self):
+         body = self.preview_body()
+         with patch.object(core, 'load_env', return_value=self.env), patch.object(core, 'build_job_env') as build:
+             preview = Api.preview_render(body)
+             self.assertIn('token', preview)
+             build.assert_not_called()
+             self.source.write_bytes(self.text.replace('>123<', '>124<').encode('utf-8'))
+             result = Api.render(dict(body, preview_token=preview['token']))
+             self.assertIn('error', result)
++            self.assertEqual(result.get('code'), 'PREVIEW_STALE')
+             build.assert_not_called()
+ 
+     def test_api_apply_persists_reuse_and_skips_shared_resource_changes(self):
+         body = self.preview_body()
+         def render_job(path):
+             job = renderer.read_env_file(path, 'job')
+             with contextlib.redirect_stdout(io.StringIO()):
+                 rc = renderer.do_render(self.env, job, 'test', renderer.ROOT + '/jobs/test.env',
+                                         renderer.ROOT + '/env/test.env')
+             return rc, ''
+diff --git a/tests/test_assembly_recovery_ui.cjs b/tests/test_assembly_recovery_ui.cjs
+new file mode 100644
+index 0000000..89511c9
+--- /dev/null
++++ b/tests/test_assembly_recovery_ui.cjs
+@@ -0,0 +1,67 @@
++const fs = require('node:fs');
++const vm = require('node:vm');
++const assert = require('node:assert/strict');
++const path = require('node:path');
++const nodes = new Map();
++function element(id) {
++  if (!nodes.has(id)) {
++    const classes = new Set();
++    nodes.set(id, { value:'', checked:false, disabled:false, textContent:'', style:{},
++      classList:{add:c=>classes.add(c),remove:c=>classes.delete(c),contains:c=>classes.has(c),toggle(){}},
++      focus(){}, scrollIntoView(){}, querySelectorAll(){return [];} });
++  }
++  return nodes.get(id);
++}
++const context = vm.createContext({document:{getElementById:element,querySelector:()=>null,querySelectorAll:()=>[element('btn-apply-schema')]},setTimeout(){}});
++vm.runInContext(fs.readFileSync(path.join(__dirname,'../platform/frontend/app.js'),'utf8').replace(/init\(\);\s*$/,''),context);
++const run = s=>vm.runInContext(s,context);
++run(`S.city={name:'city',kind:'outdoor'}; S.task={name:'task',engineering_file:'a.csv'};`);
++element('job-name').value='job'; element('schema-source').value='a.xml'; element('use-existing-schema').checked=true;
++let renderReply = {error:'retry'};
++let requests=[];
++context.fetch=async(url,options)=>{
++  const payload=JSON.parse(options.body); requests.push({url,payload});
++  if(url.endsWith('preview_render')) { run('applyRuntimeState({busy:true})'); return {json:async()=>({source:'a',destination:'b',changes:[],warnings:[],token:'token'})}; }
++  if(renderReply instanceof Error) throw renderReply;
++  return {json:async()=>renderReply};
++};
++(async()=>{
++  await run('doRender()'); run('applyRuntimeState({busy:false})');
++  assert.equal(element('btn-apply-schema').disabled,false,'idle must preserve a valid preview');
++  const oldHandler=element('btn-apply-schema').onclick;
++  await oldHandler(); assert.equal(element('btn-apply-schema').disabled,false,'ordinary error can retry');
++  renderReply={schema_ok:false}; await oldHandler(); assert.equal(element('btn-apply-schema').disabled,false,'schema failure can retry');
++  run('applyRuntimeState({busy:true}); invalidateSchemaPreview(); applyRuntimeState({busy:false})');
++  assert.equal(element('btn-apply-schema').disabled,true,'idle cannot revive an invalidated preview');
++  const count=requests.length; await oldHandler(); assert.equal(requests.length,count,'old handler cannot write');
++  await run('doRender()'); run('applyRuntimeState({busy:false})');
++  run(`S.task.engineering_file='mutated.csv'`);
++  const before=requests.length; await element('btn-apply-schema').onclick();
++  assert.equal(requests.length,before,'direct mutable context change invalidates handler');
++  await run('doRender()'); run('applyRuntimeState({busy:false})');
++  renderReply=new Error('offline'); await element('btn-apply-schema').onclick();
++  assert.equal(element('btn-apply-schema').disabled,true,'unknown write outcome requires new preview');
++  assert.match(element('hint').textContent,/重新预览/);
++  await run('doRender()'); run('applyRuntimeState({busy:false})');
++  renderReply={error:'expired',code:'PREVIEW_STALE'}; await element('btn-apply-schema').onclick();
++  assert.equal(element('btn-apply-schema').disabled,true);
++  await run('doRender()'); run('applyRuntimeState({busy:false})');
++  renderReply={error:'busy',code:'RUNTIME_BUSY',runtime:{busy:true}}; await element('btn-apply-schema').onclick();
++  assert.equal(element('btn-apply-schema').disabled,true); run('applyRuntimeState({busy:false})');
++  assert.equal(element('btn-apply-schema').disabled,false);
++  let resolve; context.fetch=async()=>new Promise(r=>{resolve=r;});
++  const handler=element('btn-apply-schema').onclick; const pending=handler(); await Promise.resolve();
++  await handler(); assert.equal(element('btn-apply-schema').disabled,true);
++  resolve({json:async()=>({error:'retry'})}); await pending;
++  assert.equal(element('btn-apply-schema').disabled,false);
++  context.fetch=async(url)=>({json:async()=> url.endsWith('preview_render')
++    ? {source:'a',destination:'b',changes:[],warnings:[],token:'next'}
++    : {schema_ok:true,render_exit:0,schema_name:'job.xml',func:'pl',task_id:'1',out_dir:'/out'}});
++  run('switchTab=()=>{}; loadParams=()=>{}; updateNote=()=>{};');
++  await run('doRender()'); await element('btn-apply-schema').onclick();
++  assert.equal(element('schema-preview').classList.contains('hidden'),true,'successful assembly clears preview');
++  assert.equal(element('btn-apply-schema').disabled,true);
++  assert.equal(run('S.job.schema'),'job.xml');
++  console.log('PASS: assembly preview validity, busy/idle races, retry, stale token, network recovery and duplicate guard');
++})().catch(e=>{console.error(e);process.exitCode=1;});
++
