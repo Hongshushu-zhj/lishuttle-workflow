@@ -12,7 +12,7 @@ function el(id) {
   return nodes.get(id);
 }
 const ctx = vm.createContext({document:{getElementById:el,querySelectorAll:()=>[]},setTimeout(){}});
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/, ''),ctx);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/, ''),ctx);
 const run = code => vm.runInContext(code,ctx);
 const result = {values:{PRESET:'release',BUILD_SUBDIR:'build/release',CMAKE:'/tools/cmake.exe'},
   fields:{PRESET:{source:'CMakePresets.json',candidates:[{value:'release',label:'Release · 已编译'},{value:'debug',label:'Debug'}]},

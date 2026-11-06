@@ -91,7 +91,7 @@ class ProjectStore:
                 else:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def _read(self):
+    def _read(self, persist=True):
         legacy = {}
         if self.file.is_file():
             data = json.loads(self.file.read_text(encoding='utf-8'))
@@ -107,28 +107,30 @@ class ProjectStore:
                 data['profiles'][key] = self._blank(path)
                 data['profiles'][key]['values'].update({k: legacy[k] for k in FIELDS if k in legacy})
             backup = Path(str(self.env_file) + '.profiles.bak')
-            if self.env_file.is_file() and not backup.exists():
+            if persist and self.env_file.is_file() and not backup.exists():
                 shutil.copy2(self.env_file, backup)
         if 'machine' not in data:
             # Use the active profile only; never combine conflicting old toolchains.
             backup = Path(str(self.file) + '.machine.bak')
-            if self.file.is_file() and not backup.exists():
+            if persist and self.file.is_file() and not backup.exists():
                 shutil.copy2(self.file, backup)
             active = data['profiles'].get(data['active'], {}).get('values', legacy)
             data['machine'] = {'revision': 1, 'values': {key: active.get(key, '') for key in MACHINE_FIELDS}}
             for profile in data['profiles'].values():
                 for key in MACHINE_FIELDS:
                     profile['values'].pop(key, None)
-            atomic_json(self.file, data)
+            if persist:
+                atomic_json(self.file, data)
         retired = [profile for profile in data['profiles'].values() if 'CASE_ROOT' in profile['values']]
         if retired:
             backup = Path(str(self.file) + '.retired-fields.bak')
-            if not backup.exists():
+            if persist and not backup.exists():
                 shutil.copy2(self.file, backup)
             for profile in retired:
                 profile['values'].pop('CASE_ROOT')
                 profile['revision'] += 1
-            atomic_json(self.file, data)
+            if persist:
+                atomic_json(self.file, data)
         return data
 
     @staticmethod
@@ -142,9 +144,11 @@ class ProjectStore:
                     MACHINE_CONFIG_REVISION=str(data['machine'].get('revision', 1)), PROJECT_DIR=profile['path'],
                     PROJECT_PROFILE_ID=key, PROJECT_PROFILE_REVISION=str(profile['revision']))
 
-    def load(self, project=None, allow_empty=False):
-        with self._locked():
-            data = self._read()
+    def load(self, project=None, allow_empty=False, read_only=False):
+        # Runtime queries may interpret legacy configuration in memory, but
+        # must not create a lock, backup or migrated profile while inputs are held.
+        with LOCK if read_only else self._locked():
+            data = self._read(persist=not read_only)
             key = project_id(project) if project else data['active']
             if allow_empty and not project and not key:
                 return dict(dict.fromkeys(FIELDS + IDENTITY, ''), **data['machine']['values'],
@@ -153,9 +157,9 @@ class ProjectStore:
                 raise ValueError('尚未配置本地项目，请在网页添加项目并保存配置')
             return self._env(key, data['profiles'][key], data)
 
-    def paths(self):
-        with self._locked():
-            return [p['path'] for p in self._read()['profiles'].values()]
+    def paths(self, read_only=False):
+        with LOCK if read_only else self._locked():
+            return [p['path'] for p in self._read(persist=not read_only)['profiles'].values()]
 
     def select(self, path):
         with self._locked():
@@ -241,9 +245,11 @@ class ProjectStore:
             return {'values': dict(current), 'candidates': dict(candidates, toolchains=machine.get('toolchains', {})),
                     'filled': list(fill)}
 
-    def binding(self, key, value=None, project=None):
-        with self._locked():
-            data = self._read()
+    def binding(self, key, value=None, project=None, read_only=False):
+        if read_only and value is not None:
+            raise ValueError('只读查询不能保存任务绑定')
+        with LOCK if read_only else self._locked():
+            data = self._read(persist=not read_only)
             profile = data['profiles'][project_id(project) if project else data['active']]
             if value is not None:
                 profile['bindings'][key] = value

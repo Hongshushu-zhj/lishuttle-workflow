@@ -102,6 +102,7 @@ class ProjectWorkflowTests(unittest.TestCase):
         self.store.save_machine(tools)
         with patch.object(core,'ENV_FILE',str(self.store.env_file)),patch.object(core,'start_toolkit',return_value=(9,'build.bat')):
             response=Api.toolkit({'step':'build','preset':'win-debug'})
+            self.assertIn('runtime', response, 'tool startup must immediately return authoritative input occupancy')
             self.assertNotIn('error',response)
             self.assertEqual(response['build_values']['PRESET'],'win-debug')
             self.assertEqual(self.store.load()['BUILD_SUBDIR'],'out/build/win-debug')

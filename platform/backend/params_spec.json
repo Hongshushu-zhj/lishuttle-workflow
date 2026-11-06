@@ -171,7 +171,7 @@
    "type": "text",
    "applies": "outdoor",
    "default": "3d",
-   "desc": "3d=分层立体计算，ground=仅地面。ground时高度层数自动归零"
+   "desc": "ground=仅地面基底层；floor/building=按实际建筑楼层；3d=按固定高度步长分层。pred/commsensing 生效，室内使用 DAS 实际楼层，cali 使用地面实测射线。引擎忽略大小写但不去除首尾空格"
   },
   {
    "name": "MaxHops",
@@ -216,7 +216,7 @@
    "type": "int",
    "applies": "outdoor",
    "default": "3",
-   "desc": "层数=MaxCalcHeight/DefaultFloorHeight。100/10=10m到100m共10层；3/3=只有3m一层"
+   "desc": "3d 总层数=floor(MaxCalcHeight/DefaultFloorHeight)+1，包含0米基底层。例如10/3为0、3、6、9米共4层；不会补出10米层。floor/building 还受实际建筑楼层限制；ground仅1层"
   },
   {
    "name": "DefaultFloorHeight",
@@ -225,7 +225,7 @@
    "type": "int",
    "applies": "outdoor",
    "default": "3",
-   "desc": "每层高度，与MaxCalcHeight一起决定输出层数"
+   "desc": "室外楼层/3d 高度步长，必须大于0；3d 包含0米基底层，总层数=floor(MaxCalcHeight/DefaultFloorHeight)+1。室内预测采用 DAS 中实际楼层，不由此项生成楼层"
   },
   {
    "name": "UsingBuildingPolygon",

@@ -10,7 +10,7 @@ function el(id){
   }return nodes.get(id);
 }
 const ctx=vm.createContext({document:{getElementById:el,querySelectorAll:()=>[],querySelector:()=>null},setTimeout(){}});
-vm.runInContext(fs.readFileSync('platform/frontend/app.js','utf8').replace(/init\(\);\s*$/,''),ctx);
+vm.runInContext(require('./frontend_source.cjs')().replace(/init\(\);\s*$/,''),ctx);
 const run=code=>vm.runInContext(code,ctx);
 run(`S.project='/project';S.profileId='project';S.profileRevision='1';S.projectEpoch=1;
   S.projectConfig={};S.projectDraft={};S.configTouched=new Set();S.projectManualFields=new Set();
@@ -58,7 +58,8 @@ run(`S.project='/project';S.profileId='project';S.profileRevision='1';S.projectE
     attachConsole=(sid,title,done)=>{S.buildDone=done};switchTab=()=>{};`);
   const pendingBuild=run("toolkit('build')");
   run("chooseBuildMode('debug');editProjectConfig('DLL_SRC','custom/new-dll')");
-  startReply({sid:7,...ctx.finished});await pendingBuild;
+  startReply({sid:7,...ctx.finished,runtime:{busy:true,phase:'running',sid:7,label:'build'}});await pendingBuild;
+  assert.equal(run('S.runtime.sid'),7,'tool startup applies authoritative occupancy before its first poll');
   assert.equal(run('S.projectDraft.PRESET'),'debug');
   await run('S.buildDone()');
   assert.equal(run('S.projectDraft.PRESET'),'debug','completion preserves changes made before start reply');

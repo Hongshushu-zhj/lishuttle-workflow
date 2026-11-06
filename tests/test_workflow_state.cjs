@@ -1,0 +1,54 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const path = require('node:path');
+const file = path.join(__dirname, '../platform/frontend/workflow-state.js');
+assert.ok(fs.existsSync(file), 'workflow state model must exist');
+const W = require(file);
+const ready = {project: {ready: true}, build: {ready: true, executableReady: true, compilerReady: false}, inputs: {ready: true}, runtime: {busy: false}};
+let source = {project: 'one', build: 'Release', inputs: {func: 'pred', map: 'a'}};
+let state = W.create(source);
+source.inputs.map = 'outside mutation';
+assert.equal(state.snapshot.inputs.map, 'a');
+state = W.markAssembled(state, {xml: 'target.xml', func: 'pred'});
+state = W.markPreflight(state, {ok: true});
+assert.equal(W.getStatus(state, ready).actions.run.disabled, false, 'existing executable needs no compiler');
+assert.equal(W.getStatus(state, ready).actions.compile.disabled, true);
+const draftBuild = {...ready, build: {ready: false, selectionReady: true, compilerReady: true, executableReady: true}};
+assert.equal(W.getStatus(state, draftBuild).actions.compile.disabled, false, 'compilation can apply a valid draft build choice');
+assert.equal(W.getStatus(state, draftBuild).actions.assemble.disabled, true);
+assert.equal(W.getStatus(state, draftBuild).actions.run.disabled, true);
+let same = W.update(state, {inputs: {map: 'a', func: 'pred'}, build: 'Release', project: 'one'});
+assert.equal(same.revision, state.revision, 'canonical key order is irrelevant');
+for (const key of ['func', 'map', 'task', 'csv', 'xml', 'path', 'identity', 'copyPolicy']) {
+  const changed = W.update(state, {...state.snapshot, inputs: {...state.snapshot.inputs, [key]: 'changed'}}, key + ' changed');
+  assert.equal(W.getStatus(changed, ready).assemblyCurrent, false, key);
+  assert.equal(W.getStatus(changed, ready).actions.run.disabled, true, key);
+  assert.equal(changed.assembled.context.xml, 'target.xml');
+}
+for (const key of ['project', 'build']) {
+  assert.equal(W.getStatus(W.update(state, {...state.snapshot, [key]: 'other'}), ready).assemblyCurrent, false);
+}
+const edited = W.contentChanged(state, 'XML saved');
+assert.equal(W.getStatus(edited, ready).assemblyCurrent, true);
+assert.equal(W.getStatus(edited, ready).preflightCurrent, false);
+assert.deepEqual(edited.assembled, state.assembled);
+assert.equal(W.getStatus(W.markPreflight(edited, {ok: true}), ready).actions.run.disabled, false);
+assert.equal(W.getStatus(state, {...ready, pending: {csvDirty: true}}).actions.run.disabled, true);
+assert.equal(W.getStatus(state, {...ready, runtime: {busy: true, sid: 'fixed'}}).actions.run.disabled, true);
+assert.equal(W.getStatus(state, {...ready, runtime: {busy: true, cancellable: true}}).actions.cancel.disabled, false);
+assert.equal(W.getStatus(state, {...ready, inputs: {ready: false, reason: 'Select task'}}).actions.assemble.reason, 'Select task');
+assert.deepEqual(W.getStatus(state, ready).stages.map(s => s.id), ['project', 'build', 'inputs', 'assembly', 'check', 'run']);
+assert.equal(W.getStatus(state, ready).stages[4].status, 'complete');
+assert.equal(W.getStatus(edited, ready).stages[4].status, 'stale');
+assert.equal(W.getStatus(state, {...ready, runtime: {busy: true, stage: 'build'}}).stages[5].status, 'pending', 'compiling is not a simulation run');
+assert.equal(W.getStatus(W.markPreflight(state, {ok: false}), ready).actions.run.disabled, true);
+assert.equal(state.contentRevision, 0, 'operations leave original state untouched');
+const context = {xml: 'immutable.xml'};
+const copied = W.markAssembled(state, context);
+context.xml = 'mutated';
+assert.equal(copied.assembled.context.xml, 'immutable.xml');
+const browser = {};
+vm.runInNewContext(fs.readFileSync(file, 'utf8'), browser);
+assert.equal(typeof browser.WorkflowState.create, 'function');
+console.log('workflow state tests passed');
