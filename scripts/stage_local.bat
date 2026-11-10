@@ -61,7 +61,7 @@ rem ---- 复制运行期配置 ----
 rem robocopy 的退出码含义：0-7 都算成功（其中 1 表示有文件被复制），
 rem 8 及以上才是真错误。所以这里用 ">= 8" 判断失败。
 echo [1/3] 复制运行期配置 ...
-robocopy "!CONFIGSRC!" "!EXEDIR!" /E /NFL /NDL /NJH /NJS /NP >nul
+call :stage_resources "!CONFIGSRC!"
 if errorlevel 8 (
 	echo [错误] 复制配置失败，robocopy 退出码 !ERRORLEVEL!
 	exit /b 1
@@ -70,7 +70,7 @@ echo       完成
 
 rem ---- 复制动态库 ----
 echo [2/3] 复制动态库 ...
-robocopy "!DLLSRC!" "!EXEDIR!" /E /NFL /NDL /NJH /NJS /NP >nul
+call :stage_resources "!DLLSRC!"
 if errorlevel 8 (
 	echo [错误] 复制动态库失败，robocopy 退出码 !ERRORLEVEL!
 	exit /b 1
@@ -102,4 +102,15 @@ echo   *.dll             uplancommon / uplangraphic / lishuttlectl / log4cpp 等
 echo.
 echo 下一步：python scripts\render_schema.py jobs\^<任务单^>.env local-win
 endlocal
+exit /b 0
+
+:stage_resources
+rem Preserve existing runtime XML from either source; update all other resources.
+robocopy "%~1" "!EXEDIR!" /E /XD "%~1\runtimelibrary" /NFL /NDL /NJH /NJS /NP >nul
+if errorlevel 8 exit /b !ERRORLEVEL!
+if not exist "%~1\runtimelibrary\" exit /b 0
+robocopy "%~1\runtimelibrary" "!EXEDIR!\runtimelibrary" /E /XF *.xml /NFL /NDL /NJH /NJS /NP >nul
+if errorlevel 8 exit /b !ERRORLEVEL!
+robocopy "%~1\runtimelibrary" "!EXEDIR!\runtimelibrary" *.xml /E /XC /XN /XO /NFL /NDL /NJH /NJS /NP >nul
+if errorlevel 8 exit /b !ERRORLEVEL!
 exit /b 0

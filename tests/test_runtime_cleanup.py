@@ -151,6 +151,45 @@ class RuntimeCleanupTests(unittest.TestCase):
         self.assertEqual(plan['keep_schema'], latest.name)
         self.assertNotIn(latest.as_posix(), [f['path'] for f in plan['files']])
 
+    def test_default_runtime_schema_names_are_protected(self):
+        defaults = [self.generated(name) for name in
+                    ('runtimeschema', 'runtimeschema-indoor', 'indoorruntimeschema')]
+        old = self.generated('old')
+
+        plan = self.preview()
+
+        archived = {f['path'] for f in plan['files']}
+        self.assertIn(old.as_posix(), archived)
+        for schema in defaults:
+            with self.subTest(schema=schema.name):
+                self.assertNotIn(schema.as_posix(), archived)
+
+    def test_supplied_selection_takes_precedence_over_latest_generated_fallback(self):
+        from runtime_cleanup import cleanup_plan
+        selected = self.generated('selected')
+        latest = self.generated('latest')
+
+        plan = cleanup_plan(self.env, self.jobs, self.root, keep_schema=selected.name)
+
+        self.assertEqual(plan['keep_schema'], selected.name)
+        self.assertNotIn(selected.name, plan['schemas'])
+        self.assertIn(latest.name, plan['schemas'])
+
+    def test_supplied_handwritten_selection_is_kept_without_manifest(self):
+        from runtime_cleanup import cleanup_plan
+        selected = self.runtime / 'handwritten.xml'
+        content = b'\xef\xbb\xbf<RuntimeSchema name="actual-name">\r\n<!-- keep -->\r\n</RuntimeSchema>'
+        selected.write_bytes(content)
+        before = selected.stat().st_mtime_ns
+        self.generated('latest')
+
+        plan = cleanup_plan(self.env, self.jobs, self.root, keep_schema=selected.name)
+
+        self.assertEqual(plan['keep_schema'], selected.name)
+        self.assertNotIn(selected.as_posix(), [f['path'] for f in plan['files']])
+        self.assertEqual(selected.read_bytes(), content)
+        self.assertEqual(selected.stat().st_mtime_ns, before)
+
     def test_build_outside_project_is_rejected(self):
         self.env['BUILD_SUBDIR'] = '../external'
         self.assertIn('error', self.preview())

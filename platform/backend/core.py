@@ -694,10 +694,8 @@ def assemble_files(task, project_env, groups=('antenna', 'model'), transaction=N
 # ----------------------------------------------------------------------
 
 def schema_path(schema_name):
-    env = load_env()
-    exe_dir = os.path.join(env["PROJECT_DIR"].replace("/", os.sep),
-                           *env["BUILD_SUBDIR"].split("/"), "Bin", "runtimelibrary")
-    return os.path.join(exe_dir, schema_name)
+    from runtime_configs import resolve_runtime_config
+    return str(resolve_runtime_config(load_env(), schema_name))
 
 
 def read_schema(schema_name):
@@ -716,6 +714,21 @@ def read_schema_document(schema_name):
     document = parse_document(raw)
     document['revision'] = hashlib.sha256(raw).hexdigest()
     return to_slash(path), document
+
+
+def schema_inputs(schema_name, document=None):
+    """The selected XML, including relative paths, owns its editor inputs."""
+    if document is None:
+        _, document = read_schema_document(schema_name)
+    if document is None:
+        return {'engineering_file': '', 'reason': '运行 XML 不存在，请重新选择'}
+    field = document['fields'].get('EngineeringFilePath')
+    if not field or len(field['occurrences']) != 1 or not field['value'].strip():
+        return {'engineering_file': '', 'reason': (field or {}).get('read_only_reason') or '当前 XML 未定义有效工参路径'}
+    value = field['value'].strip().replace('\\', '/')
+    if not os.path.isabs(value):
+        value = os.path.join(os.path.dirname(os.path.dirname(schema_path(schema_name))), value)
+    return {'engineering_file': to_slash(os.path.normpath(value)), 'reason': ''}
 
 
 def load_spec():
@@ -1284,12 +1297,13 @@ class PreflightRejected(ValueError):
 
 def check_run(schema_name, func, task_id):
     from preflight import check_run as inspect_run
-    if (not schema_name or os.path.basename(schema_name) != schema_name or
-            '/' in schema_name or '\\' in schema_name or not schema_name.lower().endswith('.xml')):
+    try:
+        path = schema_path(schema_name)
+    except (ValueError, OSError) as exc:
         return {'ok': False, 'issues': [{'severity': 'error', 'code': 'SCHEMA_NAME_INVALID',
-                'message': '请选择 runtimelibrary 中的运行 XML 文件名', 'field': 'schema', 'path': schema_name}],
+                'message': str(exc), 'field': 'schema', 'path': schema_name}],
                 'context': {}}
-    report = inspect_run(load_env(), schema_path(schema_name), func, str(task_id))
+    report = inspect_run(load_env(), path, func, str(task_id))
     report['context']['schema_name'] = schema_name
     return report
 
@@ -1405,11 +1419,14 @@ def recent_runs(project='', limit=20, offset=0):
     return {'runs': runs, 'total': total, 'limit': limit, 'offset': offset}
 
 
-def results(job_name):
+def results(job_name='', schema_name=''):
     env = load_env()
-    out_dir = os.path.join(env["OUT_ROOT"].replace("/", os.sep), job_name)
-    manifest_path = schema_path(job_name + '.xml') + '.manifest.json'
-    if os.path.isfile(manifest_path):
+    out_dir = os.path.join(env.get("OUT_ROOT", '').replace("/", os.sep), job_name)
+    manifest_path = schema_path(job_name + '.xml') + '.manifest.json' if job_name and not schema_name else ''
+    if schema_name:
+        path = schema_path(schema_name)
+        out_dir = runtime_details(path, os.path.dirname(os.path.dirname(path)))['out_dir']
+    elif os.path.isfile(manifest_path):
         with open(manifest_path, encoding='utf-8') as fh:
             manifest = json.load(fh)
         if manifest.get('schema_mode') == 'existing':

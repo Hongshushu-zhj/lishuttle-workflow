@@ -15,6 +15,8 @@ const S = {  // 全局状态
 function workflowSnapshot() {
   const config = Object.fromEntries(Object.entries(S.projectConfig || {}).filter(([key]) => !MACHINE_KEYS.includes(key)));
   const draft = Object.fromEntries(Object.entries(S.projectDraft || {}).filter(([key]) => !MACHINE_KEYS.includes(key)));
+  if (S.job?.mode === 'existing') return {project:S.project,config,draft,mode:'existing',
+    scope:S.runtimeCatalog?.scope,schema:S.job.schema,func:S.func,name:S.job.name,taskId:$('task-id').value || '1'};
   return {project:S.project, config, draft, func:S.func, city:S.city?.name || '',
     task:S.task?.dir || S.task?.name || '', csv:S.task?.engineering_file || '',
     name:$('job-name').value.trim(), taskId:$('task-id').value || '1',
@@ -43,9 +45,10 @@ function workflowContentChanged(reason) {
 function workflowStatus() {
   const applied = !BUILD_KEYS.some(key => (S.projectDraft?.[key] || '') !== (S.projectConfig?.[key] || ''));
   const reuse = $('use-existing-schema').checked;
-  const inputsReady = !!S.city && !!S.task && !!$('job-name').value.trim() &&
-    (!reuse || !!$('schema-source').value) && ((reuse && !$('sync-engineering').checked) || !!S.task?.engineering_file);
-  return WorkflowState.getStatus(syncWorkflow(), {
+  const existing = S.job?.mode === 'existing';
+  const inputsReady = existing || (!!S.city && !!S.task && !!$('job-name').value.trim() &&
+    (!reuse || !!$('schema-source').value) && ((reuse && !$('sync-engineering').checked) || !!S.task?.engineering_file));
+  const status = WorkflowState.getStatus(syncWorkflow(), {
     project:{ready:!!S.project},
     build:{ready:applied && !!S.buildWorkflow?.built, executableReady:applied && !!S.buildWorkflow?.built,
       selectionReady:!!S.projectDraft?.PRESET && !!S.projectDraft?.BUILD_SUBDIR,
@@ -54,13 +57,16 @@ function workflowStatus() {
     inputs:{ready:inputsReady, reason:'请选择功能、地图、任务及所需输入，并填写任务名'},
     pending:{csvDirty:S.csvDirty, xmlDirty:S.xmlDirty,
       assembleReason:schemaSubmissionPending || S.assemblyPending ? '正在装配，请稍候' : '',
-      preflightReason:S.preflightPending || S.parameterWrites ? '正在检查，请稍候' : '',
-      runReason:S.launchPending || S.parameterWrites ? '正在提交运行，请稍候' : ''},
+      preflightReason:S.preflightPending || S.parameterWrites || S.runtimeExecutionPending ? '正在检查或保存选择，请稍候' : '',
+      runReason:S.launchPending || S.parameterWrites || S.runtimeExecutionPending ? '正在提交运行或保存选择，请稍候' : ''},
     runtime:{busy:!!S.runtime?.busy || !!S.pollTimer || !!S.inputTransition,
       cancellable:!S.runtime?.external && !!S.runtime?.sid && ['running','preparing','cancelling'].includes(S.runtime?.phase),
       stage:S.runtime?.operation === 'build' || /build|编译/.test(S.runtime?.label || '') ? 'build' : S.runtime?.func ? 'run' : '',
       completed:S.runFingerprint === S.workflow?.fingerprint && S.runVerdict === 'success', failed:S.runFingerprint === S.workflow?.fingerprint && ['failed','cancelled'].includes(S.runVerdict)}
   });
+  if (existing || (S.runtimeCatalog && S.runtimeConfigMode !== 'new')) status.actions.assemble = {
+    disabled:true,reason:'已有 XML 可直接编辑和检查；新建配置请切换到“从样例新建／从任务包适配”'};
+  return status;
 }
 function refreshWorkflow() {
   const status = workflowStatus();
@@ -84,11 +90,12 @@ function refreshWorkflow() {
     $(id).classList[S.xmlDirty ? 'remove' : 'add']('hidden');
     $(id).disabled=!!S.inputTransition || !!S.parameterWrites || !!S.runtime?.busy;
   });
-  $('assembly-summary').textContent=!S.job ? '尚未装配当前输入' : status.assemblyCurrent
-    ? `已装配：${S.job.schema} · ${S.job.func} · 任务 ${S.job.taskId}`
+  $('assembly-summary').textContent=!S.job ? '尚未加载或装配运行配置' : status.assemblyCurrent
+    ? `${S.job.mode === 'existing' ? '已加载' : '已装配'}：${S.job.schema} · XML name=${S.job.name} · ${S.job.func} · 任务 ${S.job.taskId}`
     : `先前装配：${S.job.schema}；输入已改变，请重新装配`;
   if (S.workflow.preflight && !status.preflightCurrent) $('preflight-report').textContent='检查已过期：'+(S.workflow.staleReason || '输入内容已变化')+'。请重新检查。';
   refreshActiveStage();
+  refreshRuntimeConfigActions();
   return status;
 }
 function refreshActiveStage() {
@@ -134,6 +141,8 @@ async function init() {
     await changeProject("add_project", $("project-path").value.trim());
   };
   bindActions();
+  initRuntimeConfigs();
+  if (S.runtimeRestorePromise) await S.runtimeRestorePromise;
   await initRunHistory();
   globalThis.addEventListener?.('beforeunload',event=>{
     if(S.csvDirty || S.xmlDirty) { event.preventDefault(); event.returnValue=''; }
@@ -208,8 +217,10 @@ function bindActions() {
     $(id).addEventListener("input", invalidateSchemaPreview);
   });
   ['job-name', 'task-id'].forEach(id => {
-    $(id).addEventListener('input', taskIdentityChanged);
-    $(id).addEventListener('change', taskIdentityChanged);
+    $(id).addEventListener('input', () => S.job?.mode === 'existing'
+      ? runtimeExecutionSelectionChanged({persist:false}) : taskIdentityChanged());
+    $(id).addEventListener('change', () => S.job?.mode === 'existing'
+      ? runtimeExecutionSelectionChanged() : taskIdentityChanged());
   });
   $("btn-csv-save").onclick = saveCsv;
   $("btn-csv-col").onclick = setColumn;

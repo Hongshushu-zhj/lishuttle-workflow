@@ -67,7 +67,27 @@
 </details>
 <details class="workflow-stage" id="stage-inputs" data-stage="inputs" open>
   <summary><span class="stage-number">03</span><span class="stage-heading"><strong>任务与输入</strong><span>功能、地图、工参与运行配置</span></span><span id="stage-inputs-status" class="stage-status">待确认</span><span class="stage-toggle"><span class="stage-toggle-expand">展开</span><span class="stage-toggle-collapse">收起</span><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4"/></svg></span></summary>
-  <div class="stage-body"><p class="selection-summary" id="selection-note">选择地图场景与工参任务，确认本次输入。</p><div class="inputs-grid"><div class="input-catalogs">    <div class="panel">
+  <div class="stage-body"><p class="selection-summary" id="selection-note">选择运行配置，或从样例新建。</p>
+<section class="setup-card" aria-labelledby="runtime-config-heading">
+  <h2 id="runtime-config-heading">运行配置 XML</h2>
+  <label for="runtime-config-mode">配置来源</label>
+  <select id="runtime-config-mode" class="txt" data-runtime-write><option value="existing">使用当前构建已有配置</option><option value="new">从样例新建／从任务包适配</option><option value="import">导入已有 XML 副本</option></select>
+  <div id="runtime-existing-panel">
+    <div class="row"><select id="runtime-config-select" class="path" aria-label="当前构建运行 XML" data-runtime-write><option value="">请选择运行 XML</option></select><button id="btn-runtime-config-use" type="button" data-runtime-write disabled>使用此配置</button><button id="btn-runtime-config-refresh" type="button" data-runtime-write>刷新列表</button></div>
+    <p class="field-help">读取当前 Bin/runtimelibrary 中的实际 XML，保留参数和资源路径。无需重新选择任务包或地图；缺失资源由运行前检查说明。</p>
+    <pre id="runtime-config-details" class="field-help"></pre>
+  </div>
+  <div id="runtime-import-panel" class="hidden">
+    <label for="runtime-import-source">本机 XML 文件路径</label><input id="runtime-import-source" class="path" data-runtime-write placeholder="例如 D:/saved/runtime.xml">
+    <select id="runtime-import-candidate" class="path" aria-label="任务包已识别的 XML" data-runtime-write><option value="">也可选择已识别的任务包 XML</option></select>
+    <label for="runtime-import-name">导入后的 XML 文件名</label><input id="runtime-import-name" class="txt" data-runtime-write placeholder="例如 saved.xml">
+    <p class="field-help">保留源文件及全部 XML 参数。只允许新增目标；已有同名文件请直接加载或改名。</p>
+    <button id="btn-runtime-import-preview" type="button" data-runtime-write>预览导入</button>
+    <div id="runtime-import-preview" class="hidden"><pre id="runtime-import-preview-text" class="validation-report"></pre><button id="btn-runtime-import-apply" type="button" data-runtime-write disabled>确认导入并使用</button><button id="btn-runtime-import-existing" type="button" data-runtime-write disabled>直接使用当前同名文件</button></div>
+  </div>
+  <p id="runtime-config-status" class="field-help" role="status" aria-live="polite"></p>
+</section>
+<div class="inputs-grid"><div id="task-catalogs" class="input-catalogs hidden">    <div class="panel">
       <div class="panel-title">地图与场景</div>
       <label class="field-label" for="map-root">地图工作目录</label>
       <input id="map-root" class="path">
@@ -101,7 +121,7 @@
         </div>
       </section>
 
-      <section class="setup-card" aria-labelledby="files-heading">
+      <section id="assembly-input-files" class="setup-card hidden" aria-labelledby="files-heading">
         <h2 id="files-heading">输入文件</h2>
         <div class="field">
           <label for="engineering-path">工参文件 <span class="file-type">CSV</span></label>
@@ -156,7 +176,7 @@
 <section class="setup-card assembly-card" aria-labelledby="assembly-heading">
         <h2 id="assembly-heading">资源与装配</h2>
         <div class="assembly-actions">
-          <div class="resource-options">
+          <div id="assembly-resource-options" class="resource-options hidden">
             <label id="antenna-option" class="check-option hidden"><input type="checkbox" id="copy-antennas" disabled> 装配任务天线 <span class="field-help">整目录，带备份</span></label>
             <label class="check-option"><input type="checkbox" id="copy-files" checked> 装配任务模型 <span class="field-help">带备份</span></label>
           </div>
@@ -245,6 +265,7 @@
 <script src="api-client.js"></script>
 <script src="project-build.js"></script>
 <script src="task-assembly.js"></script>
+<script src="runtime-configs.js"></script>
 <script src="editors.js"></script>
 <script src="indoor-building.js"></script>
 <script src="runtime-session.js"></script>

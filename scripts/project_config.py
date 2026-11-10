@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import threading
@@ -17,6 +18,34 @@ MACHINE_FIELDS = ('VS_ROOT', 'CMAKE', 'NINJA', 'VCVARS')
 PROJECT_FIELDS = tuple(key for key in FIELDS if key not in MACHINE_FIELDS)
 IDENTITY = ('PROJECT_DIR', 'PROJECT_PROFILE_ID', 'PROJECT_PROFILE_REVISION')
 LOCK = threading.RLock()
+
+
+def validate_runtime_schema_name(schema):
+    """Accept a single portable Windows XML filename, including Chinese/spaces."""
+    if (not isinstance(schema, str) or len(schema) > 255 or len(schema) <= 4
+            or not schema.lower().endswith('.xml') or schema[-1:] in (' ', '.')
+            or schema[0] == '.' or any(ord(char) < 32 for char in schema)
+            or any(char in schema for char in '<>:"/\\|?*')):
+        raise ValueError('运行配置必须是当前运行目录中的有效 XML 文件名')
+    stem = schema.split('.', 1)[0].rstrip(' .').upper()
+    if stem in {'CON', 'PRN', 'AUX', 'NUL', 'CLOCK$', 'CONIN$', 'CONOUT$'} or re.fullmatch(r'(COM|LPT)[1-9¹²³]', stem):
+        raise ValueError('运行配置文件名不能使用 Windows 保留名称')
+    return schema
+
+
+def _runtime_selection_value(value):
+    if not isinstance(value, dict) or set(value) != {'schema', 'revision', 'func', 'task_id'}:
+        raise ValueError('运行配置选择必须包含 schema、revision、func 和 task_id')
+    validate_runtime_schema_name(value['schema'])
+    if not isinstance(value['revision'], str) or not re.fullmatch(r'[0-9a-f]{64}', value['revision']):
+        raise ValueError('运行配置内容版本无效')
+    if not isinstance(value['func'], str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,63}', value['func']):
+        raise ValueError('运行功能无效')
+    task_id = value['task_id']
+    if (not isinstance(task_id, str) or not re.fullmatch(r'[0-9]{1,10}', task_id)
+            or int(task_id) > 2147483647):
+        raise ValueError('任务 ID 必须是有效的非负整数文本')
+    return dict(value)
 
 
 def validate_operation(env, operation):
@@ -255,6 +284,32 @@ class ProjectStore:
                 profile['bindings'][key] = value
                 atomic_json(self.file, data)
             return profile['bindings'].get(key)
+
+    def runtime_selection(self, scope, value=None, project=None, read_only=False):
+        """Remember execution choices per actual Bin without changing input revision."""
+        if not isinstance(scope, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', scope):
+            raise ValueError('运行配置构建范围无效')
+        if read_only and value is not None:
+            raise ValueError('只读查询不能保存运行配置选择')
+        saved = _runtime_selection_value(value) if value is not None else None
+        with LOCK if read_only else self._locked():
+            data = self._read(persist=not read_only)
+            key = project_id(project) if project else data['active']
+            profile = data['profiles'].get(key)
+            if profile is None:
+                # A read of an unconfigured installation has no selection.
+                if value is None:
+                    return None
+                raise ValueError('请先添加并选择本地项目')
+            selections = profile.get('runtime_selections', {})
+            if not isinstance(selections, dict):
+                raise ValueError('已保存的运行配置选择格式无效')
+            if saved is not None:
+                selections = dict(selections, **{scope: saved})
+                profile['runtime_selections'] = selections
+                atomic_json(self.file, data)
+            result = selections.get(scope)
+            return _runtime_selection_value(result) if result is not None else None
 
 
 def write_snapshot(env, directory=None):

@@ -18,6 +18,8 @@ async function loadParams() {
 function renderParams(r) {
   if (S.xmlDirty) return;
   S.paramsData = r;
+  if (S.job?.mode === 'existing' && r.revision) rememberRuntimeRevision(r.revision);
+  if (S.job?.mode === 'existing' && r.inputs) applyRuntimeEngineering(r.inputs);
   if (typeof renderIndoorBuildingExport === 'function') renderIndoorBuildingExport(r);
   const area = $("params-area");
   const job = S.job;
@@ -161,6 +163,7 @@ async function discardParameterChanges() {
 }
 async function restoreParameterDefault(button, job) {
   if (!job || job !== S.job || S.xmlDirty || S.parameterWrites || S.runtime?.busy) return;
+  if (button.dataset.defaultTag === 'EngineeringFilePath' && !guardCsvChanges()) return;
   button.disabled = true;
   const epoch = S.projectEpoch;
   parameterWriteStarted();
@@ -169,7 +172,9 @@ async function restoreParameterDefault(button, job) {
     if (job !== S.job || epoch !== S.projectEpoch) return;
     if (!res.ok) return toast(editorFailure(res), false);
     if (S.paramsData && res.revision) S.paramsData.revision = res.revision;
+    if (job.mode === 'existing' && res.revision) rememberRuntimeRevision(res.revision);
     workflowContentChanged('XML 默认值已保存');
+    if (button.dataset.defaultTag === 'EngineeringFilePath' && job.mode === 'existing') await reloadRuntimeEngineering(job);
     if (!S.xmlDirty) await loadParams();
     toast(`${button.dataset.defaultTag} 已写入 ThirdPart 默认值（原文件备份 .bak）`);
   } catch (error) { toast(error.message, false); }
@@ -193,6 +198,7 @@ async function saveParameter(el, job) {
   if (S.runtime?.busy) return toast('平台正在执行操作，请稍后保存参数', false);
   const tag = el.dataset.tag, value = el.value;
   const source = S.paramsData?.param_sources?.[tag];
+  if (tag === 'EngineeringFilePath' && !guardCsvChanges()) return;
   if (source?.kind === 'engineering_csv' && !guardCsvChanges()) return;
   const revision = (el.editorRevision || 0) + 1;
   el.editorRevision = revision;
@@ -206,9 +212,13 @@ async function saveParameter(el, job) {
     if (job !== S.job || epoch !== S.projectEpoch) return;
     if (!res.ok) return toast(editorFailure(res), false);
     if (S.paramsData && res.revision) S.paramsData.revision = res.revision;
+    if (job.mode === 'existing' && res.revision) rememberRuntimeRevision(res.revision);
     workflowContentChanged(res.target === 'engineering_csv' ? 'CSV 参数已保存' : 'XML 参数已保存');
     if (el.editorRevision === revision && el.value === value) { parameterDrafts.delete(el); el.classList.remove('dirty'); }
     S.xmlDirty = parameterDrafts.size > 0;
+    if (tag === 'EngineeringFilePath' && S.job?.mode === 'existing') {
+      await reloadRuntimeEngineering(job);
+    }
     if (S.paramsData?.values && res.target !== 'engineering_csv') S.paramsData.values[tag] = value;
     for (const group of S.paramsData?.groups || []) {
       for (const row of group.rows) if (row.name === tag) row.display_value = value;

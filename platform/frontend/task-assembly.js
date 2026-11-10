@@ -321,6 +321,10 @@ async function saveTaskBinding() {
 }
 
 function updateNote() {
+  if (S.job?.mode === 'existing') {
+    $('selection-note').textContent = `已加载 ${S.job.schema} · XML name=${S.job.name}；输入路径来自该 XML。`;
+    taskIdentityChanged(); refreshWorkflow(); return;
+  }
   renderWorkflowGuide();
   invalidateSchemaPreview();
   const c = S.city ? `${S.city.kind === "indoor" ? "室内场景" : "城市"} ${S.city.name}` : "未选地图";
@@ -328,7 +332,7 @@ function updateNote() {
   $("selection-note").textContent = `已选：${c} · ${t}`;
   if (S.job) $("run-info").textContent = taskIdentityDirty()
     ? '任务设置已修改，请重新装配后运行'
-    : `${S.job.name}.xml · -f ${S.job.func} -t ${S.job.taskId}${S.job.outDir ? ` · 实际输出：${S.job.outDir}` : ""}`;
+    : `${S.job.schema} · -f ${S.job.func} -t ${S.job.taskId}${S.job.outDir ? ` · 实际输出：${S.job.outDir}` : ""}`;
 }
 
 /* ---------------- 功能选择 ---------------- */
@@ -347,6 +351,7 @@ function renderFuncRadios(current) {
     if (S.inputTransition || !guardCsvChanges() || S.xmlDirty || S.runtime?.busy) { renderFuncRadios(S.func); return; }
     S.func = r.value;
     showFuncHint(r.value);
+    if (S.job?.mode === 'existing') { runtimeExecutionSelectionChanged(); return; }
     updateNote();
 
   });
@@ -492,6 +497,7 @@ async function submitRender(body, previewRecord = null) {
   const copied = (r.copied || []).map(c => `${c.file} → ${c.to} ${c.backup}`).join("\n");
   toast(`${pendingInputs ? '装配完成，输入待检查' : '渲染完成'}：${r.schema_name}${copied ? "\n已替换：" + copied : ""}`, !pendingInputs);
   if (r.vs_launch_warning) toast(r.vs_launch_warning, false);
+  if (r.selection_warning) toast(`配置已生成；选择记忆提示：${r.selection_warning}`, false);
   updateNote();
   switchTab(document.querySelector('[data-tab="params"]'));
   loadParams();
@@ -500,6 +506,9 @@ async function submitRender(body, previewRecord = null) {
 
 
 function taskIdentityDirty() {
+  if (S.job?.mode === 'existing') return !!S.assemblyUnconfirmed ||
+    (S.workflow?.assembled ? !workflowStatus().assemblyCurrent : false) ||
+    S.func !== S.job.func || ($('task-id').value || '1') !== String(S.job.taskId);
   if(S.job && S.assemblyUnconfirmed) return true;
   if (S.workflow?.assembled && !workflowStatus().assemblyCurrent) return true;
   return !!S.job && ($('job-name').value.trim() !== S.job.name ||
@@ -507,6 +516,13 @@ function taskIdentityDirty() {
 }
 
 function taskIdentityChanged() {
+  if (S.job?.mode === 'existing') {
+    $('job-name').value = S.job.name;
+    $('task-name-note').textContent = `XML 根任务名：${S.job.name}；文件：${S.job.schema}。修改功能或任务 ID 只改变执行选择，需重新预检。`;
+    $('run-info').textContent = `已加载 ${S.job.schema} · name=${S.job.name} · -f ${S.job.func} -t ${S.job.taskId}` +
+      (S.job.outDir ? ` · 实际输出：${S.job.outDir}` : '');
+    resetCleanupPreview(); return;
+  }
   const dirty = taskIdentityDirty();
   $('task-name-note').textContent = dirty
     ? '任务名或任务 ID 已修改，请重新装配；运行 XML、输出子目录和 VS 启动项将在装配成功后同步。'
@@ -560,6 +576,7 @@ async function previewCleanup() {
       if (result.error) return toast(result.error, false);
       $('cleanup-note').textContent = result.message + (result.archive ? `；归档位置：${result.archive}` : '');
       toast(result.message);
+      if (S.runtimeCatalog) await refreshRuntimeConfigs({restore:false});
     } catch (error) {
       if (epoch === S.projectEpoch) { resetCleanupPreview(); toast(error.message, false); }
     } finally { cleanupPending=false; refreshCleanupState(); }

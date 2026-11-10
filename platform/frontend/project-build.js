@@ -36,6 +36,7 @@ function applyProjectState(st, {preserveMachineDraft = false} = {}) {
   $("task-binding-note").textContent = '选择工参及地图后可保存；对应关系仅在当前项目生效。';
   S.projectEpoch = (S.projectEpoch || 0) + 1;
   S.job = null;
+  resetRuntimeConfigs();
   S.workflow = null; S.runVerdict = null; S.assemblyUnconfirmed=false;
   S.city = null;
   taskIdentityChanged();
@@ -70,10 +71,12 @@ function applyProjectState(st, {preserveMachineDraft = false} = {}) {
   $("gongcan-root").value = st.gongcan_root;
   renderCities(st.cities);
   renderTasks(st.tasks);
+  refreshRuntimeImportCandidates();
   $("env-note").textContent = `预设 ${st.preset} · 输出根 ${st.out_root}`;
   if (typeof fetch === 'function' && S.profileId) refreshProjectDetection();
   if (st.runtime) applyRuntimeState(st.runtime, true);
   if (S.historyInitialized) resetRunHistory();
+  S.runtimeRestorePromise = typeof fetch === 'function' && S.profileId ? refreshRuntimeConfigs({restore:true}) : null;
 }
 
 const PROFILE_LABELS = {
@@ -435,11 +438,14 @@ function applyBuildStatus(result, sentDraft = {...S.projectDraft}) {
   S.buildWorkflow = result.build_workflow || S.buildWorkflow;
   S.projectEpoch = (S.projectEpoch || 0) + 1;
   S.job = null;
+  S.workflow = null; S.runVerdict = null; S.runFingerprint = null;
+  resetRuntimeConfigs(); clearRuntimeEvidence();
   invalidateSchemaPreview();
   taskIdentityChanged();
   $('params-area').innerHTML = '';
   S.paramsData = null; S.paramsForJob = null;
   $('params-toolbar').classList.add('hidden');
-  $('run-info').textContent = '构建配置已更新，请重新装配并渲染';
+  $('run-info').textContent = '构建配置已更新，请选择当前构建的运行 XML 或新建配置';
   renderProjectConfig();
+  S.runtimeRestorePromise = typeof fetch === 'function' && S.profileId ? refreshRuntimeConfigs({restore:true}) : null;
 }

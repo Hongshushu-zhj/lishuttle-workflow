@@ -108,7 +108,8 @@ def cleanup_plan(env, jobs_dir, workflow_root, keep_schema=''):
         keep_schema = max(records, key=lambda r: r['manifest'].stat().st_mtime_ns)['xml'].name
     if keep_schema:
         protected.add(canonical(runtime / keep_schema))
-    protected.update(canonical(runtime / name) for name in ('runtimeschema.xml', 'runtimeschema-indoor.xml'))
+    protected.update(canonical(runtime / name) for name in
+                     ('runtimeschema.xml', 'runtimeschema-indoor.xml', 'indoorruntimeschema.xml'))
     for r in records:
         if any(r['xml'].name in json.dumps(e, ensure_ascii=False) for e in manual_entries):
             protected.add(canonical(r['xml']))

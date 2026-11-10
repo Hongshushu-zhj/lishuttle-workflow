@@ -73,6 +73,71 @@ class ProjectProfileTests(unittest.TestCase):
         self.store.select(str(self.a))
         self.assertEqual(self.store.binding('task/engineering.csv')['city'], 'guangzhou')
 
+    def test_runtime_selection_restores_project_build_and_restart_without_revision_change(self):
+        a = self.store.load()
+        saved = {'schema': '保存 配置.xml', 'revision': 'a' * 64, 'func': 'predindoor', 'task_id': '1'}
+        self.store.runtime_selection('debug', saved)
+        self.assertEqual(self.store.load()['PROJECT_PROFILE_REVISION'], a['PROJECT_PROFILE_REVISION'])
+        self.assertIsNone(self.store.runtime_selection('release'))
+        self.store.runtime_selection('release', dict(saved, schema='release.xml'))
+        self.store.select(str(self.b))
+        self.assertIsNone(self.store.runtime_selection('debug'))
+        self.store.runtime_selection('debug', dict(saved, schema='b.xml'))
+        self.store.select(str(self.a))
+        restarted = project_config.ProjectStore(self.env, self.file)
+        self.assertEqual(restarted.runtime_selection('debug'), saved)
+        self.assertEqual(restarted.runtime_selection('release')['schema'], 'release.xml')
+        self.assertEqual(restarted.runtime_selection('debug', project=str(self.b))['schema'], 'b.xml')
+
+    def test_runtime_selection_read_only_has_no_migration_lock_or_backup(self):
+        before = sorted(path.name for path in self.root.iterdir())
+        self.assertIsNone(self.store.runtime_selection('debug', read_only=True))
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()), before)
+        with self.assertRaises(ValueError):
+            self.store.runtime_selection('debug', {'schema': 'a.xml'}, read_only=True)
+        self.assertEqual(sorted(path.name for path in self.root.iterdir()), before)
+
+    def test_runtime_selection_accepts_old_profile_and_does_not_persist_a_read(self):
+        self.store.load()
+        data = json.loads(self.file.read_text(encoding='utf-8'))
+        profile = data['profiles'][data['active']]
+        profile.pop('runtime_selections', None)
+        self.file.write_text(json.dumps(data), encoding='utf-8')
+        before = self.file.read_bytes()
+        self.assertIsNone(self.store.runtime_selection('debug', read_only=True))
+        self.assertEqual(self.file.read_bytes(), before)
+
+    def test_runtime_selection_rejects_unsafe_or_untyped_values_without_writing(self):
+        self.store.load()
+        before = self.file.read_bytes()
+        valid = {'schema': 'a.xml', 'revision': 'a' * 64, 'func': 'pl', 'task_id': '1'}
+        invalid = [dict(valid, schema='../a.xml'), dict(valid, schema='a.xml:stream'),
+                   dict(valid, schema='CON.xml'), dict(valid, revision='missing'),
+                   dict(valid, revision=1), dict(valid, func='pl\nrun'),
+                   dict(valid, func=''), dict(valid, task_id=1),
+                   dict(valid, task_id='-1'), dict(valid, task_id='1;run'),
+                   dict(valid, extra=True), {'schema': 'a.xml'}]
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.store.runtime_selection('debug', value)
+        self.assertEqual(self.file.read_bytes(), before)
+
+    def test_runtime_selection_can_remember_a_future_safe_function_identifier(self):
+        self.store.load()
+        value = {'schema': 'a.xml', 'revision': 'a' * 64,
+                 'func': 'future_function', 'task_id': '0'}
+        self.assertEqual(self.store.runtime_selection('debug', value), value)
+
+    def test_runtime_selection_atomic_failure_keeps_previous_selection(self):
+        self.store.load()
+        saved = {'schema': 'a.xml', 'revision': 'a' * 64, 'func': 'pl', 'task_id': '1'}
+        self.store.runtime_selection('debug', saved)
+        before = self.file.read_bytes()
+        with patch.object(project_config.os, 'replace', side_effect=OSError('cannot replace')):
+            with self.assertRaises(OSError):
+                self.store.runtime_selection('debug', dict(saved, schema='b.xml'))
+        self.assertEqual(self.file.read_bytes(), before)
+
     def test_frozen_snapshot_and_cli_ignore_later_switch(self):
         env = self.store.load()
         snapshot = project_config.write_snapshot(env, self.root / 'snapshots')

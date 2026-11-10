@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import xml.etree.ElementTree as ET
 
 BACKEND = Path(__file__).resolve().parents[1] / 'platform/backend'
@@ -95,6 +96,30 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(context['params']['MaxCalcHeight'], '10')
         self.assertEqual(len(context['schema_digest']), 64)
         json.dumps(report, allow_nan=False)
+        after = {str(p): (p.stat().st_mtime_ns, p.read_bytes()) for p in self.root.rglob('*') if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_existing_xml_can_load_and_preflight_without_assembly_roots(self):
+        import core
+        from server import Api
+        from runtime_configs import list_runtime_configs
+        self.assertTrue(self.run_check()['ok'])
+        env = dict(self.env, CONFIG_SRC='', DLL_SRC='', MAP_ROOT='',
+                   GONGCAN_ROOT='', OUT_ROOT='')
+        listing = list_runtime_configs(env)
+        entry = next(item for item in listing['configs'] if item['schema'] == self.schema.name)
+        before = {str(p): (p.stat().st_mtime_ns, p.read_bytes()) for p in self.root.rglob('*') if p.is_file()}
+        with patch.object(core, 'load_env', return_value=env), \
+             patch.object(core, 'ordered_functions', return_value=[{'name': 'pred'}]), \
+             patch.object(Api, '_remember_runtime'), \
+             patch.object(core, 'run_render', side_effect=AssertionError('must not render')), \
+             patch.object(core, 'ensure_runtime_resources', side_effect=AssertionError('must not stage')):
+            loaded = Api.activate_runtime_config(dict(schema=entry['schema'], revision=entry['revision'],
+                scope=listing['scope'], func='pred', task_id='1'))
+            report = Api.preflight(dict(schema=entry['schema'], func='pred', task_id='1'))
+        self.assertTrue(loaded['ok'], loaded)
+        self.assertTrue(report['ok'], report['issues'])
+        self.assertEqual(Path(loaded['inputs']['engineering_file']), self.bin / 'cells.csv')
         after = {str(p): (p.stat().st_mtime_ns, p.read_bytes()) for p in self.root.rglob('*') if p.is_file()}
         self.assertEqual(before, after)
 

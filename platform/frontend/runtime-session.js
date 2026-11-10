@@ -4,7 +4,7 @@
 async function doRun() {
   if (S.inputTransition || S.launchPending || S.pollTimer || S.runtime?.busy) return toast('平台已有任务，请等待结束或取消', false);
   if (!S.job) { focusStage("assembly"); return toast("请先装配本次任务",false); }
-  if (!guardCsvChanges() || S.xmlDirty || S.parameterWrites || S.pendingRequests) return toast("请先完成当前编辑或保存操作",false);
+  if (!guardCsvChanges() || S.xmlDirty || S.parameterWrites || S.pendingRequests || S.runtimeExecutionPending) return toast("请先完成当前编辑或保存操作",false);
   if (taskIdentityDirty()) return toast('任务输入已修改，请先重新装配', false);
   S.launchPending = true;
   const epoch = S.projectEpoch, job=S.job;
@@ -35,7 +35,7 @@ async function doRun() {
 }
 
 async function doPreflight() {
-  if (!guardCsvChanges() || S.xmlDirty || S.parameterWrites || S.pendingRequests) return toast('请先完成当前编辑或保存操作',false);
+  if (!guardCsvChanges() || S.xmlDirty || S.parameterWrites || S.pendingRequests || S.runtimeExecutionPending) return toast('请先完成当前编辑或保存操作',false);
   if (S.inputTransition || S.runtime?.busy || S.preflightPending) return;
   if (!S.job) return toast('请先装配运行配置',false);
   if (taskIdentityDirty()) return toast('任务设置已修改，请先重新装配',false);
@@ -99,6 +99,10 @@ function applyRuntimeState(state, restore = false) {
   if (S.workflow) refreshCsvDirtyState();
   $("csv-wrap").querySelectorAll?.("[contenteditable]").forEach(node=>node.contentEditable=effectiveBusy ? "false" : "true");
   if (restore && state.busy && !state.external && state.sid && (S.sid !== state.sid || S.consoleHistorical)) attachConsole(state.sid, `恢复会话 ${state.sid}：`);
+  if (!effectiveBusy && S.runtimeRestoreDeferred && !S.pollTimer && !S.launchPending) {
+    S.runtimeRestoreDeferred = false;
+    S.runtimeRestorePromise = refreshRuntimeConfigs({restore:true});
+  }
 }
 
 async function refreshRuntimeState(restore = false) {
@@ -466,7 +470,8 @@ async function loadResults() {
   $('result-validation').textContent = '';
   $('result-files').innerHTML = ''; $('result-log').textContent = '';
   try {
-  const r = await get("results", sid ? `sid=${sid}` : `job=${encodeURIComponent(job)}`);
+  const schema = S.job?.mode === 'existing' && (!enteredJob || enteredJob === S.job.name) ? S.job.schema : '';
+  const r = await get("results", sid ? `sid=${sid}` : schema ? `schema=${encodeURIComponent(schema)}` : `job=${encodeURIComponent(job)}`);
   if (epoch !== S.projectEpoch || request !== S.resultRequest) return;
   if (r.error) throw new Error(r.error);
   lastResultsDir = r.dir || "";

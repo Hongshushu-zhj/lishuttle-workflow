@@ -14,6 +14,7 @@ lishuttle 本地平台 Web 服务。
 
 import json
 import os
+import re
 import sys
 import threading
 import webbrowser
@@ -46,7 +47,8 @@ def runtime_operation(fn):
             labels = {'run':'运行', 'toolkit':'工具任务', 'render':'装配', 'select_project':'切换项目',
                       'csv_save':'保存工参', 'csv_column':'修改工参', 'param_write':'修改参数',
                       'param_default':'恢复参数', 'cleanup_configs':'清理配置',
-                      'enable_indoor_building_export':'启用室内建筑导出'}
+                      'enable_indoor_building_export':'启用室内建筑导出',
+                      'activate_runtime_config':'选择已有运行配置', 'import_runtime_config':'导入运行配置'}
             label = labels.get(fn.__name__, '更新配置')
             if fn.__name__ == 'toolkit' and isinstance(payload, dict):
                 label = {'build':'编译','stage':'装配','doctor':'体检'}.get(payload.get('step'), label)
@@ -99,6 +101,115 @@ def editor_error(error):
 
 class Api:
     """路由表：method + path 前缀 → 处理函数。"""
+
+    @staticmethod
+    @project_operation
+    def runtime_configs(_):
+        from runtime_configs import list_runtime_configs
+        try:
+            env = core.load_env()
+            listing = list_runtime_configs(env)
+            listing['selected'] = Api._runtime_selection(env, listing['scope'])
+            return listing
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    def _runtime_selection(env, scope):
+        try:
+            return core.ProjectStore(core.ENV_FILE).runtime_selection(scope,
+                project=env['PROJECT_DIR'], read_only=True)
+        except (ValueError, KeyError):
+            return None  # Old or temporarily unregistered profiles have no selection.
+
+    @staticmethod
+    def _runtime_execution(body):
+        func = body.get('func', '')
+        supported = {row['name'] for row in core.ordered_functions()}
+        if not isinstance(func, str) or not func or func not in supported:
+            raise ValueError('请选择当前项目支持的运行功能')
+        task_id = str(body.get('task_id', '1'))
+        if not re.fullmatch(r'[0-9]{1,10}', task_id) or int(task_id) > 2147483647:
+            raise ValueError('任务 ID 必须是 0 到 2147483647 的整数')
+        return func, task_id
+
+    @staticmethod
+    def _check_runtime_scope(env, body):
+        from runtime_configs import runtime_scope
+        if not body.get('scope') or body['scope'] != runtime_scope(env):
+            raise ValueError('运行目录已变化，请刷新当前构建的配置列表后重试')
+
+    @staticmethod
+    def _remember_runtime(env, description, func, task_id):
+        from runtime_configs import runtime_scope
+        core.ProjectStore(core.ENV_FILE).runtime_selection(runtime_scope(env),
+            dict(schema=description['schema'], revision=description['revision'],
+                 func=func, task_id=str(task_id)), project=env['PROJECT_DIR'])
+
+    @staticmethod
+    def _loaded_runtime(description, func, task_id):
+        return dict(ok=True, job=dict(schema=description['schema'], name=description['runtime_name'],
+            func=func, taskId=str(task_id), outDir=description['out_dir'], mode='existing'),
+            revision=description['revision'], inputs=core.schema_inputs(description['schema']),
+            validation_required=True, warnings=description.get('warnings', []))
+
+    @staticmethod
+    @runtime_operation
+    @project_operation
+    def activate_runtime_config(body):
+        from runtime_configs import describe_runtime_config
+        invalid = revision_required(body, 'revision')
+        if invalid:
+            return invalid
+        try:
+            env = core.load_env()
+            Api._check_runtime_scope(env, body)
+            func, task_id = Api._runtime_execution(body)
+            description = describe_runtime_config(env, body.get('schema', ''))
+            if not description['loadable']:
+                raise ValueError(description['reason'])
+            if description['revision'] != body['revision']:
+                raise core.FileConflict('运行 XML 已变化，请刷新列表后重新选择')
+            Api._remember_runtime(env, description, func, task_id)
+            return Api._loaded_runtime(description, func, task_id)
+        except (ValueError, OSError) as exc:
+            return editor_error(exc)
+
+    @staticmethod
+    @project_operation
+    def preview_runtime_import(body):
+        from runtime_configs import preview_runtime_import
+        try:
+            env = core.load_env()
+            Api._check_runtime_scope(env, body)
+            preview = preview_runtime_import(env, body.get('source', ''), body.get('destination_schema', ''))
+            description = preview.get('description', {})
+            return dict(preview, runtime_name=description.get('runtime_name', ''),
+                        out_dir=description.get('out_dir', ''), warnings=description.get('warnings', []))
+        except (ValueError, OSError) as exc:
+            return editor_error(exc)
+
+    @staticmethod
+    @runtime_operation
+    @project_operation
+    def import_runtime_config(body):
+        from runtime_configs import import_runtime_config
+        try:
+            env = core.load_env()
+            Api._check_runtime_scope(env, body)
+            func, task_id = Api._runtime_execution(body)
+            description = import_runtime_config(env, body.get('source', ''),
+                body.get('destination_schema', ''), body.get('token', ''))
+            result = dict(Api._loaded_runtime(description, func, task_id), imported=description.get('imported', False))
+            if description.get('cleanup_warning'):
+                result['cleanup_warning'] = description['cleanup_warning']
+            try:
+                Api._remember_runtime(env, description, func, task_id)
+            except (ValueError, OSError) as exc:
+                result['selection_warning'] = 'XML 已导入，但未能记忆本次选择：' + str(exc)
+            return result
+        except (ValueError, OSError) as exc:
+            return editor_error(exc)
 
     @staticmethod
     @project_operation
@@ -437,6 +548,11 @@ class Api:
                 result['render_output'] += '\n[已撤销] 本次装配改动已撤销，保留装配前的文件状态。'
             return result
         result['assembly_status'] = 'applied'
+        try:
+            from runtime_configs import describe_runtime_config
+            Api._remember_runtime(env, describe_runtime_config(env, result['schema_name']), func, task_id)
+        except (ValueError, OSError, KeyError) as exc:
+            result['selection_warning'] = f'运行单已保存，上次选择未能记忆：{exc}'
         if result['render_exit'] == 0:
             try:
                 previous = body.get('previous_schema', '')
@@ -462,7 +578,15 @@ class Api:
             if any(s.get('status') == 'running' for s in core.RUNNER.sessions.values()):
                 return {'error': '平台仍有运行或编译进程，请结束后再清理'}
         try:
-            plan = cleanup_plan(core.load_env(), core.JOBS_DIR, core.ROOT, body.get('keep_schema', ''))
+            env = core.load_env()
+            keep = body.get('keep_schema', '')
+            if not keep:
+                from runtime_configs import runtime_scope
+                saved = Api._runtime_selection(env, runtime_scope(env))
+                candidate = (saved or {}).get('schema', '')
+                if candidate and os.path.isfile(core.schema_path(candidate)):
+                    keep = candidate
+            plan = cleanup_plan(env, core.JOBS_DIR, core.ROOT, keep)
             if body.get('apply'):
                 if body.get('token') != plan['token']:
                     return {'error': '配置文件已变化，请重新预览清理范围'}
@@ -512,6 +636,7 @@ class Api:
             extra['indoor_building_export'] = inspect(core.load_env())
         return {**catalog, **extra, "file": path, "schema_name": document['name'], "values": document['values'],
                 "revision": document['revision'],
+                "inputs": core.schema_inputs(schema, document),
                 "param_sources": {'DefaultCalcRadius': core.radius_source(schema)},
                 "thirdpart_defaults": core.thirdpart_defaults(document['values'])}
 
@@ -696,7 +821,11 @@ class Api:
     @staticmethod
     @project_operation
     def job_results(query):
-        return core.results(query.get('job', [''])[0])
+        try:
+            schema = query.get('schema', [''])[0]
+            return (core.results(schema_name=schema) if schema else core.results(query.get('job', [''])[0]))
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
 
     @staticmethod
     def open_folder(body):
@@ -709,6 +838,10 @@ class Api:
 
 ROUTES = {
     ("GET", "state"): Api.state,
+    ("GET", "runtime_configs"): Api.runtime_configs,
+    ("POST", "activate_runtime_config"): Api.activate_runtime_config,
+    ("POST", "preview_runtime_import"): Api.preview_runtime_import,
+    ("POST", "import_runtime_config"): Api.import_runtime_config,
     ("POST", "select_project"): Api.select_project,
     ("POST", "add_project"): Api.add_project,
     ("POST", "save_project_config"): Api.save_project_config,

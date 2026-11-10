@@ -89,6 +89,11 @@ main { flex: 1; min-width: 0; }
 .field .path { margin: 0; min-width: 0; padding: 7px 8px; }
 .field .txt { width: 100%; padding: 7px 8px; }
 .field-help { color: #64748b; font-size: 12px; overflow-wrap: anywhere; }
+#runtime-config-details { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+#runtime-config-mode, #runtime-config-select, #runtime-import-source, #runtime-import-name,
+#runtime-import-candidate { min-width: 0; max-width: 100%; }
+#runtime-existing-panel, #runtime-import-panel { min-width: 0; }
+#runtime-existing-panel .row > select { flex: 1 1 260px; }
 .task-fields { display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 16px; margin-bottom: 16px; }
 .task-fields .field { margin-top: 0; }
 .file-type { margin-left: 5px; padding: 1px 5px; border-radius: 4px; color: #475569; background: #e8edf4; font-size: 11px; }
