@@ -221,12 +221,13 @@ class TaskSchemaTests(unittest.TestCase):
 
     def test_api_apply_persists_reuse_and_skips_shared_resource_changes(self):
         body = self.preview_body()
-        def render_job(path):
+        def render_job(path, **kwargs):
             job = renderer.read_env_file(path, 'job')
             with contextlib.redirect_stdout(io.StringIO()):
                 rc = renderer.do_render(self.env, job, 'test', renderer.ROOT + '/jobs/test.env',
                                         renderer.ROOT + '/env/test.env')
-            return rc, ''
+            return dict(exit_code=rc, output='', generated=True,
+                        status='ready' if rc == 0 else 'missing_inputs', attempt_id='test')
         with patch.object(core, 'load_env', return_value=self.env), \
                 patch.object(core, 'JOBS_DIR', str(self.root)), \
                 patch.object(core, 'run_render', side_effect=render_job), \

@@ -13,9 +13,14 @@ from pathlib import Path
 import re
 import shlex
 import struct
+import sys
 import xml.etree.ElementTree as ET
 
 from engineering import engineering_kind, normalized
+from engineering_format import cell_layout, header_line_count, INDOOR_COLUMNS, ALIASES as _COLUMN_LABELS
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'scripts'))
+from indoor_maps import indoor_map_entries, engine_indoor_map_entries  # noqa: E402
 
 
 def _path(value, base):
@@ -69,54 +74,14 @@ def _xml_fragments(path):
     return ET.fromstring('<Document>' + text + '</Document>')
 
 
-def _cell_columns(bin_dir, issue):
-    # CellLoader.h defaults remain in force if parsing Bin/cellformat.xml fails.
-    columns = dict(CellId=0, PCI=7, BandWidth=17, ChannelNumber=18, MaxPower=15, EPRE=16,
-        SensePower=16, PropagationModel=19, CalcRadius=23, SiteId=2, Longitude=4, Latitude=5,
-        TxNumber=13, RxNumber=14, Antenna=12, SenseAntenna=12, AntennaHeight=8,
-        Azimuth=9, Tilt=10, ElecTilt=11, SenseTilt=11, CellType=34, CityCode=-1)
-    headers = 2
+def _cell_columns(bin_dir, issue, layout=None):
+    # The editor and preflight use exactly the same format decoding and offsets.
+    # CellLoader.h defaults remain in force if the XML cannot be parsed.
+    layout = cell_layout(bin_dir) if layout is None else layout
     path = str(Path(bin_dir) / 'cellformat.xml')
-    try:
-        document = _xml_fragments(path)
-        parsed = {}
-        for root in document.findall('TableFormat'):
-            for node in root:
-                value = node.text or ''
-                if node.tag == 'HeaderLines':
-                    try:
-                        count = int(value)
-                        if count >= 0:
-                            headers = count
-                    except ValueError:
-                        pass
-                elif re.fullmatch('[A-Za-z]+', value):
-                    col = 0
-                    for ch in value.upper():
-                        col = col * 26 + ord(ch) - 64
-                    parsed.setdefault(node.tag, col - 1)
-        columns.update(parsed)
-        for target, fallback in (('SensePower', 'EPRE'), ('SenseAntenna', 'Antenna'), ('SenseTilt', 'ElecTilt')):
-            if target not in parsed:
-                columns[target] = columns[fallback]
-    except (OSError, ValueError, ET.ParseError) as exc:
-        issue('warning', 'ENGINEERING_FORMAT_DEFAULT', f'未加载 Bin/cellformat.xml，使用 CellLoader.h 默认列布局：{exc}', 'EngineeringFilePath', path)
-    return columns, headers
-
-
-_COLUMN_LABELS = {
-    'CellId': ('Cell ID', '小区ID'), 'SiteId': ('Site ID', '基站ID'),
-    'Longitude': ('Longitude', '经度'), 'Latitude': ('Latitude', '纬度'),
-    'AntennaHeight': ('Height (m)', 'Antenna Height', '天线高度'),
-    'Azimuth': ('Azimuth (°)', 'Azimuth', '天线方位角'),
-    'Tilt': ('Mechanical Downtilt (°)', '机械下倾角'),
-    'Antenna': ('Antenna', '天线型号'), 'EPRE': ('EPRE per antenna port', '参考信号功率'),
-    'ChannelNumber': ('Channel Number', '频点'), 'PropagationModel': ('Main Propagation Model', '预测模型'),
-    'TxNumber': ('Number of Transmission Antennas', '天线发射端口数量'),
-    'RxNumber': ('Number of Reception Antennas', '天线接收端口数量'),
-    'MaxPower': ('Max Power (dBm)', '最大发射功率'), 'CellType': ('Cell Type', '小区类型'),
-    'ApId': ('AP ID',), 'Floor': ('Floor', '楼层'), 'x': ('x', 'x坐标'), 'y': ('y', 'y坐标'),
-}
+    if layout['error']:
+        issue('warning', 'ENGINEERING_FORMAT_DEFAULT', f'未加载 Bin/cellformat.xml，使用 CellLoader.h 默认列布局：{layout["error"]}', 'EngineeringFilePath', path)
+    return layout['columns'], layout['header_lines']
 
 
 def _engineering(path, expected, issue, bin_dir=None):
@@ -124,17 +89,20 @@ def _engineering(path, expected, issue, bin_dir=None):
     if not path or not Path(path).is_file():
         issue('error', 'ENGINEERING_MISSING', '工参 CSV 不存在', 'EngineeringFilePath', path)
         return info
+    layout = cell_layout(bin_dir or Path(path).parent) if expected == 'outdoor' else None
     info['kind'] = engineering_kind(path)
+    if not info['kind'] and layout and layout['explicit'] and layout['header_lines'] == 0:
+        # A trusted zero-header format is the only source of layout evidence
+        # for a data-only file. Its records still undergo every ordinary check.
+        info['kind'] = expected
     if info['kind'] != expected:
         issue('error', 'ENGINEERING_KIND', f'工参表头需要 {expected}，实际为 {info["kind"] or "无法识别"}', 'EngineeringFilePath', path)
         return info
     try:
         if expected == 'indoor':
-            columns, headers = dict(ApId=0, CellId=2, Floor=3, x=4, y=5, AntennaHeight=6, Azimuth=7,
-                Tilt=8, ElecTilt=9, Antenna=10, TxNumber=11, RxNumber=12, MaxPower=13,
-                EPRE=14, ChannelNumber=16, PropagationModel=17, ULTrafficLoad=20, CellType=31), 2
+            columns, headers = INDOOR_COLUMNS.copy(), 2
         else:
-            columns, headers = _cell_columns(bin_dir or Path(path).parent, issue)
+            columns, headers = _cell_columns(bin_dir or Path(path).parent, issue, layout)
         strings = ['CellId', 'Antenna', 'PropagationModel', 'CellType'] + (['ApId'] if expected == 'indoor' else ['SiteId'])
         if columns.get('CityCode', -1) >= 0:
             strings.append('CityCode')
@@ -144,6 +112,12 @@ def _engineering(path, expected, issue, bin_dir=None):
         ids, floors, antennas, sensing_antennas, models = set(), set(), set(), set(), set()
         with _open_text(path) as fh:
             rows = list(csv.reader(fh, strict=True))
+        detected_headers = header_line_count(rows, max(2, headers))
+        if detected_headers and detected_headers != headers:
+            issue('error', 'ENGINEERING_HEADER_COUNT',
+                  f'识别到 {detected_headers} 行工参表头，但引擎配置读取 {headers} 行；'
+                  '请确认 Bin/cellformat.xml 的 HeaderLines，避免遗漏首条数据',
+                  'EngineeringFilePath', path)
         # Known labels are checked against configured positions, never used to reorder data.
         for tag, aliases in _COLUMN_LABELS.items():
             if tag not in columns:
@@ -533,10 +507,21 @@ def _floor_caches(out_dir, mode, issue):
 
 def _indoor(map_dir, engineering, issue):
     floors = []
-    paths = sorted(Path(map_dir).glob('*.das')) if map_dir and Path(map_dir).is_dir() else []
+    paths = indoor_map_entries(map_dir)
+    engine_paths = set(engine_indoor_map_entries(map_dir))
     if not paths:
-        issue('error', 'INDOOR_MAP_MISSING', '室内地图目录没有 .das 楼层文件', 'MapPath', map_dir)
+        issue('error', 'INDOOR_MAP_MISSING',
+              '室内地图目录没有 .das 楼层文件（扩展名不区分大小写）',
+              'MapPath', map_dir)
+    for path in sorted(engine_paths - set(paths)):
+        issue('error', 'INDOOR_MAP_UNEXPECTED_ENTRY',
+              '当前引擎还会尝试读取这个非 .das 条目；请移出场景目录，或确认是地图后改为 .das 扩展名再检查',
+              'MapPath', str(path))
     for path in paths:
+        if path not in engine_paths:
+            issue('error', 'INDOOR_MAP_FILENAME_UNSUPPORTED',
+                  '已识别为室内 DAS 地图，但当前引擎会跳过该名称；请使用小写 .das 扩展名，且文件名超过 5 字节（如 floor1.das）',
+                  'MapPath', str(path))
         try:
             lines = _text(path).splitlines()
             floor = int(lines[0].split()[1])

@@ -45,11 +45,15 @@ def runtime_operation(fn):
         try:
             labels = {'run':'运行', 'toolkit':'工具任务', 'render':'装配', 'select_project':'切换项目',
                       'csv_save':'保存工参', 'csv_column':'修改工参', 'param_write':'修改参数',
-                      'param_default':'恢复参数', 'cleanup_configs':'清理配置'}
+                      'param_default':'恢复参数', 'cleanup_configs':'清理配置',
+                      'enable_indoor_building_export':'启用室内建筑导出'}
             label = labels.get(fn.__name__, '更新配置')
             if fn.__name__ == 'toolkit' and isinstance(payload, dict):
                 label = {'build':'编译','stage':'装配','doctor':'体检'}.get(payload.get('step'), label)
-            with core.RUNTIME.operation(label):
+            with core.RUNTIME.operation(label) as token:
+                source_write = fn.__name__ == 'enable_indoor_building_export' or (
+                    fn.__name__ == 'toolkit' and isinstance(payload, dict) and payload.get('step') == 'build')
+                core.RUNTIME.acquire_resources(token, core.runtime_resources(core.load_env(), source=source_write))
                 return fn(payload)
         except RuntimeBusy as exc:
             return exc.response()
@@ -78,6 +82,19 @@ def project_operation(fn):
             finally:
                 core.PROJECT_CONTEXT.reset(token)
     return wrapped
+
+
+def revision_required(body, *fields):
+    if any(not isinstance(body.get(field), str) or not body[field] for field in fields):
+        message = '缺少文件内容版本，请重新加载后保存；当前草稿已保留'
+        return dict(ok=False, code='REVISION_REQUIRED', error=message, message=message)
+    return None
+
+
+def editor_error(error):
+    conflict = isinstance(error, core.FileConflict)
+    message = ('文件已变化，请重新加载后保存；当前草稿已保留。' if conflict else '保存未完成，当前草稿已保留。') + str(error)
+    return dict(ok=False, code='FILE_CONFLICT' if conflict else 'SAVE_FAILED', error=message, message=message)
 
 
 class Api:
@@ -115,7 +132,7 @@ class Api:
                 "function_info": funcs,
                 "functions": [f["name"] for f in funcs],
                 "func_source": "来自 " + current_project + "/SwanUtility/incl/LiShuttleTypes.h",
-                'runtime': core.RUNTIME.snapshot()}
+                'runtime': core.runtime_state(env)}
 
     @staticmethod
     @runtime_operation
@@ -368,26 +385,59 @@ class Api:
             if body.get('preview_token') != preview['token']:
                 return {'error': '配置或路径选择已变化，请重新预览后确认装配',
                         'code': 'PREVIEW_STALE'}
+        class GenerationFailed(Exception):
+            pass
+
+        result = dict(schema_name=f'{job_name}.xml', func=func, task_id=task_id,
+                      schema_ok=False, generated=False, render_status='failed',
+                      assembly_status='failed', copied=[])
+        schema_path = core.schema_path(result['schema_name'])
         try:
-            base_resources = core.ensure_runtime_resources(core.load_env())
+            with core.FileTransaction() as transaction:
+                # Register only the outputs this operation can touch, before the
+                # child renderer or resource helper mutates any of them.
+                transaction.touch(schema_path)
+                transaction.touch(schema_path + '.manifest.json')
+                result['base_resources'] = core.ensure_runtime_resources(env, transaction=transaction)
+                job_file = core.build_job_env(job_name, func, task_id, task,
+                                               city_name, city_kind, transaction=transaction)
+                result['job_file'] = job_file
+                generation = core.run_render(job_file, transaction=transaction)
+                result.update(render_exit=generation['exit_code'], render_output=generation['output'],
+                              generated=generation['generated'], render_status=generation['status'])
+                if not generation['generated'] or generation['status'] not in ('ready', 'missing_inputs'):
+                    raise GenerationFailed()
+                result['schema_ok'] = True
+                result['generation_attempt'] = generation['attempt_id']
+                result['missing_inputs'] = generation.get('missing_inputs', [])
+                if preview:
+                    result.update(runtime_name=preview['runtime_name'], out_dir=preview['out_dir'],
+                                  path_changes=preview['changes'], warnings=preview['warnings'])
+                groups = tuple(key for key, enabled in (
+                    ('antenna', copy_antennas), ('model', copy_files and not reuse)) if enabled)
+                if groups:
+                    result['copied'] = core.assemble_files(task, env, groups=groups, transaction=transaction)
+                details = core.runtime_details(schema_path, os.path.dirname(os.path.dirname(schema_path)))
+                result.update(runtime_name=details['name'], out_dir=details['out_dir'])
+        except GenerationFailed:
+            result.update(schema_ok=False, generated=False, render_status='failed',
+                          assembly_status='rolled_back', copied=[])
+            result['render_output'] += '\n[已撤销] 本次装配改动已撤销，保留装配前的文件状态。'
+            return result
         except (OSError, ValueError) as exc:
-            return {'error': f'基础运行资源装配失败：{exc}'}
-        job_file = core.build_job_env(job_name, func, task_id, task,
-                                      city_name, city_kind)
-        rc, output = core.run_render(job_file)
-        result = {"job_file": job_file, "render_exit": rc, "render_output": output,
-                  "schema_name": f"{job_name}.xml", "func": func, "task_id": task_id,
-                  "copied": [], "base_resources": base_resources}
-        if preview:
-            result.update(runtime_name=preview['runtime_name'], out_dir=preview['out_dir'],
-                          path_changes=preview['changes'], warnings=preview['warnings'])
-        schema_path = core.schema_path(result["schema_name"])
-        result["schema_ok"] = os.path.isfile(schema_path)
-        groups = tuple(key for key, enabled in (
-            ('antenna', copy_antennas), ('model', copy_files and not reuse)) if enabled)
-        if groups and task and result['schema_ok']:
-            result["copied"] = core.assemble_files(task, core.load_env(), groups=groups)
-        if rc == 0 and result['schema_ok']:
+            recovery_dir = getattr(exc, 'recovery_dir', None)
+            result.update(error=f'装配失败：{exc}', schema_ok=False, generated=False,
+                          render_status='failed', copied=[],
+                          assembly_status='recovery_required' if recovery_dir else 'rolled_back')
+            result['render_output'] = result.get('render_output', '') + f'\n[装配失败] {exc}'
+            if recovery_dir:
+                result['recovery_dir'] = recovery_dir
+                result['render_output'] += '\n[需核对恢复] 请保留上述快照，核对文件状态后恢复。'
+            else:
+                result['render_output'] += '\n[已撤销] 本次装配改动已撤销，保留装配前的文件状态。'
+            return result
+        result['assembly_status'] = 'applied'
+        if result['render_exit'] == 0:
             try:
                 previous = body.get('previous_schema', '')
                 if previous and (os.path.basename(previous) != previous or not previous.endswith('.xml')):
@@ -397,9 +447,6 @@ class Api:
                                        if previous else core.sync_vs_launch(*args))
             except (OSError, ValueError) as exc:
                 result['vs_launch_warning'] = f'Visual Studio 启动项未同步：{exc}；请检查 .vs/launch.vs.json'
-        if result['schema_ok']:
-            details = core.runtime_details(schema_path, os.path.dirname(os.path.dirname(schema_path)))
-            result.update(runtime_name=details['name'], out_dir=details['out_dir'])
         return result
 
     @staticmethod
@@ -426,6 +473,25 @@ class Api:
 
     @staticmethod
     @project_operation
+    def indoor_building_export(_):
+        from indoor_building_export import inspect
+        return inspect(core.load_env())
+
+    @staticmethod
+    @runtime_operation
+    @project_operation
+    def enable_indoor_building_export(body):
+        invalid = revision_required(body, 'revision')
+        if invalid:
+            return invalid
+        from indoor_building_export import enable
+        try:
+            return dict(enable(core.load_env(), body['revision']), ok=True)
+        except (ValueError, OSError) as exc:
+            return editor_error(exc)
+
+    @staticmethod
+    @project_operation
     def params(query):
         schema = query.get("schema", [""])[0]
         func = query.get("func", [""])[0]
@@ -440,7 +506,12 @@ class Api:
         if catalog['profile'].get('reviewed'):
             from function_profiles import source_review
             catalog['profile']['source_review'] = source_review(func, core.load_env().get('PROJECT_DIR', ''))
-        return {**catalog, "file": path, "schema_name": document['name'], "values": document['values'],
+        extra = {}
+        if func == 'predindoor':
+            from indoor_building_export import inspect
+            extra['indoor_building_export'] = inspect(core.load_env())
+        return {**catalog, **extra, "file": path, "schema_name": document['name'], "values": document['values'],
+                "revision": document['revision'],
                 "param_sources": {'DefaultCalcRadius': core.radius_source(schema)},
                 "thirdpart_defaults": core.thirdpart_defaults()}
 
@@ -451,11 +522,21 @@ class Api:
         tag = body.get('tag', '')
         if tag == 'DefaultCalcRadius':
             return {'ok': False, 'message': '小区计算半径以 CSV 为准，请修改工参半径；XML 仅提供默认值'}
+        invalid = revision_required(body, 'revision')
+        if invalid:
+            return invalid
         default = core.thirdpart_defaults().get(tag)
         if not default or not default['available']:
             return {'ok': False, 'message': (default or {}).get('reason', '当前项目样例没有此参数的默认值')}
-        ok, msg = core.write_schema_param(body.get('schema', ''), tag, default['value'])
-        return dict(ok=ok, message=msg, value=default['value'], source=default['source'])
+        try:
+            result = core.write_schema_param(body.get('schema', ''), tag, default['value'],
+                expected_revision=body['revision'], return_revision=True)
+            response = dict(ok=result[0], message=result[1], value=default['value'], source=default['source'])
+            if result[0]:
+                response['revision'] = result[2]
+            return response
+        except (ValueError, OSError) as exc:
+            return editor_error(exc)
 
     @staticmethod
     @runtime_operation
@@ -464,32 +545,73 @@ class Api:
         schema = body.get("schema", "")
         tag = body.get("tag", "")
         value = str(body.get("value", ""))
+        fields = ('revision', 'source_revision', 'format_revision') if tag == 'DefaultCalcRadius' else ('revision',)
+        invalid = revision_required(body, *fields)
+        if invalid:
+            return invalid
         try:
-            ok, msg = core.write_schema_param(schema, tag, value)
-            values = core.read_schema(schema)[1]
+            result = core.write_schema_param(schema, tag, value, expected_revision=body['revision'],
+                source_revision=body.get('source_revision'), format_revision=body.get('format_revision'), return_revision=True)
+            response = dict(ok=result[0], message=result[1],
+                target='engineering_csv' if tag == 'DefaultCalcRadius' else 'schema',
+                values=result[3] if len(result) > 3 else {})
+            if result[0]:
+                if tag == 'DefaultCalcRadius':
+                    response.update(revision=body['revision'], source_revision=result[2])
+                else:
+                    response['revision'] = result[2]
+            return response
         except (ValueError, OSError) as exc:
-            ok, msg, values = False, str(exc), {}
-        return {"ok": ok, "message": msg, "values": values,
-                "target": 'engineering_csv' if tag == 'DefaultCalcRadius' else 'schema'}
+            return editor_error(exc)
 
     @staticmethod
+    @project_operation
     def csv_get(query):
-        return core.read_csv_grid(query.get("path", [""])[0])
+        try:
+            path = query.get('path', [''])[0]
+            context = core.csv_editor_context(path, query.get('schema', [''])[0])
+            return core.read_csv_grid(path, **context)
+        except (ValueError, OSError) as exc:
+            return dict(error=str(exc))
 
     @staticmethod
     @runtime_operation
     @project_operation
     def csv_save(body):
-        ok, msg = core.save_csv_grid(body["path"], body["header_zh"],
-                                     body["header_en"], body["rows"])
-        return {"ok": ok, "message": msg}
+        invalid = revision_required(body, 'revision', 'format_revision')
+        if invalid:
+            return invalid
+        try:
+            context = core.csv_editor_context(body['path'], body.get('schema', ''))
+            result = core.save_csv_grid(body['path'], body.get('header_zh'), body.get('header_en'), body['rows'],
+                expected_revision=body['revision'], expected_format_revision=body['format_revision'],
+                header_rows=body.get('header_rows'), header_lines=body.get('header_lines'),
+                return_revision=True, **context)
+            response = dict(ok=result[0], message=result[1])
+            if result[0]:
+                response['revision'] = result[2]
+            return response
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            return editor_error(exc)
 
     @staticmethod
     @runtime_operation
     @project_operation
     def csv_column(body):
-        ok, msg = core.set_csv_column(body["path"], body["column"], body["value"])
-        return {"ok": ok, "message": msg}
+        invalid = revision_required(body, 'revision', 'format_revision')
+        if invalid:
+            return invalid
+        try:
+            context = core.csv_editor_context(body['path'], body.get('schema', ''))
+            result = core.set_csv_column(body['path'], body['column'], str(body['value']),
+                expected_revision=body['revision'], expected_format_revision=body['format_revision'],
+                column_index=body.get('column_index'), return_revision=True, **context)
+            response = dict(ok=result[0], message=result[1])
+            if result[0]:
+                response['revision'] = result[2]
+            return response
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            return editor_error(exc)
 
     @staticmethod
     @runtime_operation
@@ -515,7 +637,7 @@ class Api:
 
     @staticmethod
     def runtime_state(_):
-        return core.RUNTIME.snapshot()
+        return core.runtime_state()
 
     @staticmethod
     @runtime_operation
@@ -547,7 +669,14 @@ class Api:
     def output(query):
         sid = int(query.get("sid", ["0"])[0])
         since = int(query.get("since", ["0"])[0])
-        return core.RUNNER.output(sid, since)
+        limit = max(1, min(5000, int(query.get('limit', ['500'])[0])))
+        return core.RUNNER.output(sid, since, limit=limit)
+
+    @staticmethod
+    @project_operation
+    def history(query):
+        return core.recent_runs(core.load_env().get('PROJECT_DIR', ''),
+            limit=query.get('limit', ['20'])[0], offset=query.get('offset', ['0'])[0])
 
     @staticmethod
     def stop(body):
@@ -592,6 +721,8 @@ ROUTES = {
     ("POST", "preview_render"): Api.preview_render,
     ("POST", "cleanup_configs"): Api.cleanup_configs,
     ("GET", "params"): Api.params,
+    ("GET", "indoor_building_export"): Api.indoor_building_export,
+    ("POST", "enable_indoor_building_export"): Api.enable_indoor_building_export,
     ("POST", "param_write"): Api.param_write,
     ("POST", "param_default"): Api.param_default,
     ("GET", "csv"): Api.csv_get,
@@ -602,6 +733,7 @@ ROUTES = {
     ("GET", "runtime_state"): Api.runtime_state,
     ("POST", "toolkit"): Api.toolkit,
     ("GET", "output"): Api.output,
+    ("GET", "history"): Api.history,
     ("POST", "stop"): Api.stop,
     ("GET", "results"): Api.results,
     ("POST", "open_folder"): Api.open_folder,
@@ -613,8 +745,11 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def _json(self, obj, code=200):
-        if isinstance(obj, dict) and obj.get('code') == 'RUNTIME_BUSY':
-            code = 409
+        if isinstance(obj, dict):
+            if obj.get('code') in ('RUNTIME_BUSY', 'FILE_CONFLICT'):
+                code = 409
+            elif obj.get('code') == 'REVISION_REQUIRED':
+                code = 400
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")

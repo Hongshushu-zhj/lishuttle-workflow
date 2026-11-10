@@ -57,7 +57,7 @@ function workflowStatus() {
       preflightReason:S.preflightPending || S.parameterWrites ? '正在检查，请稍候' : '',
       runReason:S.launchPending || S.parameterWrites ? '正在提交运行，请稍候' : ''},
     runtime:{busy:!!S.runtime?.busy || !!S.pollTimer || !!S.inputTransition,
-      cancellable:!!S.runtime?.sid && ['running','preparing','cancelling'].includes(S.runtime?.phase),
+      cancellable:!S.runtime?.external && !!S.runtime?.sid && ['running','preparing','cancelling'].includes(S.runtime?.phase),
       stage:S.runtime?.operation === 'build' || /build|编译/.test(S.runtime?.label || '') ? 'build' : S.runtime?.func ? 'run' : '',
       completed:S.runFingerprint === S.workflow?.fingerprint && S.runVerdict === 'success', failed:S.runFingerprint === S.workflow?.fingerprint && ['failed','cancelled'].includes(S.runVerdict)}
   });
@@ -79,6 +79,7 @@ function refreshWorkflow() {
   });
   refreshSchemaApplyState();
   $('btn-use-executable').disabled=!!S.inputTransition || !!S.runtime?.busy || !!S.pollTimer || !!S.csvDirty || !!S.xmlDirty || !selectedBuildStatus()?.built;
+  if (typeof refreshIndoorBuildingButtons === 'function') refreshIndoorBuildingButtons();
   ['btn-params-save','btn-params-discard'].forEach(id=>{
     $(id).classList[S.xmlDirty ? 'remove' : 'add']('hidden');
     $(id).disabled=!!S.inputTransition || !!S.parameterWrites || !!S.runtime?.busy;
@@ -133,6 +134,7 @@ async function init() {
     await changeProject("add_project", $("project-path").value.trim());
   };
   bindActions();
+  await initRunHistory();
   globalThis.addEventListener?.('beforeunload',event=>{
     if(S.csvDirty || S.xmlDirty) { event.preventDefault(); event.returnValue=''; }
   });
@@ -193,7 +195,7 @@ function bindActions() {
   $("btn-cleanup-preview").onclick = previewCleanup;
   $("btn-run").onclick = doRun;
   $("btn-preflight").onclick = doPreflight;
-  $("btn-stop").onclick = async () => { const r=await post("stop", {sid:S.runtime?.sid || S.sid}); if(r.error) toast(r.error,false); if(r.runtime) applyRuntimeState(r.runtime); };
+  $("btn-stop").onclick = stopCurrentOperation;
   $("btn-export-log").onclick = exportRunLog;
   $("btn-csv-load").onclick = loadCsv;
   $("engineering-path").onchange = () => selectEngineering($("engineering-path").value, true);

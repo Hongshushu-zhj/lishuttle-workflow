@@ -73,6 +73,7 @@ function applyProjectState(st, {preserveMachineDraft = false} = {}) {
   $("env-note").textContent = `预设 ${st.preset} · 输出根 ${st.out_root}`;
   if (typeof fetch === 'function' && S.profileId) refreshProjectDetection();
   if (st.runtime) applyRuntimeState(st.runtime, true);
+  if (S.historyInitialized) resetRunHistory();
 }
 
 const PROFILE_LABELS = {
@@ -375,9 +376,9 @@ async function toolkitTransition(step) {
     epoch = S.projectEpoch;
     sentDraft = {...sentDraft, ...r.build_values};
   }
-  attachConsole(r.sid, `${step} 输出：`, step === 'build' ? async () => {
+  const attachment = attachConsole(r.sid, `${step} 输出：`, step === 'build' ? async () => {
     const status = await post('build_status',{});
-    if (epoch !== S.projectEpoch) return;
+    if (epoch !== S.projectEpoch || S.sid !== r.sid || S.consoleAttachment !== attachment) return;
     if (status.error) return setupError(status);
     applyBuildStatus(status,sentDraft);
   } : null);

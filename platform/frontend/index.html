@@ -196,6 +196,12 @@
           <p id="params-summary" role="status" aria-live="polite"></p>
           <p id="params-source" class="field-help"></p>
           <div id="params-profile" class="field-help"></div>
+          <section id="indoor-building-panel" class="validation-report hidden" aria-label="室内建筑导出">
+            <strong>室内预测：building.txt 建筑导出</strong>
+            <p id="indoor-building-status" role="status" aria-live="polite"></p>
+            <p class="field-help">此项修改当前项目源码的编译开关，室内预测的路损步骤会导出到实际路损结果目录；须重新编译后才会生效。</p>
+            <div class="row"><button id="btn-enable-indoor-building" type="button" data-runtime-write disabled>启用 building.txt 导出</button><button id="btn-reload-indoor-building" type="button">重新检查源码</button><button id="btn-indoor-building-build" type="button">前往重新编译</button></div>
+          </section>
           <p class="field-help">已调研功能按源码调用链展示，包含其路损和数据依赖；“当前生效”按已确认开关过滤，实际运行还取决于数据与引擎分支。未分类及其他功能字段仍保留在全部视图。修改写入运行 XML 副本并备份；小区计算半径仍优先写入工参 CSV。</p>
         </div>
         <div class="row"><button id="btn-params-save" data-runtime-write type="button" class="hidden">重试保存未完成的修改</button><button id="btn-params-discard" type="button" class="hidden">放弃未保存的参数修改</button></div>
@@ -210,12 +216,18 @@
   <div class="stage-body"><section id="tab-run"><div class="row"><span id="run-info" class="muted">尚未装配</span><button id="btn-run" aria-describedby="run-action-reason" data-runtime-write class="primary">运行 lishuttle</button><span id="run-status" class="badge hidden"></span></div><p id="run-action-reason" class="field-help" role="status">完成装配与检查后启动。</p>
 <pre id="run-outcome" class="validation-report" aria-live="polite"></pre>
 </section>
+<section class="run-history" aria-labelledby="run-history-title">
+  <div class="row"><strong id="run-history-title">最近运行</strong><button id="btn-history-refresh" class="mini">刷新记录</button><span id="run-history-page" class="muted"></span><button id="btn-history-prev" class="mini" disabled>上一页</button><button id="btn-history-next" class="mini" disabled>下一页</button></div>
+  <p id="run-history-status" class="field-help" role="status">运行记录保存在本机，按当前项目查看。</p>
+  <div id="run-history-list" class="history-list" aria-label="当前项目最近运行"></div>
+</section>
 <section id="tab-results" class="legacy-view">
       <div class="row">
         <span class="lbl">任务名：</span><input id="result-job" class="txt" placeholder="与运行时的任务名一致">
         <button id="btn-results" class="mini">查看</button>
         <label><input id="result-directory-only" type="checkbox">仅浏览任务目录</label>
         <button id="btn-open-dir" class="mini">打开目录</button>
+        <button id="btn-open-archive" class="mini" disabled>打开本次归档</button>
         <span id="result-status" class="badge hidden"></span>
       </div>
       <pre id="result-validation" class="validation-report" aria-live="polite"></pre>
@@ -228,12 +240,13 @@
 </div>
 </details>
 </main></div>
-<details id="operation-panel" class="operation-panel" open><summary><strong id="operation-title">操作日志</strong><span class="field-help">编译、体检、装配与运行的共享日志</span></summary><div class="operation-body"><div class="row"><button id="btn-stop">停止当前操作</button><button id="btn-export-log" disabled title="导出当前会话截至此刻的全部控制台日志">导出日志</button></div><pre id="run-console" class="console" aria-label="当前操作日志"></pre></div></details>
+<details id="operation-panel" class="operation-panel" open><summary><strong id="operation-title">操作日志</strong><span class="field-help">编译、体检、装配与运行的共享日志</span></summary><div class="operation-body"><div class="row"><button id="btn-stop">停止当前操作</button><button id="btn-export-log" disabled title="导出当前会话截至此刻的全部控制台日志">导出日志</button><span id="run-connection" class="field-help" role="status" aria-live="polite"></span></div><pre id="run-console" class="console" aria-label="当前操作日志"></pre></div></details>
 <script src="workflow-state.js"></script>
 <script src="api-client.js"></script>
 <script src="project-build.js"></script>
 <script src="task-assembly.js"></script>
 <script src="editors.js"></script>
+<script src="indoor-building.js"></script>
 <script src="runtime-session.js"></script>
 <script src="app.js"></script>
 </body>

@@ -93,12 +93,12 @@ class RuntimeResourcesTests(unittest.TestCase):
     def test_api_stages_before_render_and_then_overlays_selected_task(self):
         task = dict(name='task', dir=str(self.root / 'task'), has_antennas=True)
         order = []
-        def stage(env):
+        def stage(env, **kwargs):
             order.append('base')
             return {'copied': [], 'kept_count': 0}
-        def render(job):
+        def render(job, **kwargs):
             order.append('render')
-            return 0, 'render output'
+            return dict(exit_code=0, output='render output', generated=True, status='ready', attempt_id='test')
         def overlay(*args, **kwargs):
             order.append('task')
             return []
@@ -127,14 +127,14 @@ class RuntimeResourcesTests(unittest.TestCase):
              patch.object(core, 'scan_tasks', return_value=([task], 'tasks')), \
              patch.object(core, 'validate_engineering', return_value='engineering.csv'), \
              patch.object(core, 'build_job_env', return_value='job.env'), \
-             patch.object(core, 'run_render', return_value=(0, 'ok')) as render, \
+             patch.object(core, 'run_render', return_value=dict(exit_code=0, output='ok', generated=True, status='ready', attempt_id='test')) as render, \
              patch.object(core, 'schema_path', return_value=str(self.runtime_xml)), \
              patch.object(core, 'sync_vs_launch', side_effect=ValueError('JSON 无效')) as sync:
             result = Api.render(dict(job_name='job', task=task))
             self.assertIn('JSON 无效', result['vs_launch_warning'])
             self.assertTrue(result['schema_ok'])
             sync.reset_mock()
-            render.return_value = (1, 'failed')
+            render.return_value = dict(exit_code=1, output='failed', generated=False, status='failed', attempt_id='test')
             result = Api.render(dict(job_name='job', task=task))
             sync.assert_not_called()
 

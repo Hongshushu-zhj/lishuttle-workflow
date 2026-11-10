@@ -6,6 +6,7 @@ from copy import deepcopy
 import threading
 import time
 import uuid
+from resource_lock import ResourceLease, ResourceBusy, normalize_resource
 
 
 class RuntimeBusy(RuntimeError):
@@ -25,6 +26,8 @@ class RuntimeGuard:
         self._lock = threading.RLock()
         self._owner = None
         self._current = ContextVar('runtime_lease', default=None)
+        self._leases = []
+        self._resources = set()
 
     def snapshot(self):
         with self._lock:
@@ -69,6 +72,43 @@ class RuntimeGuard:
                     self._owner[key] = context[key]
             self._owner.update(sid=sid, phase='running', retained=True)
 
+    def acquire_resources(self, token, context):
+        """Extend the current lease before reading or changing shared inputs."""
+        with self._lock:
+            if not self._owner or self._owner['token'] != token:
+                raise RuntimeError('运行占用已失效')
+            resources = {normalize_resource(context[key]) for key in ('bin_dir', 'out_dir', 'source_project')
+                         if context.get(key)} - self._resources
+            if not resources:
+                return
+            owner = dict(self.snapshot(), **{key: context[key] for key in
+                         ('project', 'bin_dir', 'out_dir') if context.get(key)})
+            lease = ResourceLease(resources, owner=owner)
+            try:
+                lease.acquire()
+            except ResourceBusy as exc:
+                raise RuntimeBusy(dict(exc.owner, busy=True, external=True,
+                                       phase=exc.owner.get('phase', 'running'))) from exc
+            self._leases.append(lease)
+            self._resources.update(resources)
+
+    def external_snapshot(self, context):
+        own = self.snapshot()
+        if own['busy']:
+            return own
+        resources = [context[key] for key in ('bin_dir', 'out_dir', 'source_project') if context.get(key)]
+        if not resources:
+            return own
+        lease = ResourceLease(resources)
+        try:
+            lease.acquire()
+        except ResourceBusy as exc:
+            return dict(exc.owner, busy=True, external=True,
+                        phase=exc.owner.get('phase', 'running'))
+        finally:
+            lease.release()
+        return own
+
     def set_phase(self, token, phase):
         with self._lock:
             if self._owner and self._owner['token'] == token:
@@ -78,5 +118,9 @@ class RuntimeGuard:
         with self._lock:
             if not self._owner or self._owner['token'] != token:
                 return False
+            for lease in reversed(self._leases):
+                lease.release()
+            self._leases = []
+            self._resources.clear()
             self._owner = None
             return True

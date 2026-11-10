@@ -64,6 +64,8 @@ Thumbs.db
 Desktop.ini
 
 # Temporary files and local backups.
+.lishuttle-history/
+.lishuttle-runs/
 *.tmp
 *.temp
 *.bak

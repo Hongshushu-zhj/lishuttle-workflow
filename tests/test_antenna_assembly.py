@@ -2,7 +2,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, ANY
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'platform/backend'))
 import core
@@ -71,7 +71,7 @@ class AntennaAssemblyTests(unittest.TestCase):
         with patch.object(core, 'scan_tasks', return_value=([task], str(self.tasks))), \
                 patch.object(core, 'preview_task_schema', return_value=preview), \
                 patch.object(core, 'build_job_env', return_value='job.env'), \
-                patch.object(core, 'run_render', return_value=(0, '')), \
+                patch.object(core, 'run_render', return_value=dict(exit_code=0, output='', generated=True, status='ready', attempt_id='test')), \
                 patch.object(core, 'ensure_runtime_resources', return_value={}), \
                 patch.object(core, 'schema_path', return_value=str(self.runtime_xml)), \
                 patch.object(core, 'load_env', return_value=self.env), \
@@ -79,7 +79,7 @@ class AntennaAssemblyTests(unittest.TestCase):
             body = dict(job_name='job', task=task, use_existing_schema=True,
                         preview_token='token', copy_antennas=True, copy_files=False)
             Api.render(body)
-            assemble.assert_called_once_with(task, self.env, groups=('antenna',))
+            assemble.assert_called_once_with(task, self.env, groups=('antenna',), transaction=ANY)
             assemble.reset_mock()
             Api.render(dict(body, copy_antennas=False))
             assemble.assert_not_called()

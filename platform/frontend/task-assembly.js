@@ -353,6 +353,7 @@ function renderFuncRadios(current) {
 }
 
 function showFuncHint(f) {
+  if (typeof renderIndoorBuildingExport === 'function') renderIndoorBuildingExport(S.paramsData);
   const srv = (S.functionInfo || {})[f];
   const info = srv ? { zh: srv.label, desc: srv.desc } : FUNC_INFO[f];
   if (info) $("hint").textContent = `-f ${f} ${info.zh}：${info.desc}`;
@@ -456,15 +457,12 @@ async function submitRender(body, previewRecord = null) {
     return {status:'outcome_unknown'};
   }
   if (epoch !== S.projectEpoch || sentContext !== schemaPreviewContext() || (previewRecord && !schemaPreviewCurrent(previewRecord))) return {status:'preview_stale'};
-  if (r.error) {
-    if (r.code === 'RUNTIME_BUSY' && !r.runtime) applyRuntimeState({...S.runtime, busy:true});
-    setupError(r);
-    return {status:r.code === 'PREVIEW_STALE' ? 'preview_stale' : r.code === 'RUNTIME_BUSY' ? 'runtime_busy' : 'retryable_error'};
-  }
   const ro = $("render-output");
   ro.classList.remove("hidden");
   const base = r.base_resources;
-  const baseLog = base ? `基础运行资源：补齐 ${base.copied.length} 个文件，保留 ${base.kept_count} 个已有文件\n` +
+  const resourceState = r.assembly_status === 'rolled_back' ? '（本次改动已撤销）' :
+    r.assembly_status === 'recovery_required' ? '（恢复需核对）' : '';
+  const baseLog = base ? `基础运行资源${resourceState}：${resourceState ? '曾尝试补齐' : '补齐'} ${base.copied.length} 个文件，保留 ${base.kept_count} 个已有文件\n` +
     `配置来源：${base.config_source}\n动态库来源：${base.dll_source}\n目标：${base.exe_dir}\n` +
     base.copied.map(c => `${c.from} → ${c.to}`).join("\n") + "\n\n" : "";
   const launch = r.vs_launch;
@@ -472,11 +470,17 @@ async function submitRender(body, previewRecord = null) {
     launch.entries.join("\n") + (launch.backup ? `\n原文件备份：${launch.backup}` : "") : "";
   ro.textContent = baseLog + (r.render_output || "(无输出)") + launchLog +
     (r.vs_launch_warning ? `\n\n${r.vs_launch_warning}` : "");
-  if (!r.schema_ok) {
-    toast("渲染失败：没生成运行单，看下方输出", false);
+  if (r.error) {
+    if (r.code === 'RUNTIME_BUSY' && !r.runtime) applyRuntimeState({...S.runtime, busy:true});
+    setupError(r);
+    return {status:r.code === 'PREVIEW_STALE' ? 'preview_stale' : r.code === 'RUNTIME_BUSY' ? 'runtime_busy' : 'retryable_error'};
+  }
+  if (!r.schema_ok || r.generated !== true || !['ready','missing_inputs'].includes(r.render_status)) {
+    toast("渲染失败：本次运行单生成未确认，请看下方输出", false);
     return {status:"retryable_error"};
   }
-  if (r.render_exit !== 0) {
+  const pendingInputs = r.render_status === 'missing_inputs';
+  if (pendingInputs) {
     toast("运行单已生成，但有输入文件缺失（下方标 [缺失]）——参数面板仍可改路径", false);
   }
 
@@ -486,7 +490,7 @@ async function submitRender(body, previewRecord = null) {
   taskIdentityChanged();
   $('result-job').value = r.runtime_name || jobName;
   const copied = (r.copied || []).map(c => `${c.file} → ${c.to} ${c.backup}`).join("\n");
-  toast(`渲染完成：${r.schema_name}${copied ? "\n已替换：" + copied : ""}`);
+  toast(`${pendingInputs ? '装配完成，输入待检查' : '渲染完成'}：${r.schema_name}${copied ? "\n已替换：" + copied : ""}`, !pendingInputs);
   if (r.vs_launch_warning) toast(r.vs_launch_warning, false);
   updateNote();
   switchTab(document.querySelector('[data-tab="params"]'));

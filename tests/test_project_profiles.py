@@ -195,7 +195,8 @@ class ProjectProfileTests(unittest.TestCase):
         workspace = self.root / '独立 workspace'
         (workspace / 'scripts').mkdir(parents=True)
         (workspace / 'env').mkdir()
-        for name in ('load_local_env.bat', 'project_config.py', 'render_schema.py', 'task_schema.py'):
+        for name in ('load_local_env.bat', 'project_config.py', 'render_schema.py', 'task_schema.py',
+                     'file_safety.py', 'indoor_maps.py'):
             shutil.copy2(ROOT / 'scripts' / name, workspace / 'scripts' / name)
         (workspace / 'env/local-win.env').write_text(self.original, encoding='utf-8')
         check = workspace / 'check.bat'

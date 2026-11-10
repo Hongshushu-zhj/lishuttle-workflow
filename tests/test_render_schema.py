@@ -97,6 +97,75 @@ class SampleRenderingTests(unittest.TestCase):
                                write_output=False)
         self.assertEqual(output.read_bytes(), before)
 
+    def test_each_generation_has_a_unique_receipt_even_when_xml_is_identical(self):
+        self.render()
+        path = self.root / 'build/Bin/runtimelibrary/new-job.xml.manifest.json'
+        first = json.loads(path.read_text(encoding='utf-8'))
+        self.assertIn('generation', first)
+        self.render()
+        second = json.loads(path.read_text(encoding='utf-8'))
+        self.assertNotEqual(first['generation']['attempt_id'], second['generation']['attempt_id'])
+        self.assertEqual(first['generation']['schemas'], second['generation']['schemas'])
+
+    def test_sample_regeneration_preserves_xml_and_manifest_versions(self):
+        self.render()
+        xml = self.root / 'build/Bin/runtimelibrary/new-job.xml'
+        manifest = Path(str(xml) + '.manifest.json')
+        first = (xml.read_bytes(), manifest.read_bytes())
+        self.job['ENGINEERING_FILE'] = 'second.csv'
+        self.render()
+        second = (xml.read_bytes(), manifest.read_bytes())
+        self.job['ENGINEERING_FILE'] = 'third.csv'
+        self.render()
+        history = xml.parent / '.lishuttle-history'
+        self.assertTrue(Path(str(xml) + '.bak').is_file(), 'sample XML overwrite must keep a backup')
+        self.assertTrue(Path(str(manifest) + '.bak').is_file(), 'manifest overwrite must keep a backup')
+        self.assertEqual(Path(str(xml) + '.bak').read_bytes(), second[0])
+        self.assertEqual(Path(str(manifest) + '.bak').read_bytes(), second[1])
+        self.assertCountEqual([p.read_bytes() for p in history.glob(xml.name + '.[0-9]*.bak')],
+                              [first[0], second[0]])
+        self.assertCountEqual([p.read_bytes() for p in history.glob(manifest.name + '.[0-9]*.bak')],
+                              [first[1], second[1]])
+
+    def test_manifest_replace_failure_restores_old_xml_and_manifest(self):
+        self.render()
+        xml = self.root / 'build/Bin/runtimelibrary/new-job.xml'
+        manifest = Path(str(xml) + '.manifest.json')
+        before = (xml.read_bytes(), manifest.read_bytes())
+        self.job['ENGINEERING_FILE'] = 'changed.csv'
+        replace = renderer.os.replace
+        failed = False
+
+        def fail_manifest(source, destination):
+            nonlocal failed
+            if Path(destination) == manifest and not failed:
+                failed = True
+                raise OSError('manifest replace failed')
+            return replace(source, destination)
+
+        with patch.object(renderer.os, 'replace', side_effect=fail_manifest):
+            with self.assertRaisesRegex(OSError, 'manifest replace'):
+                self.render()
+        self.assertEqual((xml.read_bytes(), manifest.read_bytes()), before)
+
+    def test_first_generation_failure_removes_every_new_target(self):
+        self.job['SCHEMA_NAME'] = 'one.xml,two.xml'
+        directory = self.root / 'build/Bin/runtimelibrary'
+        replace = renderer.os.replace
+
+        def fail_second(source, destination):
+            if Path(destination) == directory / 'two.xml':
+                raise OSError('second XML failed')
+            return replace(source, destination)
+
+        with patch.object(renderer.os, 'replace', side_effect=fail_second):
+            with self.assertRaisesRegex(OSError, 'second XML'):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    renderer.do_render(self.env, self.job, 'test', 'job.env', 'env.env')
+        self.assertFalse((directory / 'one.xml').exists())
+        self.assertFalse((directory / 'two.xml').exists())
+        self.assertFalse((directory / 'one.xml,two.xml.manifest.json').exists())
+
     @unittest.skipUnless(os.name == 'nt', 'Windows drive-letter paths')
     def test_manifest_accepts_project_configuration_on_another_drive(self):
         other_drive = 'Z:' if self.root.drive.upper() != 'Z:' else 'Y:'

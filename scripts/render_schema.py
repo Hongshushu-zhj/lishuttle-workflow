@@ -34,7 +34,10 @@ import json
 import os
 import re
 import sys
-import shutil
+import hashlib
+import uuid
+from file_safety import FileTransaction
+from indoor_maps import indoor_map_entries
 from project_config import load_local, validate_operation
 from task_schema import render_existing, runtime_details, LOCAL_PATHS, synchronize_runtime_name
 import xml.etree.ElementTree as ET
@@ -391,7 +394,8 @@ def render_project_sample(table, job):
     return rendered, to_slash(sample)
 
 
-def do_render(env, job, target, job_path, env_path, write_output=True):
+def do_render(env, job, target, job_path, env_path, write_output=True,
+              attempt_id=None, receipt_path=None, backup_existing=True):
     table = build_table(env, job)
 
     schema_names = [n.strip() for n in table["SCHEMA_NAME"].split(",") if n.strip()]
@@ -404,6 +408,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
     out_dir = f"{to_slash(table['OUT_ROOT'])}/{table['JOB_NAME']}"
     written = []
     actual_paths = {}
+    attempt_id = attempt_id or uuid.uuid4().hex
 
     if write_output:
         # 默认室内外入口均从当前项目完整样例复制。显式指定其他模板仍兼容。
@@ -442,10 +447,6 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
                     sys.exit('[错误] 源 XML 与目标文件相同，不能覆盖原始配置')
         for name in schema_names:
             out_file = os.path.join(table["RUNTIME_SCHEMA_DIR"], name)
-            if existing and os.path.isfile(out_file):
-                shutil.copy2(out_file, out_file + '.bak')
-            with open(out_file, "w", encoding="utf-8", newline="") as fh:
-                fh.write(rendered)
             written.append(to_slash(out_file))
 
         manifest = {
@@ -483,8 +484,10 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
             },
         }
         mpath = manifest_path_for(table)
-        with open(mpath, "w", encoding="utf-8") as fh:
-            json.dump(manifest, fh, ensure_ascii=False, indent=2)
+        rendered_bytes = rendered.encode('utf-8')
+        manifest['generation'] = dict(attempt_id=attempt_id, schemas=[
+            dict(path=to_slash(os.path.abspath(path)),
+                 revision=hashlib.sha256(rendered_bytes).hexdigest()) for path in written])
 
     elif table.get('SCHEMA_SOURCE'):
         details = runtime_details(os.path.join(table['RUNTIME_SCHEMA_DIR'], schema_names[0]), table['EXE_DIR'])
@@ -502,8 +505,8 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
                 table[key] = os.path.join(table['EXE_DIR'], path)
 
     # ---- 检查输入文件 ----
-    # 室外任务检查地图四件套索引；室内任务（MapFormat=indoor）只需
-    # MapPath 目录下的 building.das（室内地图就是这一个文件）
+    # 室内 MapPath 是场景目录；所有引擎可识别的 DAS 楼层均属于输入。
+    # 此处检查文件存在，内容及楼层一致性由运行预检验证。
     map_root = to_slash(table.get("MAP_ROOT", ""))
     city = table.get("CITY", "")
     is_indoor = (table.get("MAP_FORMAT", "").strip().lower() == "indoor"
@@ -512,11 +515,12 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
         value = actual_paths.get(tag, default).replace('\\', '/')
         return os.path.join(table['EXE_DIR'], value) if value and not os.path.isabs(value) else value
     if is_indoor:
-        map_path = table.get("MAP_PATH", "")
+        map_path = input_path('MapPath', table.get("MAP_PATH", ""))
+        floors = indoor_map_entries(map_path)
         checks = [
             ("工参 CSV", table["ENGINEERING_FILE"], True),
-            ("室内地图 building.das",
-             f"{map_path}/building.das" if map_path else "", True),
+            *[("室内地图 " + path.name, str(path), True) for path in floors],
+            *([] if floors else [(f"室内地图 DAS 楼层文件（{to_slash(map_path) or '未设置目录'}）", "", True)]),
             ("场景配置", table["SCENE_SETTINGS_FILE"], False),
         ]
     else:
@@ -564,6 +568,23 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
             missing_required.append(label)
     print()
 
+    if write_output:
+        # One controlled operation: any write/replace error restores all targets.
+        # This does not provide cross-file atomicity after a power loss.
+        with FileTransaction() as transaction:
+            outputs = []
+            for path in written:
+                revision = transaction.write(path, rendered_bytes, backup=backup_existing)
+                outputs.append(dict(path=to_slash(os.path.abspath(path)), revision=revision))
+            manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=2).encode('utf-8')
+            revision = transaction.write(mpath, manifest_bytes, backup=backup_existing)
+            outputs.append(dict(path=to_slash(os.path.abspath(mpath)), revision=revision))
+            if receipt_path:
+                receipt = dict(attempt_id=attempt_id, generated=True,
+                               status='missing_inputs' if missing_required else 'ready',
+                               missing_inputs=missing_required, outputs=outputs)
+                transaction.write(receipt_path, json.dumps(receipt, ensure_ascii=False).encode('utf-8'))
+
     if missing_required:
         print(f"[注意] {len(missing_required)} 个必需文件不存在："
               f"{'、'.join(missing_required)}")
@@ -578,6 +599,14 @@ def do_render(env, job, target, job_path, env_path, write_output=True):
 def main():
     raw = list(sys.argv[1:])
     project = None
+    generation = {}
+    for flag, key in (('--attempt-id', 'attempt_id'), ('--receipt', 'receipt_path')):
+        if flag in raw:
+            index = raw.index(flag)
+            if index + 1 >= len(raw):
+                raise ValueError(flag + ' 需要值')
+            generation[key] = raw[index + 1]
+            del raw[index:index + 2]
     if '--project' in raw:
         index = raw.index('--project')
         if index + 1 >= len(raw):
@@ -617,7 +646,8 @@ def main():
         return do_print_run(table, prepare_render=prepare, batch='--batch' in flags)
 
     return do_render(env, job, target, job_path, env_path,
-                     write_output="--no-render" not in flags)
+                     write_output="--no-render" not in flags,
+                     backup_existing='--no-backup' not in flags, **generation)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,10 @@ class ParameterCatalogTests(unittest.TestCase):
         self.assertNotIn('error', result)
         return {p['name']:p for g in result['groups'] for p in g['rows']}
 
+    def write_param(self, **body):
+        revision = core.read_schema_document(body.get('schema', 'job.xml'))[1]['revision']
+        return Api.param_write(dict(body, revision=revision))
+
     def test_default_view_contains_every_actual_field_and_no_fabricated_defaults(self):
         self.xml('<MapFormat>PLANET</MapFormat><DefaultCalcResolution>5</DefaultCalcResolution>'
                  '<VendorExtension>keep</VendorExtension><MinK0>10</MinK0>')
@@ -78,14 +82,14 @@ class ParameterCatalogTests(unittest.TestCase):
         self.assertIn('second', rows['Repeat']['display_value'])
         before = self.schema.read_bytes()
         for tag in ('Custom','Repeat','Item'):
-            result = Api.param_write(dict(schema='job.xml', tag=tag, value='changed'))
+            result = self.write_param(schema='job.xml', tag=tag, value='changed')
             self.assertFalse(result['ok'], tag)
         self.assertEqual(before, self.schema.read_bytes())
 
     def test_edit_attributed_field_preserves_comments_attributes_and_other_bytes(self):
         self.xml('<!-- <Actual unit="old">comment</Actual> --><Actual unit="m">12</Actual><Keep>中文</Keep>')
         before = self.schema.read_bytes()
-        result = Api.param_write(dict(schema='job.xml', tag='Actual', value='2 < 3 & 4'))
+        result = self.write_param(schema='job.xml', tag='Actual', value='2 < 3 & 4')
         self.assertTrue(result['ok'], result)
         expected = before.replace(b'<Actual unit="m">12</Actual>', b'<Actual unit="m">2 &lt; 3 &amp; 4</Actual>')
         self.assertEqual(self.schema.read_bytes(), expected)
@@ -93,7 +97,7 @@ class ParameterCatalogTests(unittest.TestCase):
 
     def test_empty_attributed_field_is_editable_and_preserves_attribute(self):
         self.xml('<Empty unit="m"/>')
-        result = Api.param_write(dict(schema='job.xml', tag='Empty', value='25'))
+        result = self.write_param(schema='job.xml', tag='Empty', value='25')
         self.assertTrue(result['ok'], result)
         self.assertIn('<Empty unit="m">25</Empty>', self.schema.read_text(encoding='utf-8'))
 
@@ -115,7 +119,7 @@ class ParameterCatalogTests(unittest.TestCase):
     def test_invalid_text_cannot_corrupt_xml(self):
         self.xml('<Actual>12</Actual>')
         before = self.schema.read_bytes()
-        result = Api.param_write(dict(schema='job.xml', tag='Actual', value='bad\x00text'))
+        result = self.write_param(schema='job.xml', tag='Actual', value='bad\x00text')
         self.assertFalse(result['ok'])
         self.assertEqual(before, self.schema.read_bytes())
 
@@ -127,12 +131,20 @@ class ParameterCatalogTests(unittest.TestCase):
         before = self.schema.read_bytes()
         rows = self.rows(Api.params(dict(schema=['job.xml'])))
         self.assertTrue(rows['Field']['read_only'])
-        self.assertFalse(Api.param_write(dict(schema='job.xml', tag='Field', value='中文'))['ok'])
+        self.assertFalse(self.write_param(schema='job.xml', tag='Field', value='中文')['ok'])
         self.assertEqual(before,self.schema.read_bytes())
 
     def test_internal_comments_do_not_pollute_scene_or_csv_semantic_values(self):
         csv = self.schema.parent.parent/'cells.csv'
-        csv.write_text('小区,半径\nCell ID,CalcRadius\na,125\n',encoding='utf-8-sig')
+        # Indoor editing follows the engine's fixed 32-column layout.
+        header = [''] * 32
+        for index, label in {0:'AP ID', 2:'Cell ID', 3:'Floor', 4:'x', 5:'y',
+                              10:'Antenna', 13:'Max Power (dBm)', 21:'Main Calculation Radius (m)'}.items():
+            header[index] = label
+        row = [''] * 32
+        row[0], row[2], row[21] = 'ap', 'a', '125'
+        csv.write_text(','.join(header) + '\n' + ','.join(header) + '\n' + ','.join(row) + '\n',
+                       encoding='utf-8-sig')
         self.xml('<MapFormat>indoor<!-- note --></MapFormat><MapPath>map</MapPath>'
                  '<EngineeringFilePath>cells.csv<!-- keep --></EngineeringFilePath><DefaultCalcRadius>800</DefaultCalcRadius>')
         result = Api.params(dict(schema=['job.xml'],func=['plindoor']))

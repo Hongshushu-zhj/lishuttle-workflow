@@ -28,7 +28,8 @@ import time
 import secrets
 from run_guard import RuntimeGuard
 from managed_process import ManagedProcess
-from engineering import identify_engineering, validate_engineering, normalized
+from run_history import RunHistory
+from engineering import identify_engineering, validate_engineering, normalized, engineering_kind
 from vs_launch import sync_launch
 
 HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
@@ -41,9 +42,12 @@ SPEC_FILE = os.path.join(HERE, "params_spec.json")
 
 sys.path.insert(0, SCRIPTS)
 from render_schema import read_env_file, build_table  # noqa: E402
+from file_safety import atomic_write, file_revision, FileTransaction, FileConflict
+from engineering_format import grid_layout, ALIASES, recognized_columns
 from task_schema import schema_candidates, render_existing, runtime_details, path_overrides, read_runtime, local_path_values, OUTDOOR_PATHS
 from project_config import ProjectStore, FIELDS, MACHINE_FIELDS, write_snapshot, validate_operation
 from project_detection import detect_project_config
+from indoor_maps import indoor_floor_files
 from project_workflow import describe_build, prepare_build, required_issues, sync_executable, BUILD_FIELDS
 from parameter_catalog import parse_document, build_catalog, replace_scalar
 
@@ -169,7 +173,7 @@ def _check(paths_labels):
 
 
 def scan_cities():
-    """地图目录 → 室外城市（heights/index.txt）/ 室内场景（building.das）。"""
+    """地图根的子目录 → 室外城市（heights/index.txt）/ 室内 DAS 场景。"""
     env = load_env()
     map_root = env.get("MAP_ROOT", "")
     cities = []
@@ -179,7 +183,11 @@ def scan_cities():
         full = os.path.join(map_root, name)
         if not os.path.isdir(full):
             continue
-        if os.path.isfile(os.path.join(full, "heights", "index.txt")):
+        floors = indoor_floor_files(full)
+        if floors:
+            checks = _check([(path.name, str(path)) for path in floors])
+            cities.append({"name": name, "kind": "indoor", "checks": checks})
+        elif os.path.isfile(os.path.join(full, "heights", "index.txt")):
             checks = _check([
                 ("投影", os.path.join(full, "heights", "projection.txt")),
                 ("高程", os.path.join(full, "heights", "index.txt")),
@@ -189,9 +197,6 @@ def scan_cities():
                 ("建筑矢量", os.path.join(full, "buildvector", "index.txt")),
             ])
             cities.append({"name": name, "kind": "outdoor", "checks": checks})
-        elif os.path.isfile(os.path.join(full, "building.das")):
-            checks = _check([("building.das", os.path.join(full, "building.das"))])
-            cities.append({"name": name, "kind": "indoor", "checks": checks})
     return cities, to_slash(map_root)
 
 
@@ -239,13 +244,15 @@ def scan_tasks():
     if not os.path.isdir(gongcan):
         return tasks, to_slash(gongcan)
     for name in sorted(os.listdir(gongcan)):
+        if name == '.lishuttle-history':
+            continue
         full = os.path.join(gongcan, name)
         if os.path.isdir(full):
             csvs, txts, xmls = [], [], []
             antenna = model = scene = ""
             antenna_dir = model_dir = ""
             for base, dirs, files in os.walk(full):
-                dirs.sort()
+                dirs[:] = sorted(d for d in dirs if d != '.lishuttle-history')
                 base_name = os.path.basename(base).lower()
                 if base_name in ("antenna", "antennas") and not antenna_dir:
                     antenna_dir = base
@@ -303,7 +310,7 @@ def scan_tasks():
                     matches = [p for p in child['xmls'] if os.path.basename(p).lower() == filename]
                     child[key] = matches[0] if len(matches) == 1 else ''
                 for key, names in (('antenna_dir', ('antenna', 'antennas')), ('model_dir', ('models',))):
-                    matches = [os.path.join(base, name) for base, dirs, _ in os.walk(folder)
+                    matches = [os.path.join(base, name) for base, dirs, _ in resource_walk(folder)
                                for name in dirs if name.lower() in names]
                     child[key] = to_slash(matches[0]) if len(matches) == 1 else ''
                 expanded.append(child)
@@ -315,7 +322,7 @@ def scan_tasks():
         task['schema_candidates'] = schema_candidates(task.get('xmls', []))
         task['has_antennas'] = bool(task.get('antenna')) or bool(task.get('antenna_dir')) and any(
             any(not f.lower().endswith('.bak') for f in files)
-            for _, _, files in os.walk(task['antenna_dir'])
+            for _, _, files in resource_walk(task['antenna_dir'])
         )
     return tasks, to_slash(gongcan)
 
@@ -394,7 +401,17 @@ def preview_task_schema(body, task, city_kind):
     return {k: v for k, v in preview.items() if k != 'text'}
 
 
-def build_job_env(job_name, func, task_id, task, city_name, city_kind):
+def job_env_path(job_name, env=None):
+    """Stable task-sheet destination, discoverable before an assembly mutates it."""
+    from runtime_cleanup import build_scope
+    env = load_env() if env is None else env
+    directory = os.path.join(JOBS_DIR, env.get('PROJECT_PROFILE_ID') or
+                             hashlib.sha256(os.path.realpath(env['PROJECT_DIR']).encode('utf-8')).hexdigest()[:20],
+                             build_scope(env))
+    return os.path.join(directory, f'web-{job_name}.env')
+
+
+def build_job_env(job_name, func, task_id, task, city_name, city_kind, transaction=None):
     env = load_env()
     lines = [
         f'JOB_NAME="{job_name}"',
@@ -425,12 +442,7 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind):
             f'ENGINEERING_FILE="{csv_file}"',
             f'POLYGON_FILE="{region}"',
         ]
-    from runtime_cleanup import build_scope
-    directory = os.path.join(JOBS_DIR, env.get('PROJECT_PROFILE_ID') or
-                             hashlib.sha256(os.path.realpath(env['PROJECT_DIR']).encode('utf-8')).hexdigest()[:20],
-                             build_scope(env))
-    os.makedirs(directory, exist_ok=True)
-    job_file = os.path.join(directory, f"web-{job_name}.env")
+    job_file = job_env_path(job_name, env)
     if env.get('PROJECT_PROFILE_ID'):
         lines += [f'PROJECT_PROFILE_ID="{env["PROJECT_PROFILE_ID"]}"']
     if task.get('schema_source'):
@@ -442,13 +454,13 @@ def build_job_env(job_name, func, task_id, task, city_name, city_kind):
                  if line.startswith('POLYGON_FILE=') else line for line in lines]
     if task.get('scene'):
         lines.append(f'SCENE_SETTINGS_FILE="{task["scene"]}"')
-    with open(job_file, "w", encoding="utf-8") as fh:
-        fh.write("# 由平台生成，可手工编辑后用脚本复跑\n" + "\n".join(lines) + "\n")
+    data = ("# 由平台生成，可手工编辑后用脚本复跑\n" + "\n".join(lines) + "\n").encode('utf-8')
+    (transaction.write if transaction else atomic_write)(job_file, data)
     return to_slash(job_file)
 
 
-def run_render(job_file):
-    """调渲染脚本，返回 (退出码, 输出文本)。
+def run_render(job_file, transaction=None):
+    """Render and verify this invocation's receipt, paths and content digests.
 
     必须显式给子进程 PYTHONIOENCODING=utf-8：Python 的 stdout 被管道捕获时用的是
     系统 locale 编码（中文 Windows 上是 GBK），而这里按 UTF-8 解码；
@@ -457,15 +469,70 @@ def run_render(job_file):
     child_env = dict(os.environ)
     child_env["PYTHONIOENCODING"] = "utf-8"
     child_env['LISHUTTLE_CONFIG_SNAPSHOT'] = write_snapshot(load_env())
-    proc = subprocess.run(
-        [sys.executable, os.path.join(SCRIPTS, "render_schema.py"), job_file, "local-win"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
-        cwd=ROOT, env=child_env)
-    return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+    job = read_env_file(job_file, '任务单')
+    table = build_table(load_env(), job)
+    # When the API owns the transaction it owns backups too, so a later resource
+    # failure can restore the previous .bak and remove new history entries.
+    if transaction is not None:
+        targets = [os.path.join(table['RUNTIME_SCHEMA_DIR'], name.strip())
+                   for name in table['SCHEMA_NAME'].split(',') if name.strip()]
+        targets.append(os.path.join(table['RUNTIME_SCHEMA_DIR'],
+                                    table['SCHEMA_NAME'] + '.manifest.json'))
+        for path in targets:
+            if os.path.isfile(path):
+                transaction.copy(path, path, backup=True)
+    attempt_id = secrets.token_hex(24)
+    with tempfile.TemporaryDirectory(prefix='lishuttle-render-') as directory:
+        receipt_path = os.path.join(directory, 'receipt.json')
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS, "render_schema.py"), job_file, "local-win",
+             '--attempt-id', attempt_id, '--receipt', receipt_path]
+            + (['--no-backup'] if transaction is not None else []),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=ROOT, env=child_env)
+        result = dict(exit_code=proc.returncode, output=(proc.stdout or '') + (proc.stderr or ''),
+                      generated=False, status='failed', attempt_id=attempt_id, outputs=[])
+        try:
+            with open(receipt_path, encoding='utf-8') as source:
+                receipt = json.load(source)
+            if not isinstance(receipt, dict):
+                raise ValueError('本次生成凭据格式无效')
+            expected = {os.path.normcase(os.path.abspath(os.path.join(table['RUNTIME_SCHEMA_DIR'], name.strip())))
+                        for name in table['SCHEMA_NAME'].split(',') if name.strip()}
+            manifest = os.path.join(table['RUNTIME_SCHEMA_DIR'], table['SCHEMA_NAME'] + '.manifest.json')
+            expected.add(os.path.normcase(os.path.abspath(manifest)))
+            outputs = receipt.get('outputs', [])
+            actual = {os.path.normcase(os.path.abspath(item['path'])) for item in outputs}
+            status = 'ready' if proc.returncode == 0 else 'missing_inputs' if proc.returncode == 1 else None
+            if (receipt.get('attempt_id') != attempt_id or not receipt.get('generated')
+                    or receipt.get('status') != status or status is None
+                    or actual != expected or len(outputs) != len(expected)
+                    or any(item['revision'] == 'missing' or file_revision(item['path']) != item['revision'] for item in outputs)):
+                raise ValueError('本次生成凭据与目标文件不一致')
+            with open(manifest, encoding='utf-8') as source:
+                manifest_data = json.load(source)
+            generation = manifest_data.get('generation') if isinstance(manifest_data, dict) else None
+            if not isinstance(generation, dict) or generation.get('attempt_id') != attempt_id:
+                raise ValueError('渲染记录不属于本次生成')
+            result.update(generated=True, status=status, outputs=outputs,
+                          missing_inputs=receipt.get('missing_inputs', []))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            result['output'] += f'\n[生成未确认] {exc}'
+        return result
 
 
-def ensure_runtime_resources(project_env):
+def resource_walk(directory, **kwargs):
+    """Business resources exclude immutable save history at every depth."""
+    for base, directories, files in os.walk(directory, **kwargs):
+        directories[:] = sorted(name for name in directories if name != '.lishuttle-history')
+        yield base, directories, sorted(files)
+
+
+def ensure_runtime_resources(project_env, transaction=None):
     """补齐基础运行文件；现有运行配置、任务资源及 DLL 均不覆盖。"""
+    if transaction is None:
+        with FileTransaction() as transaction:
+            return ensure_runtime_resources(project_env, transaction=transaction)
     project = os.path.realpath(to_native(project_env['PROJECT_DIR']))
     exe_dir = os.path.realpath(os.path.join(project, to_native(project_env['BUILD_SUBDIR']), 'Bin'))
     sources = [('基础配置', project_env.get('CONFIG_SRC', 'ThirdPart/Config')),
@@ -492,7 +559,7 @@ def ensure_runtime_resources(project_env):
         raise error
     for (label, _), source in zip(sources, roots):
         file_count = 0
-        for base, dirs, files in os.walk(source, onerror=walk_error):
+        for base, dirs, files in resource_walk(source, onerror=walk_error):
             dirs.sort()
             for name in sorted(files):
                 if name.lower().endswith(('.bak', '.tmp', '.task-bak')):
@@ -530,22 +597,14 @@ def ensure_runtime_resources(project_env):
 
     copied = []
     for source, destination, relative in pending:
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        handle, temporary = tempfile.mkstemp(prefix='.stage-', suffix='.tmp', dir=os.path.dirname(destination))
-        os.close(handle)
-        try:
-            shutil.copy2(source, temporary)
-            os.replace(temporary, destination)
-        finally:
-            if os.path.exists(temporary):
-                os.remove(temporary)
+        transaction.copy(source, destination)
         copied.append(dict(file=relative, **{'from': to_slash(source)},
                            to=to_slash(destination), backup='补齐缺失基础文件'))
     return dict(copied=copied, kept_count=kept, exe_dir=to_slash(exe_dir),
                 config_source=to_slash(roots[0]), dll_source=to_slash(roots[1]))
 
 
-def assemble_files(task, project_env, groups=('antenna', 'model')):
+def assemble_files(task, project_env, groups=('antenna', 'model'), transaction=None):
     """任务包共用文件 → 替换进 exe 目录（先备份）。返回动作清单。
 
     规则（对 antenna/models 两组一致）：
@@ -557,6 +616,9 @@ def assemble_files(task, project_env, groups=('antenna', 'model')):
       任务的 antenna.xml 会留在 exe 里，室内任务加载到不存在的天线型号会
       直接中止，实测 0xC0000409）
     """
+    if transaction is None:
+        with FileTransaction() as transaction:
+            return assemble_files(task, project_env, groups=groups, transaction=transaction)
     exe_dir = f"{to_slash(project_env['PROJECT_DIR'])}/{project_env['BUILD_SUBDIR']}/Bin"
     actions = []
     for key, sub in (("antenna", "antennas"), ("model", "models")):
@@ -573,7 +635,7 @@ def assemble_files(task, project_env, groups=('antenna', 'model')):
             targets.append((src, os.path.basename(src)))
         extra_dir = task.get(f"{key}_dir") if task else ""
         if extra_dir and os.path.isdir(extra_dir):
-            for base_d, _, files_d in os.walk(extra_dir):
+            for base_d, _, files_d in resource_walk(extra_dir):
                 rel = os.path.relpath(base_d, extra_dir)
                 for f in files_d:
                     if f.lower().endswith(".bak"):
@@ -591,9 +653,8 @@ def assemble_files(task, project_env, groups=('antenna', 'model')):
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 note = ""
                 if os.path.isfile(dst):
-                    shutil.copy2(dst, dst + ".bak")
                     note = "已备份原文件"
-                shutil.copy2(s, dst)
+                transaction.copy(s, dst, backup=True)
                 actions.append({"file": rel_name, "from": to_slash(s),
                                 "to": to_slash(dst), "backup": note})
 
@@ -608,15 +669,15 @@ def assemble_files(task, project_env, groups=('antenna', 'model')):
             if os.path.isfile(baseline):
                 note = ""
                 if os.path.isfile(dst):
-                    shutil.copy2(dst, dst + ".bak")
                     note = "（覆盖前已备份）"
-                shutil.copy2(baseline, dst)
+                transaction.copy(baseline, dst, backup=True)
                 actions.append({"file": base, "from": to_slash(baseline),
                                 "to": to_slash(dst), "backup": f"已恢复仓库基线{note}"})
             elif os.path.isfile(dst):
                 # 仓库基线本来就没有这个文件（项目自带 antennas 目录不含
                 # antenna.xml）→ 默认状态就是"没有"，删掉上一个任务留下的
-                shutil.copy2(dst, dst + ".task-bak")
+                transaction.copy(dst, dst + '.task-bak')
+                transaction.touch(dst)
                 os.remove(dst)
                 actions.append({"file": base, "from": "-", "to": to_slash(dst),
                                 "backup": "项目默认无此文件，已移除任务残留（.task-bak）"})
@@ -646,7 +707,9 @@ def read_schema_document(schema_name):
     if not os.path.isfile(path):
         return path, None
     with open(path, 'rb') as fh:
-        document = parse_document(fh.read())
+        raw = fh.read()
+    document = parse_document(raw)
+    document['revision'] = hashlib.sha256(raw).hexdigest()
     return to_slash(path), document
 
 
@@ -713,31 +776,37 @@ def ordered_functions():
 
 def radius_source(schema_name):
     """The running XML selects the CSV; its default radius stays a fallback."""
-    path, values, _ = read_schema(schema_name)
+    path, document = read_schema_document(schema_name)
+    values = document['values'] if document else {}
     result = dict(kind='engineering_csv', fallback=values.get('DefaultCalcRadius', ''),
-                  path='', column='', values=[], editable=False)
+                  path='', column='', values=[], editable=False,
+                  schema_revision=document['revision'] if document else '')
     selected = values.get('EngineeringFilePath', '')
     if not path or not selected:
         return dict(result, reason='运行配置没有有效工参路径，请先选择并同步工参')
     if not os.path.isabs(selected):
         selected = os.path.join(os.path.dirname(os.path.dirname(path)), selected)
     result['path'] = to_slash(os.path.normpath(selected))
-    grid = read_csv_grid(selected)
+    grid = read_csv_grid(selected, bin_dir=os.path.dirname(os.path.dirname(path)),
+                         indoor=values.get('MapFormat', '').lower() == 'indoor')
     if 'error' in grid:
         return dict(result, reason=grid['error'])
-    aliases = {normalized(s) for s in ('CalcRadius', 'Calc Radius (m)', 'Main Calculation Radius (m)',
-                                      'Calculation Radius (m)', '计算半径', '计算半径(m)', '计算半径(米)',
-                                      '小区计算半径', '小区计算半径(m)', '小区计算半径(米)')}
-    for header in (grid['header_en'], grid['header_zh']):
-        for index, name in enumerate(header):
-            if normalized(name) in aliases:
-                radii = list(dict.fromkeys(row[index] if len(row) > index else '' for row in grid['rows'] if any(row)))
-                return dict(result, column=name, values=radii, editable=bool(radii),
-                            reason='' if radii else '工参没有小区数据')
-    return dict(result, reason='工参没有 CalcRadius / 计算半径列，请在工参 CSV 中补充后再修改')
+    result.update(revision=grid['revision'], format_revision=grid['format_revision'],
+                  header_lines=grid['header_lines'])
+    if not grid['editable']:
+        return dict(result, reason=grid['read_only_reason'])
+    index = grid['columns'].get('CalcRadius')
+    if index is None:
+        return dict(result, reason='工参没有 CalcRadius / 计算半径列，请在工参 CSV 中补充后再修改')
+    name = next((header[index] for header in grid['header_rows'] if len(header) > index and
+                 normalized(header[index]) in {normalized(alias) for alias in ALIASES['CalcRadius']}), 'CalcRadius')
+    radii = list(dict.fromkeys(row[index] if len(row) > index else '' for row in grid['rows'] if any(row)))
+    return dict(result, column=name, column_index=index, values=radii, editable=bool(radii),
+                reason='' if radii else '工参没有小区数据')
 
 
-def write_cell_radius(schema_name, value):
+def write_cell_radius(schema_name, value, expected_revision=None, source_revision=None,
+                      format_revision=None, return_revision=False):
     try:
         radius = float(value)
     except (ValueError, TypeError):
@@ -745,89 +814,178 @@ def write_cell_radius(schema_name, value):
     if not math.isfinite(radius) or radius <= 0:
         return False, '计算半径必须是有效的正数（米）'
     source = radius_source(schema_name)
+    _, schema_document = read_schema_document(schema_name)
+    if schema_document is None or schema_document['revision'] != source['schema_revision']:
+        raise FileConflict('运行 XML 已变化，请重新加载后再保存')
+    if expected_revision is not None and source['schema_revision'] != expected_revision:
+        raise FileConflict('运行 XML 已变化，请重新加载后再保存')
+    if source_revision is not None and source.get('revision') != source_revision:
+        raise FileConflict('工参 CSV 已变化，请重新加载后再保存')
+    if format_revision is not None and source.get('format_revision') != format_revision:
+        raise FileConflict('工参格式已变化，请重新加载后再保存')
     if not source['editable']:
         return False, source['reason']
-    ok, message = set_csv_column(source['path'], source['column'], value)
-    return ok, f'工参 CSV：{source["path"]}；{message}；XML 默认半径保持不变'
+    def check_source():
+        if file_revision(schema_path(schema_name)) != source['schema_revision']:
+            raise FileConflict('运行 XML 已变化，请重新加载后再保存')
+    result = set_csv_column(source['path'], source['column'], value,
+                            expected_revision=source['revision'],
+                            expected_format_revision=source['format_revision'],
+                            bin_dir=os.path.dirname(os.path.dirname(schema_path(schema_name))),
+                            indoor=schema_document['values'].get('MapFormat', '').lower() == 'indoor',
+                            column_index=source['column_index'], return_revision=return_revision,
+                            before_write=check_source)
+    ok, message = result[:2]
+    final = (ok, f'工参 CSV：{source["path"]}；{message}；XML 默认半径保持不变')
+    return (*final, result[2], schema_document['values']) if return_revision and len(result) > 2 else final
 
 
-def write_schema_param(schema_name, tag, value):
+def write_schema_param(schema_name, tag, value, expected_revision=None,
+                       source_revision=None, format_revision=None, return_revision=False):
     """把 <tag>old</tag> 定点替换为新值；其余内容逐字节保留。先备份 .bak。"""
     if tag == 'DefaultCalcRadius':
-        return write_cell_radius(schema_name, value)
+        return write_cell_radius(schema_name, value, expected_revision, source_revision,
+                                 format_revision, return_revision)
     path = schema_path(schema_name)
     if not os.path.isfile(path):
         return False, f"找不到运行单：{path}"
     with open(path, 'rb') as fh:
         raw = fh.read()
+    read_revision = hashlib.sha256(raw).hexdigest()
+    if expected_revision is not None and expected_revision != read_revision:
+        raise FileConflict('运行 XML 已变化，请重新加载后再保存')
     try:
         replacement = replace_scalar(raw, tag, value)
-        parse_document(replacement)  # Reject invalid XML characters before writing or backing up.
+        document = parse_document(replacement)  # Reject invalid XML characters before writing or backing up.
     except (ValueError, ET.ParseError) as exc:
         return False, str(exc)
-    shutil.copy2(path, path + ".bak")
-    with open(path, 'wb') as fh:
-        fh.write(replacement)
-    return True, f"{tag} -> {value}（原文件已备份 .bak）"
+    new_revision = atomic_write(path, replacement, backup=True, expected_revision=read_revision)
+    result = (True, f"{tag} -> {value}（原文件已备份 .bak）")
+    return (*result, new_revision, document['values']) if return_revision else result
 
 
 # ----------------------------------------------------------------------
 # 工参 CSV 读写
 # ----------------------------------------------------------------------
 
-def read_csv_grid(path):
+def _csv_decoded(raw):
+    for enc in ('utf-8-sig', 'gb18030'):
+        try:
+            return raw.decode(enc), ('utf-8' if enc == 'utf-8-sig' and not raw.startswith(b'\xef\xbb\xbf') else enc)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError('文件不是 UTF-8 或 GB18030 文本')
+
+
+def csv_editor_context(path, schema_name=''):
+    env = load_env()
+    bin_dir = os.path.join(env.get('PROJECT_DIR', ''), env.get('BUILD_SUBDIR', ''), 'Bin')
+    indoor = engineering_kind(path) == 'indoor'
+    if schema_name:
+        schema_file, document = read_schema_document(schema_name)
+        if document is None:
+            raise ValueError('运行 XML 不存在，请重新装配后加载工参')
+        bin_dir = os.path.dirname(os.path.dirname(schema_file))
+        indoor = indoor or document['values'].get('MapFormat', '').lower() == 'indoor'
+    return dict(bin_dir=bin_dir, indoor=indoor)
+
+
+def read_csv_grid(path, bin_dir=None, indoor=False):
     if not os.path.isfile(path):
         return {"error": f"找不到文件：{path}"}
-    enc = sniff_csv_encoding(path)
-    with open(path, "r", encoding=enc, newline="") as fh:
-        text = fh.read()
-    rows = list(csv.reader(io.StringIO(text)))
+    try:
+        with open(path, 'rb') as fh:
+            raw = fh.read()
+        text, enc = _csv_decoded(raw)
+        rows = list(csv.reader(io.StringIO(text), strict=True))
+    except (OSError, ValueError, csv.Error) as exc:
+        return {'error': f'工参 CSV 无法安全解析，未执行编辑：{exc}'}
+    layout = grid_layout(rows, bin_dir=bin_dir, indoor=indoor)
+    headers = rows[:layout['header_lines']]
     return {
         "path": to_slash(path), "encoding": enc,
-        "header_zh": rows[0] if rows else [],
-        "header_en": rows[1] if len(rows) > 1 else [],
-        "rows": rows[2:],
+        "newline": '\r\n' if '\r\n' in text else '\n',
+        "revision": hashlib.sha256(raw).hexdigest(),
+        "format_revision": layout['revision'], "format_source": layout['source'],
+        "header_lines": layout['header_lines'], "header_rows": headers,
+        "header_zh": headers[0] if headers else [],
+        "header_en": headers[1] if len(headers) > 1 else [],
+        "rows": rows[layout['header_lines']:], "columns": layout['columns'],
+        "editable": layout['editable'], "read_only_reason": layout['error'],
     }
 
 
-def save_csv_grid(path, header_zh, header_en, rows):
+def save_csv_grid(path, header_zh, header_en, rows, expected_revision=None,
+                  expected_format_revision=None, header_rows=None, header_lines=None,
+                  bin_dir=None, indoor=False, return_revision=False):
     """整表写回（前端可编辑单元格）。先备份 .bak。"""
-    enc = sniff_csv_encoding(path) if os.path.isfile(path) else "utf-8-sig"
-    if os.path.isfile(path):
-        shutil.copy2(path, path + ".bak")
+    grid = read_csv_grid(path, bin_dir=bin_dir, indoor=indoor)
+    if 'error' in grid:
+        return False, grid['error']
+    if expected_revision is not None and grid['revision'] != expected_revision:
+        raise FileConflict('工参 CSV 已变化，请重新加载后再保存')
+    if expected_format_revision is not None and grid['format_revision'] != expected_format_revision:
+        raise FileConflict('工参格式已变化，请重新加载后再保存')
+    if not grid['editable']:
+        return False, grid['read_only_reason']
+    if header_rows is None:
+        header_rows = [header_zh, header_en]
+    if header_lines is None:
+        header_lines = len(header_rows)
+    if header_lines != grid['header_lines'] or len(header_rows) != header_lines:
+        return False, '表头格式已变化，请重新加载'
+    if header_zh is not None and header_zh != (header_rows[0] if header_rows else []):
+        return False, '表头字段不一致'
+    if header_en is not None and header_en != (header_rows[1] if len(header_rows) > 1 else []):
+        return False, '表头字段不一致'
     buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\r\n" if "\r\n" in (
-        open(path, encoding=enc, newline="").read(4096) if os.path.isfile(path) else "") else "\n")
-    writer.writerow(header_zh)
-    writer.writerow(header_en)
+    enc = grid['encoding']
+    writer = csv.writer(buf, lineterminator=grid['newline'])
+    writer.writerows(header_rows)
     writer.writerows(rows)
-    open(path, "w", encoding=enc, newline="").write(buf.getvalue())
-    return True, to_slash(path)
+    _check_csv_format(grid, bin_dir, indoor)
+    revision = atomic_write(path, buf.getvalue().encode(enc), backup=True,
+                            expected_revision=grid['revision'])
+    result = (True, to_slash(path))
+    return (*result, revision) if return_revision else result
 
 
-def set_csv_column(path, column_key, value):
+def _check_csv_format(grid, bin_dir, indoor):
+    current = grid_layout([], bin_dir=bin_dir, indoor=indoor)['revision']
+    if current != grid['format_revision']:
+        raise FileConflict('工参格式已变化，请重新加载后再保存')
+
+
+def set_csv_column(path, column_key, value, expected_revision=None,
+                   expected_format_revision=None, bin_dir=None, indoor=False,
+                   column_index=None, return_revision=False, before_write=None):
     """整列批量设置：column_key 按中英文列名匹配（大小写不敏感）。先备份。"""
-    enc = sniff_csv_encoding(path)
-    with open(path, "r", encoding=enc, newline="") as fh:
-        text = fh.read()
-    newline = "\r\n" if "\r\n" in text else "\n"
-    rows = list(csv.reader(io.StringIO(text)))
-    if len(rows) < 3:
-        return False, "表结构不符合（少于3行）"
-    col = -1
-    key = column_key.strip().lower()
-    for r in (0, 1):
-        for i, name in enumerate(rows[r]):
-            if name.strip().lower() == key:
-                col = i
-                break
-        if col >= 0:
-            break
+    grid = read_csv_grid(path, bin_dir=bin_dir, indoor=indoor)
+    if 'error' in grid:
+        return False, grid['error']
+    if expected_revision is not None and grid['revision'] != expected_revision:
+        raise FileConflict('工参 CSV 已变化，请重新加载后再保存')
+    if expected_format_revision is not None and grid['format_revision'] != expected_format_revision:
+        raise FileConflict('工参格式已变化，请重新加载后再保存')
+    if not grid['editable']:
+        return False, grid['read_only_reason']
+    enc, newline = grid['encoding'], grid['newline']
+    rows = [row[:] for row in grid['header_rows'] + grid['rows']]
+    col = grid['columns'].get(column_key, -1)
+    key = normalized(column_key)
+    if col < 0:
+        matches = {i for header in grid['header_rows'] for i, name in enumerate(header)
+                   if normalized(name) == key}
+        if len(matches) > 1:
+            return False, f'列名重复，无法确认要修改哪一列：{column_key}'
+        if matches:
+            col = matches.pop()
     if col < 0:
         return False, f"找不到列：{column_key}"
-    shutil.copy2(path, path + ".bak")
+    if column_index is not None and column_index != col:
+        return False, '列位与工参格式不一致'
     changed = 0
-    for r in range(2, len(rows)):
+    for r in range(grid['header_lines'], len(rows)):
         if not any(rows[r]):
             continue
         while len(rows[r]) <= col:
@@ -837,9 +995,13 @@ def set_csv_column(path, column_key, value):
             changed += 1
     buf = io.StringIO()
     csv.writer(buf, lineterminator=newline).writerows(rows)
-    with open(path, "w", encoding=enc, newline="") as fh:
-        fh.write(buf.getvalue())
-    return True, f"列[{column_key}] -> {value}，影响{changed}行（已备份）"
+    _check_csv_format(grid, bin_dir, indoor)
+    if before_write is not None:
+        before_write()
+    revision = atomic_write(path, buf.getvalue().encode(enc), backup=True,
+                            expected_revision=grid['revision'])
+    result = (True, f"列[{column_key}] -> {value}，影响{changed}行（已备份）")
+    return (*result, revision) if return_revision else result
 
 
 # ----------------------------------------------------------------------
@@ -849,26 +1011,73 @@ def set_csv_column(path, column_key, value):
 RUNTIME = RuntimeGuard()
 
 
+def build_toolchain_root(config):
+    """Use the environment script actually selected by the build first."""
+    vcvars = config.get('VCVARS', '')
+    if vcvars:
+        script = os.path.realpath(vcvars)
+        if re.search(r'/VC/Auxiliary/Build/vcvars(?:64|all)\.bat$', script.replace('\\', '/'), re.I):
+            return os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(script))))
+    return config.get('VS_ROOT') or None
+
+
+def build_cleanup_diagnostic(session):
+    if session.get('status') == 'done':
+        return ''
+    return str(getattr(session.get('tree'), 'cleanup_error', '') or session.get('cleanup_note') or '')
+
+
 class Runner:
-    def __init__(self, guard=None):
+    def __init__(self, guard=None, history=None):
         self.sessions = {}
         self.lock = threading.RLock()
         # Numeric for existing clients, unique across service restarts (< JS 2**53).
         self.counter = secrets.randbits(51)
         self.guard = guard if guard is not None else RUNTIME
+        self.history = history
 
     def start(self, cmd, cwd, label, env=None, context=None, baseline=None, finalize=None):
         context = deepcopy(context or {})
+        if context.get('operation') == 'build':
+            source_project = context.get('project') or (context.get('project_config') or {}).get('PROJECT_DIR')
+            if source_project:
+                context['source_project'] = source_project
         with self.guard.operation(label, context) as token:
-            tree = ManagedProcess(cmd, cwd, env=env)
+            self.guard.acquire_resources(token, context)
+            with self.lock:
+                self.counter += 1
+                sid = self.counter
+            if self.history:
+                record = self.history.create(sid, label, context, cmd, cwd, baseline=baseline)
+                if record.get('snapshot_issues'):
+                    message = '运行输入快照保存失败，未启动引擎：' + '；'.join(
+                        item.get('message', '') for item in record['snapshot_issues'])
+                    self.history.finish(sid, 'done', None, {'verdict': 'failed',
+                        'process': {'status': 'snapshot_failed', 'exit': None}}, internal_error=message)
+                    raise OSError(message)
+            try:
+                process_options = {}
+                cleanup_note = ''
+                if context.get('operation') == 'build':
+                    process_options['build_toolchain_root'] = build_toolchain_root(context.get('project_config') or {})
+                    if not process_options['build_toolchain_root']:
+                        cleanup_note = '无法确认所选 VS 工具链位置，安全等待进程树结束；未自动回收辅助进程。请核对 VCVARS 或 VS_ROOT。'
+                tree = ManagedProcess(cmd, cwd, env=env, **process_options)
+            except BaseException as exc:
+                if self.history:
+                    try:
+                        self.history.finish(sid, 'done', None, {'verdict': 'failed',
+                            'process': {'status': 'spawn_failed', 'exit': None}}, internal_error=str(exc))
+                    except Exception:
+                        pass  # Preserve the original launch failure.
+                raise
             proc = tree.proc
             try:
                 with self.lock:
-                    self.counter += 1
-                    sid = self.counter
                     self.sessions[sid] = {"proc": proc, "tree": tree, "lines": [], "status": "running",
                                           "label": label, "exit": None, "context": context,
                                           "cancelled": False, "internal_error": '', "result": None,
+                                          'cleanup_note': cleanup_note,
                                           "token": token, 'done_event': threading.Event()}
                     self.guard.bind(token, sid, context)
             except BaseException:
@@ -881,8 +1090,11 @@ class Runner:
                 s = self.sessions[sid]
                 try:
                     for line in proc.stdout:
+                        line = line.rstrip('\r\n')
                         with self.lock:
-                            s['lines'].append(line.rstrip('\r\n'))
+                            s['lines'].append(line)
+                        if self.history:
+                            self.history.append(sid, line)
                 except Exception as exc:
                     with self.lock:
                         s['internal_error'] = f'日志读取失败：{exc}'
@@ -937,6 +1149,19 @@ class Runner:
                             s['internal_error'] += f'；关闭进程句柄失败：{exc}'
                         if result.get('verdict') == 'success':
                             result['verdict'] = 'unconfirmed'
+                if self.history:
+                    try:
+                        record = self.history.finish(sid, 'done', code, result,
+                            cancelled=cancelled, internal_error=s['internal_error'])
+                        s['archive'] = record.get('archive', {})
+                    except Exception as exc:
+                        s['internal_error'] += f'；运行记录或归档保存失败：{exc}'
+                        s['archive'] = {'status': 'incomplete', 'dir': str(self.history.root / str(sid)),
+                                        'issues': [{'message': str(exc)}]}
+                        if result.get('verdict') == 'success':
+                            result['verdict'] = 'unconfirmed'
+                        result.setdefault('issues', []).append({'severity': 'error',
+                            'code': 'HISTORY_SAVE_FAILED', 'message': str(exc), 'path': str(self.history.root)})
                 with self.lock:
                     s.update(result=result, status='done')
                     self.guard.release(token)
@@ -964,15 +1189,23 @@ class Runner:
                 raise
             return sid
 
-    def output(self, sid, since):
+    def output(self, sid, since=0, limit=None):
         with self.lock:
             s = self.sessions.get(sid)
-            if not s:
-                return {"error": "会话不存在", 'code':'SESSION_NOT_FOUND'}
-            return deepcopy({"lines": s["lines"][max(0, since):], "total": len(s["lines"]),
-                             "status": s["status"], "exit": s["exit"], "label": s["label"],
-                             'context': s.get('context', {}), 'result': s.get('result'),
-                             'cancelled': s.get('cancelled', False), 'internal_error': s.get('internal_error', '')})
+            if s:
+                diagnostic = build_cleanup_diagnostic(s)
+                start = max(0, int(since))
+                end = len(s['lines']) if limit is None else min(len(s['lines']), start + max(1, min(5000, int(limit))))
+                return deepcopy({"lines": s["lines"][start:end], "total": len(s["lines"]),
+                                 'next_since': min(end, len(s['lines'])), 'has_more': end < len(s['lines']),
+                                 "status": s["status"], "exit": s["exit"], "label": s["label"],
+                                 'context': s.get('context', {}), 'result': s.get('result'),
+                                 'archive': s.get('archive', {}),
+                                 'cancelled': s.get('cancelled', False), 'cleanup_error': diagnostic,
+                                 'internal_error': '；'.join(filter(None, [s.get('internal_error', ''), diagnostic]))})
+        if self.history:
+            return self.history.output(sid, since=since, limit=limit)
+        return {"error": "会话不存在", 'code':'SESSION_NOT_FOUND'}
 
     def stop(self, sid):
         with self.lock:
@@ -1009,7 +1242,27 @@ class Runner:
                 event.wait(.1)
 
 
-RUNNER = Runner()
+RUNNER = Runner(history=RunHistory(os.path.join(ROOT, '.lishuttle-runs')))
+
+
+def runtime_resources(env, source=False):
+    project = env.get('PROJECT_DIR', '')
+    resources = {'project': project,
+            'bin_dir': os.path.realpath(os.path.join(project, env.get('BUILD_SUBDIR', ''), 'Bin')) if project else '',
+            'out_dir': env.get('OUT_ROOT', '')}
+    if source and project:
+        resources['source_project'] = project
+    return resources
+
+
+def runtime_state(env=None):
+    state = RUNTIME.snapshot()
+    if state['busy']:
+        return state
+    try:
+        return RUNTIME.external_snapshot(runtime_resources(env if env is not None else load_env(), source=True))
+    except OSError as exc:
+        return dict(state, check_error=f'无法检查其他平台占用：{exc}')
 
 
 def sync_vs_launch(project_env, schema_name, func, task_id, city_kind, previous_schema=''):
@@ -1038,8 +1291,9 @@ def check_run(schema_name, func, task_id):
 
 def start_lishuttle(schema_name, func, task_id):
     """直接起 lishuttle.exe（工作目录=exe 目录），不经 bat。"""
-    with RUNTIME.operation('运行 ' + func):
+    with RUNTIME.operation('运行 ' + func) as token:
         env = load_env()
+        RUNTIME.acquire_resources(token, runtime_resources(env))
         try:
             validate_operation(env, 'run')
         except ValueError as exc:
@@ -1051,6 +1305,7 @@ def start_lishuttle(schema_name, func, task_id):
         context = deepcopy(report['context'])
         context['project_config'] = dict(env)
         context['preflight_issues'] = report['issues']
+        RUNTIME.acquire_resources(token, context)
         baseline = snapshot(context)
         exe, cwd = context['exe'], context['bin_dir']
         cmd = [exe, '-f', func, '-t', str(task_id), '-c', schema_name]
@@ -1061,8 +1316,9 @@ def start_lishuttle(schema_name, func, task_id):
 
 def start_toolkit(step):
     """doctor/build/stage：批处理封装。"""
-    with RUNTIME.operation(step):
+    with RUNTIME.operation(step) as token:
         env = load_env()
+        RUNTIME.acquire_resources(token, runtime_resources(env, source=step == 'build'))
         try:
             validate_operation(env, step)
         except ValueError as exc:
@@ -1072,7 +1328,8 @@ def start_toolkit(step):
         child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env))
         binary = os.path.realpath(os.path.join(env['PROJECT_DIR'], env.get('BUILD_SUBDIR', ''), 'Bin'))
         sid = RUNNER.start(["cmd", "/d", "/c", bat], ROOT, step, env=child_env,
-                           context={'project': env['PROJECT_DIR'], 'bin_dir': binary, 'operation': step})
+                           context={'project': env['PROJECT_DIR'], 'bin_dir': binary,
+                                    'operation': step, 'project_config': dict(env)})
         return sid, to_slash(bat)
 
 
@@ -1081,26 +1338,66 @@ def start_toolkit(step):
 # ----------------------------------------------------------------------
 
 def session_results(sid):
+    runner = RUNNER
+    # Only copy in-memory fields under the runner lock. Hashing historical
+    # products must never block stdout collection or cancellation of a new run.
+    with runner.lock:
+        live = runner.sessions.get(sid)
+        session = deepcopy({key: live.get(key) for key in
+            ('status', 'exit', 'context', 'result', 'label', 'internal_error', 'archive')}) if live else None
+        log_tail = list(live.get('lines', [])[-40:]) if live else []
+        if session:
+            session['internal_error'] = '；'.join(filter(None, [session.get('internal_error', ''), build_cleanup_diagnostic(live)]))
+    record = runner.history.get(sid) if runner.history else None
+    source = session or record
+    if not source:
+        return {'error': '会话不存在；目录浏览无法确认当时运行', 'code':'SESSION_NOT_FOUND'}
+    context = deepcopy(source.get('context', {}))
+    report = deepcopy(source.get('result'))
+    if report is None:
+        report = {'verdict': 'pending', 'process': {'status': source['status'], 'exit': source['exit']},
+                  'artifacts': {'status': 'pending'}, 'business': {'status': 'pending'},
+                  'files': [], 'log_tail': log_tail, 'errors': [], 'issues': []}
+    directory = context.get('out_dir', '')
+    report.update(sid=sid, associated=True, context=context, dir=directory,
+                  status=source['status'], exit=source['exit'], label=source['label'],
+                  internal_error=source.get('internal_error', ''), exists=bool(directory and os.path.isdir(directory)))
+    report.setdefault('files', [])
+    report.setdefault('log_tail', log_tail)
+    report.setdefault('errors', [])
+    report.setdefault('log_file', '')
+    if runner.history:
+        report.update(historical=True, historical_verdict=report.get('verdict', 'unconfirmed'),
+                      current_files=runner.history.current(sid),
+                      archive=source.get('archive') or (record or {}).get('archive', {}))
+    return report
+
+
+def recent_runs(project='', limit=20, offset=0):
+    limit, offset = max(1, min(100, int(limit))), max(0, int(offset))
+    if not RUNNER.history:
+        return {'runs': [], 'total': 0, 'limit': limit, 'offset': offset}
+    # The store supplies project filtering before pagination.
+    records = RUNNER.history.list(project=project, limit=1000000)
+    total = len(records)
+    records = records[offset:offset + limit]
     with RUNNER.lock:
-        session = RUNNER.sessions.get(sid)
-        if not session:
-            return {'error': '会话不存在；重启服务后的目录浏览无法确认本次运行',
-                    'code':'SESSION_NOT_FOUND'}
-        context = deepcopy(session.get('context', {}))
-        report = deepcopy(session.get('result'))
-        if report is None:
-            report = {'verdict': 'pending', 'process': {'status': session['status'], 'exit': session['exit']},
-                      'artifacts': {'status': 'pending'}, 'business': {'status': 'pending'},
-                      'files': [], 'log_tail': session['lines'][-40:], 'errors': [], 'issues': []}
-        report.update(sid=sid, associated=True, context=context, dir=context.get('out_dir', ''),
-                      status=session['status'], exit=session['exit'], label=session['label'],
-                      internal_error=session.get('internal_error', ''))
-        report.setdefault('exists', bool(context.get('out_dir') and os.path.isdir(context['out_dir'])))
-        report.setdefault('files', [])
-        report.setdefault('log_tail', session['lines'][-40:])
-        report.setdefault('errors', [])
-        report.setdefault('log_file', '')
-        return report
+        for record in records:
+            session = RUNNER.sessions.get(record['sid'])
+            if session:
+                for key in ('status', 'exit', 'label', 'result', 'internal_error', 'archive'):
+                    if key in session:
+                        record[key] = deepcopy(session[key])
+    runs = [{key: value for key, value in record.items() if key in
+             ('sid', 'label', 'created_at', 'finished_at', 'status', 'exit', 'context', 'result', 'archive')}
+            for record in records]
+    for run in runs:
+        run['historical'] = True
+        run['context'] = {key: value for key, value in run.get('context', {}).items() if key in
+                          ('project', 'bin_dir', 'schema_name', 'task_name', 'func', 'task_id', 'out_dir', 'operation')}
+        run['result'] = {'verdict': (run.get('result') or {}).get('verdict', 'pending')}
+        run['archive'] = {key: value for key, value in run.get('archive', {}).items() if key in ('status', 'dir')}
+    return {'runs': runs, 'total': total, 'limit': limit, 'offset': offset}
 
 
 def results(job_name):

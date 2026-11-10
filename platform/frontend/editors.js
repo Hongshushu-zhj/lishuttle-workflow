@@ -1,14 +1,15 @@
 let parameterRequest = 0;
+function invalidateParameterReads() { parameterRequest++; }
 async function loadParams() {
   const job = S.job;
   if (!job || S.xmlDirty) return;
-  const func = S.func || job.func, request = ++parameterRequest;
+  const func = S.func || job.func, request = ++parameterRequest, editRevision = parameterEditRevision;
   if (S.paramsForJob !== job) {
     $('params-area').innerHTML = '';
     $('params-toolbar').classList.add('hidden');
   }
   const r = await get("params", `schema=${encodeURIComponent(job.schema)}&func=${encodeURIComponent(func)}&all=1`);
-  if (S.xmlDirty || job !== S.job || func !== (S.func || S.job.func) || request !== parameterRequest) return;
+  if (S.xmlDirty || job !== S.job || func !== (S.func || S.job.func) || request !== parameterRequest || editRevision !== parameterEditRevision) return;
   if (r.error) return toast(r.error, false);
   S.paramsForJob = job;
   renderParams(r);
@@ -17,6 +18,7 @@ async function loadParams() {
 function renderParams(r) {
   if (S.xmlDirty) return;
   S.paramsData = r;
+  if (typeof renderIndoorBuildingExport === 'function') renderIndoorBuildingExport(r);
   const area = $("params-area");
   const job = S.job;
   const profile = r.profile || {};
@@ -96,7 +98,31 @@ function renderParams(r) {
 
 const parameterDrafts = new Map();
 let parameterEditRevision = 0;
-function parameterWriteStarted() { S.parameterWrites = (S.parameterWrites || 0) + 1; refreshWorkflow(); }
+const parameterWriteQueue = [];
+let parameterQueueRunning = false;
+function queueParameterWrite(write) {
+  return new Promise(resolve => {
+    parameterWriteQueue.push({write, resolve});
+    drainParameterWrites();
+  });
+}
+async function drainParameterWrites() {
+  if (parameterQueueRunning) return;
+  parameterQueueRunning = true;
+  try {
+    while (parameterWriteQueue.length) {
+      const item = parameterWriteQueue.shift();
+      try { await item.write(); }
+      finally { item.resolve(); }
+    }
+  } finally { parameterQueueRunning = false; }
+}
+function editorFailure(result) {
+  const reason = result.message || result.error || '保存失败';
+  return ['FILE_CONFLICT','REVISION_REQUIRED'].includes(result.code)
+    ? `${reason}；草稿已保留，请使用“放弃编辑并重新加载”或“放弃参数编辑”查看最新文件` : reason;
+}
+function parameterWriteStarted() { parameterRequest++; S.parameterWrites = (S.parameterWrites || 0) + 1; refreshWorkflow(); }
 function parameterWriteFinished() { S.parameterWrites = Math.max(0, (S.parameterWrites || 0) - 1); refreshWorkflow(); }
 function guardParameterFilter() {
   if (!S.xmlDirty && !S.parameterWrites) return true;
@@ -134,9 +160,10 @@ async function restoreParameterDefault(button, job) {
   const epoch = S.projectEpoch;
   parameterWriteStarted();
   try {
-    const res = await post('param_default', {schema:job.schema, tag:button.dataset.defaultTag});
+    const res = await post('param_default', {schema:job.schema, tag:button.dataset.defaultTag, revision:S.paramsData?.revision});
     if (job !== S.job || epoch !== S.projectEpoch) return;
-    if (!res.ok) return toast(res.message || res.error, false);
+    if (!res.ok) return toast(editorFailure(res), false);
+    if (S.paramsData && res.revision) S.paramsData.revision = res.revision;
     workflowContentChanged('XML 默认值已保存');
     if (!S.xmlDirty) await loadParams();
     toast(`${button.dataset.defaultTag} 已写入 ThirdPart 默认值（原文件备份 .bak）`);
@@ -166,31 +193,37 @@ async function saveParameter(el, job) {
   el.editorRevision = revision;
   const epoch = S.projectEpoch;
   parameterWriteStarted();
-  try {
-    const res = await post('param_write', {schema:job.schema, tag, value});
-    if (job !== S.job || epoch !== S.projectEpoch || el.editorRevision !== revision) return;
-    if (!res.ok) return toast(res.message || res.error, false);
+  return queueParameterWrite(async () => {
+   try {
+    if (job !== S.job || epoch !== S.projectEpoch) return;
+    const res = await post('param_write', {schema:job.schema, tag, value, revision:S.paramsData?.revision,
+      ...(source?.kind === 'engineering_csv' ? {source_revision:source.revision, format_revision:source.format_revision} : {})});
+    if (job !== S.job || epoch !== S.projectEpoch) return;
+    if (!res.ok) return toast(editorFailure(res), false);
+    if (S.paramsData && res.revision) S.paramsData.revision = res.revision;
     workflowContentChanged(res.target === 'engineering_csv' ? 'CSV 参数已保存' : 'XML 参数已保存');
-    if (el.value === value) { parameterDrafts.delete(el); el.classList.remove('dirty'); }
+    if (el.editorRevision === revision && el.value === value) { parameterDrafts.delete(el); el.classList.remove('dirty'); }
     S.xmlDirty = parameterDrafts.size > 0;
-    if (S.paramsData?.values) S.paramsData.values[tag] = value;
+    if (S.paramsData?.values && res.target !== 'engineering_csv') S.paramsData.values[tag] = value;
     for (const group of S.paramsData?.groups || []) {
       for (const row of group.rows) if (row.name === tag) row.display_value = value;
     }
     if (res.target === 'engineering_csv') {
-      if (source) source.values = [value];
+      csvRequest++;
+      if (source) { source.values = [value]; if (res.source_revision) source.revision = res.source_revision; }
       if (!S.csvDirty) { csvData = null; $('csv-wrap').textContent = '计算半径已写入 CSV，请重新加载查看'; }
     }
     refreshWorkflow();
     toast(res.target === 'engineering_csv' ? res.message : `${tag} 已写入 ${job.schema}（原文件备份 .bak）`);
-  } catch (error) { toast(error.message, false); }
-  finally { parameterWriteFinished(); }
+   } catch (error) { toast(error.message, false); }
+   finally { parameterWriteFinished(); }
+  });
 }
 
 /* ---------------- 工参 CSV ---------------- */
 
 let csvData = null;
-let csvRequest = 0, csvEditRevision = 0;
+let csvRequest = 0, csvEditRevision = 0, csvWriting = false;
 function refreshCsvDirtyState() {
   const status = $('csv-dirty-status'), discard = $('btn-csv-discard');
   if (status) status.textContent = S.csvDirty ? 'CSV 有未保存编辑；请保存或明确放弃后继续。' : '';
@@ -216,57 +249,107 @@ function guardCsvChanges() {
   return false;
 }
 async function discardCsvChanges() { return loadCsv(true); }
-async function loadCsv(discard = false) {
+async function loadCsv(discard = false, afterWrite = false) {
+  if (csvWriting && !afterWrite) return toast('CSV 正在保存，请稍候', false);
   if (discard !== true && !guardCsvChanges()) return;
   const path = $('csv-path').value, epoch = S.projectEpoch, job = S.job;
   if (!path) return toast('没有 CSV 路径，先在左侧选任务', false);
   const request = ++csvRequest, revision = csvEditRevision;
   try {
-    const data = await get('csv', `path=${encodeURIComponent(path)}`);
+    const data = await get('csv', `path=${encodeURIComponent(path)}${job ? `&schema=${encodeURIComponent(job.schema)}` : ''}`);
     if (request !== csvRequest || epoch !== S.projectEpoch || job !== S.job || path !== $('csv-path').value || revision !== csvEditRevision) return;
     if (data.error) return toast(data.error, false);
     csvData = data;
     S.csvDirty = false;
     renderCsv();
     refreshCsvDirtyState();
+    return true;
   } catch (error) { toast(error.message, false); }
 }
 function renderCsv() {
   const mk = (row, tag) => row.map(c => `<${tag}>${esc(c)}</${tag}>`).join('');
-  const head = `<tr>${mk(csvData.header_zh, 'td')}</tr><tr>${mk(csvData.header_en, 'td')}</tr>`;
-  const body = csvData.rows.map((row,i) => `<tr data-i="${i}">${row.map(c => `<td contenteditable>${esc(c)}</td>`).join('')}</tr>`).join('');
+  const headers = csvData.header_rows || [csvData.header_zh || [], csvData.header_en || []];
+  const editable = csvData.editable !== false;
+  const head = headers.map(row => `<tr>${mk(row, 'td')}</tr>`).join('');
+  const body = csvData.rows.map((row,i) => `<tr data-i="${i}">${row.map(c => `<td${editable ? ' contenteditable' : ''}>${esc(c)}</td>`).join('')}</tr>`).join('');
   $('csv-wrap').innerHTML = `<table>${head}${body}</table>`;
-  $('csv-wrap').oninput = markCsvDirty;
-  $('csv-msg').textContent = `编码 ${csvData.encoding} · ${csvData.rows.length} 行数据`;
+  $('csv-wrap').oninput = editable ? markCsvDirty : null;
+  $('csv-msg').textContent = `编码 ${csvData.encoding} · ${headers.length} 行表头 · ${csvData.rows.length} 行数据` +
+    (editable ? '' : ` · 只读：${csvData.read_only_reason || '工参格式未确认'}`);
 }
 async function saveCsv() {
-  if (!csvData || S.runtime?.busy) return;
+  if (!csvData || csvData.editable === false || csvWriting || S.runtime?.busy || S.parameterWrites) return;
   const data = csvData, path = $('csv-path').value, epoch = S.projectEpoch, revision = csvEditRevision;
   const table = $('csv-wrap').querySelector('table');
   if (!table) return;
   const trs = table.querySelectorAll('tr'), grab = tr => [...tr.children].map(td => td.textContent);
-  const body = {path:data.path, header_zh:grab(trs[0]),header_en:grab(trs[1]),rows:[...trs].slice(2).map(grab)};
+  const headerCount = data.header_rows?.length ?? data.header_lines ?? 2;
+  const headers = [...trs].slice(0,headerCount).map(grab);
+  const body = {path:data.path, schema:S.job?.schema || '', revision:data.revision, format_revision:data.format_revision,
+    header_rows:headers, header_lines:headerCount, header_zh:headers[0] || [], header_en:headers[1] || [],
+    rows:[...trs].slice(headerCount).map(grab)};
+  csvWriting = true;
+  csvRequest++;
   try {
     const r = await post('csv_save', body);
     if (data !== csvData || path !== $('csv-path').value || epoch !== S.projectEpoch) return;
     if (r.ok) {
+      if (r.revision) data.revision = r.revision;
       workflowContentChanged('CSV 已保存');
-      if (revision === csvEditRevision) { S.csvDirty = false; Object.assign(csvData,body); }
+      if (revision === csvEditRevision) { S.csvDirty = false; Object.assign(csvData,{header_rows:headers,header_lines:headerCount,rows:body.rows}); }
+      updateRadiusVersion({...data, rows:body.rows}, r.revision);
     }
-    $('csv-msg').textContent = r.message || r.error || '';
+    $('csv-msg').textContent = r.ok ? r.message || 'CSV 已保存' : editorFailure(r);
     refreshCsvDirtyState();
-    toast(r.ok ? 'CSV 已保存（原文件备份 .bak）' : r.error, r.ok);
+    toast(r.ok ? 'CSV 已保存（原文件备份 .bak）' : editorFailure(r), r.ok);
   } catch (error) { toast(error.message, false); }
+  finally { csvWriting = false; }
+}
+function updateRadiusVersion(data, revision) {
+  parameterRequest++;
+  const source = S.paramsData?.param_sources?.DefaultCalcRadius;
+  const radiusDraft = [...parameterDrafts.keys()].some(el => el.dataset.tag === 'DefaultCalcRadius');
+  if (source?.path === data.path && revision && !radiusDraft) {
+    source.revision = revision;
+    const index = source.column_index;
+    if (Number.isInteger(index)) {
+      source.values = [...new Set(data.rows.filter(row=>row.some(Boolean)).map(row=>row[index] || ''))];
+      $('params-area').querySelectorAll('input[data-tag="DefaultCalcRadius"]').forEach(el => {
+        el.value = source.values.length === 1 ? source.values[0] : '';
+        el.placeholder = source.values.length > 1 ? '各小区半径不同；填写后统一修改 CSV' : '请在工参 CSV 中配置';
+      });
+    }
+  }
 }
 async function setColumn() {
-  if (!csvData || !guardCsvChanges() || S.runtime?.busy) return;
+  if (!csvData || csvData.editable === false || csvWriting || !guardCsvChanges() || S.runtime?.busy || S.parameterWrites) return;
   const data = csvData, path = $('csv-path').value, epoch = S.projectEpoch;
   const col = $('csv-col').value.trim(), val = $('csv-val').value;
   if (!col) return toast('填列名', false);
+  const revision = csvEditRevision;
+  csvWriting = true;
+  csvRequest++;
   try {
-    const r = await post('csv_column', {path:data.path,column:col,value:val});
+    const r = await post('csv_column', {path:data.path, schema:S.job?.schema || '', column:col,value:val,
+      revision:data.revision,format_revision:data.format_revision});
     if (data !== csvData || path !== $('csv-path').value || epoch !== S.projectEpoch) return;
-    $('csv-msg').textContent = r.message || r.error || '';
-    if (r.ok) { workflowContentChanged('CSV 整列已保存'); await loadCsv(); toast('整列已设置并保存'); }
+    $('csv-msg').textContent = r.ok ? r.message || '' : editorFailure(r);
+    if (r.ok) {
+      data.revision = null;
+      workflowContentChanged('CSV 整列已保存');
+      // A draft typed while the column request was pending stays based on the
+      // earlier grid and must be reloaded explicitly before overwriting it.
+      if (revision !== csvEditRevision) {
+        data.revision = null;
+        toast('整列已写入；期间输入的草稿已保留，请重新加载后核对', false);
+        return;
+      }
+      const loaded = await loadCsv(false, true);
+      if (loaded && csvData !== data) {
+        updateRadiusVersion(csvData, csvData.revision);
+        toast('整列已设置并保存');
+      } else toast('整列已写入；表格尚未刷新，草稿已保留，请重新加载后核对', false);
+    } else toast(editorFailure(r), false);
   } catch (error) { toast(error.message, false); }
+  finally { csvWriting = false; }
 }

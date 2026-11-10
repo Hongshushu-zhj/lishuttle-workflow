@@ -30,9 +30,15 @@ class LocalAdaptationTests(unittest.TestCase):
         self.patcher.start()
         self.addCleanup(self.patcher.stop)
 
+    def write_param(self, **body):
+        source = core.radius_source(body.get('schema', 'job.xml'))
+        return Api.param_write(dict(body, revision=source['schema_revision'],
+                                    source_revision=source.get('revision', 'missing'),
+                                    format_revision=source.get('format_revision', 'missing')))
+
     def test_radius_edit_updates_csv_and_keeps_xml_default(self):
         before = self.csv.read_bytes()
-        result = Api.param_write(dict(schema='job.xml', tag='DefaultCalcRadius', value='350'))
+        result = self.write_param(schema='job.xml', tag='DefaultCalcRadius', value='350')
         self.assertTrue(result['ok'], result)
         self.assertEqual([row[1] for row in core.read_csv_grid(str(self.csv))['rows']], ['350', '350'])
         self.assertEqual(self.schema.read_bytes(), self.original)
@@ -50,7 +56,8 @@ class LocalAdaptationTests(unittest.TestCase):
         before = self.csv.read_bytes()
         with patch.object(core, 'thirdpart_defaults', return_value={
                 'DefaultCalcRadius': dict(available=True, value='800', source='sample')}):
-            result = Api.param_default(dict(schema='job.xml', tag='DefaultCalcRadius'))
+            result = Api.param_default(dict(schema='job.xml', tag='DefaultCalcRadius',
+                                            revision=core.read_schema_document('job.xml')[1]['revision']))
         self.assertFalse(result['ok'])
         self.assertEqual(self.csv.read_bytes(), before)
         self.assertEqual(self.schema.read_bytes(), self.original)
@@ -59,7 +66,7 @@ class LocalAdaptationTests(unittest.TestCase):
         self.csv.write_bytes(('小区ID,小区计算半径,备注\r\nCell ID,Main Calculation Radius (m),Note\r\n'
                               'a,150,中文\r\nb,200,保留\r\n').encode('gb18030'))
         before = self.csv.read_bytes()
-        result = Api.param_write(dict(schema='job.xml', tag='DefaultCalcRadius', value='125'))
+        result = self.write_param(schema='job.xml', tag='DefaultCalcRadius', value='125')
         self.assertTrue(result['ok'], result)
         data = self.csv.read_bytes().decode('gb18030')
         self.assertIn('a,125,中文\r\n', data)
@@ -69,7 +76,7 @@ class LocalAdaptationTests(unittest.TestCase):
 
     def test_english_only_radius_header_is_supported(self):
         self.csv.write_text('ID,半径\nCell ID,Main Calculation Radius (m)\na,175\n', encoding='utf-8-sig')
-        result = Api.param_write(dict(schema='job.xml', tag='DefaultCalcRadius', value='225'))
+        result = self.write_param(schema='job.xml', tag='DefaultCalcRadius', value='225')
         self.assertTrue(result['ok'], result)
         self.assertEqual(core.radius_source('job.xml')['values'], ['225'])
 
@@ -79,21 +86,21 @@ class LocalAdaptationTests(unittest.TestCase):
         local.write_bytes(self.csv.read_bytes())
         self.schema.write_text(self.schema.read_text().replace(self.csv.as_posix(), 'data/cells.csv'), encoding='utf-8')
         before = self.csv.read_bytes()
-        result = Api.param_write(dict(schema='job.xml', tag='DefaultCalcRadius', value='180'))
+        result = self.write_param(schema='job.xml', tag='DefaultCalcRadius', value='180')
         self.assertTrue(result['ok'], result)
         self.assertEqual(core.read_csv_grid(str(local))['rows'][0][1], '180')
         self.assertEqual(self.csv.read_bytes(), before)
 
     def test_missing_csv_radius_column_refuses_xml_edit(self):
         self.csv.write_text('小区,备注\nCell ID,Note\na,keep\n', encoding='utf-8-sig')
-        result = Api.param_write(dict(schema='job.xml', tag='DefaultCalcRadius', value='350'))
+        result = self.write_param(schema='job.xml', tag='DefaultCalcRadius', value='350')
         self.assertFalse(result['ok'])
         self.assertEqual(self.schema.read_bytes(), self.original)
 
     def test_invalid_radius_does_not_write_either_file(self):
         before = self.csv.read_bytes()
         for value in ('', 'NaN', 'inf', '-1', 'bad'):
-            result = Api.param_write(dict(schema='job.xml', tag='DefaultCalcRadius', value=value))
+            result = self.write_param(schema='job.xml', tag='DefaultCalcRadius', value=value)
             self.assertFalse(result['ok'], value)
         self.assertEqual(self.csv.read_bytes(), before)
         self.assertEqual(self.schema.read_bytes(), self.original)

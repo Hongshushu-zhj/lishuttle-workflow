@@ -85,7 +85,7 @@
    "group": "路径与数据",
    "type": "path",
    "applies": "indoor",
-   "desc": "室内地图数据目录(含building.das)，选室内场景后自动填"
+   "desc": "室内地图目录，含一个或多个 .das 文件即识别为室内（扩展名忽略大小写），选场景后自动填；运行前另检查引擎兼容性"
   },
   {
    "name": "ClutterMatchPath",

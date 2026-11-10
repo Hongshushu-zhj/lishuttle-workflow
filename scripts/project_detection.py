@@ -8,6 +8,7 @@ import shutil
 import subprocess
 
 from project_config import FIELDS
+from indoor_maps import indoor_floor_files
 
 
 def slash(value):
@@ -252,7 +253,7 @@ def detect_project_config(env, machine=None):
                 path = base / name
                 if path.is_dir():
                     if key == 'MAP_ROOT' and not any((child / 'heights/index.txt').is_file() or
-                         (child / 'building.das').is_file() for child in path.iterdir() if child.is_dir()):
+                         indoor_floor_files(child) for child in path.iterdir() if child.is_dir()):
                         continue
                     add(key, path, '项目内已有目录' if base == project else '项目同级已有目录（共享候选）')
     machine = machine_tools() if machine is None else machine

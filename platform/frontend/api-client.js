@@ -2,7 +2,9 @@
 "use strict";
 
 async function api(name, body, method) {
-  const writing = method !== "GET";
+  // build_status uses POST for project/revision context, but only discovers
+  // executable state. A slow background query must not hold the mutation lock.
+  const writing = method !== "GET" && name !== 'build_status';
   if (writing) S.pendingRequests = (S.pendingRequests || 0) + 1;
   const opt = method === "GET" ? {} : {
     method: "POST", headers: { "Content-Type": "application/json" },

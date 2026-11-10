@@ -288,3 +288,14 @@ button.primary:hover { background: #194c96; }
 #workflow-nav .stale > small, .stage-status.stale { color: #96630d; }
 #workflow-nav .failed > small, .stage-status.failed { color: #b93c3c; }
 .stage-status.active { background: #e5edf9; color: #235eaa; }
+
+.run-history { margin: 18px 0; padding: 14px; border: 1px solid #dfe5ed; border-radius: 7px; background: #f8fafc; }
+.run-history > .row { flex-wrap: wrap; }
+.run-history > .row strong { margin-right: auto; }
+.history-list { display: grid; gap: 6px; }
+button.history-run { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 5px 14px; width: 100%; padding: 9px 11px; color: #334155; background: #fff; border: 1px solid #dfe5ed; text-align: left; overflow-wrap: anywhere; }
+button.history-run:hover, button.history-run.selected { border-color: #91b3df; background: #eef4fc; }
+.history-name { min-width: 0; }
+.history-name small, .history-meta { color: #62758d; font-size: 12px; }
+#run-history-status { margin: 8px 0; }
+#run-connection { overflow-wrap: anywhere; }

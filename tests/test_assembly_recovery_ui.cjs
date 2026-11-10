@@ -54,14 +54,27 @@ context.fetch=async(url,options)=>{
   await handler(); assert.equal(element('btn-apply-schema').disabled,true);
   resolve({json:async()=>({error:'retry'})}); await pending;
   assert.equal(element('btn-apply-schema').disabled,false);
+  let assembled=0;
+  context.markWorkflowAssembled=()=>{assembled++;};
+  run('switchTab=()=>{}; loadParams=()=>{}; updateNote=()=>{};');
+  context.fetch=async()=>({json:async()=>({schema_ok:true,generated:false,render_status:'failed',assembly_status:'rolled_back',render_exit:1,render_output:'fatal: invalid XML',base_resources:{copied:[{from:'/source/new.dll',to:'/bin/new.dll'}],kept_count:2,config_source:'/config',dll_source:'/dll',exe_dir:'/bin'}})});
+  const fatal = await run(`submitRender({job_name:'job'})`);
+  assert.equal(fatal.status,'retryable_error');
+  assert.equal(assembled,0,'old XML must never confirm failed generation');
+  assert.match(element('render-output').textContent,/fatal: invalid XML/);
+  assert.match(element('render-output').textContent,/已撤销/,'reverted resource copies must be labeled as reverted');
+  context.fetch=async()=>({json:async()=>({error:'resource copy failed',render_output:'fatal copy details',generated:false,render_status:'failed',schema_ok:false})});
+  await run(`submitRender({job_name:'job'})`);
+  assert.match(element('render-output').textContent,/fatal copy details/,'failure details remain visible');
   context.fetch=async(url)=>({json:async()=> url.endsWith('preview_render')
     ? {source:'a',destination:'b',changes:[],warnings:[],token:'next'}
-    : {schema_ok:true,render_exit:0,schema_name:'job.xml',func:'pl',task_id:'1',out_dir:'/out'}});
+    : {schema_ok:true,generated:true,render_status:'missing_inputs',render_exit:1,schema_name:'job.xml',func:'pl',task_id:'1',out_dir:'/out'}});
   run('switchTab=()=>{}; loadParams=()=>{}; updateNote=()=>{};');
   await run('doRender()'); await element('btn-apply-schema').onclick();
   assert.equal(element('schema-preview').classList.contains('hidden'),true,'successful assembly clears preview');
   assert.equal(element('btn-apply-schema').disabled,true);
   assert.equal(run('S.job.schema'),'job.xml');
+  assert.equal(assembled,1,'valid generation with missing inputs still confirms assembly');
   console.log('PASS: assembly preview validity, busy/idle races, retry, stale token, network recovery and duplicate guard');
 })().catch(e=>{console.error(e);process.exitCode=1;});
 

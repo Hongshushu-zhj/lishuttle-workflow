@@ -36,6 +36,10 @@ class ProjectDefaultsTests(unittest.TestCase):
         for name, value in [('load_env', lambda: self.env), ('PROJECTS_FILE', str(self.registry))]:
             p = patch.object(core, name, value, create=True); p.start(); self.addCleanup(p.stop)
 
+    def default_param(self, **body):
+        _, document = core.read_schema_document(body.get('schema', 'job.xml'))
+        return Api.param_default(dict(body, revision=document['revision'] if document else 'missing'))
+
     def test_content_validation_and_manual_registry(self):
         result = core.validate_project(str(self.project))
         self.assertTrue(result['ok'])
@@ -71,18 +75,18 @@ class ProjectDefaultsTests(unittest.TestCase):
         dest.parent.mkdir(parents=True)
         original = b'\xef\xbb\xbf<RuntimeSchema>\r\n<!--keep--><SceneSettingsPath></SceneSettingsPath><CpuLoad>17</CpuLoad></RuntimeSchema>'
         dest.write_bytes(original)
-        res = Api.param_default(dict(schema='job.xml', tag='SceneSettingsPath'))
+        res = self.default_param(schema='job.xml', tag='SceneSettingsPath')
         self.assertTrue(res['ok'])
         self.assertEqual(Path(str(dest) + '.bak').read_bytes(), original)
         self.assertEqual(dest.read_bytes(), original.replace(b'<SceneSettingsPath></SceneSettingsPath>',
             ('<SceneSettingsPath>' + (self.config / 'config/scenesettings.xml').as_posix() + '</SceneSettingsPath>').encode()))
         before = dest.read_bytes()
-        self.assertFalse(Api.param_default(dict(schema='job.xml', tag='EngineeringFilePath'))['ok'])
+        self.assertFalse(self.default_param(schema='job.xml', tag='EngineeringFilePath')['ok'])
         self.assertEqual(dest.read_bytes(), before)
 
     def test_missing_resource_is_revalidated_at_click(self):
         (self.config / 'config/scenesettings.xml').unlink()
-        res = Api.param_default(dict(schema='job.xml', tag='SceneSettingsPath'))
+        res = self.default_param(schema='job.xml', tag='SceneSettingsPath')
         self.assertFalse(res['ok'])
 
     def test_self_closing_field_and_xml_characters(self):
@@ -95,7 +99,7 @@ class ProjectDefaultsTests(unittest.TestCase):
         self.assertEqual(core.read_schema('job.xml')[1]['SceneSettingsPath'], '/data/a&b.xml')
 
     def test_stale_project_write_is_rejected(self):
-        res = Api.param_default(dict(schema='job.xml', tag='CpuLoad', _project='/old-project'))
+        res = self.default_param(schema='job.xml', tag='CpuLoad', _project='/old-project')
         self.assertFalse(res['ok'])
         self.assertIn('项目已切换', res['message'])
 
@@ -117,7 +121,7 @@ class ProjectDefaultsTests(unittest.TestCase):
         with patch.object(core, 'thirdpart_defaults', defaults), \
              patch.object(core, 'save_env_keys', side_effect=lambda **kw: switched.set()), \
              patch.object(Api, 'state', return_value={}):
-            writer = threading.Thread(target=lambda: Api.param_default(dict(schema='job.xml', tag='CpuLoad')))
+            writer = threading.Thread(target=lambda: self.default_param(schema='job.xml', tag='CpuLoad'))
             switch = threading.Thread(target=lambda: switch_results.append(Api.select_project(dict(path=str(self.project)))))
             writer.start()
             try:

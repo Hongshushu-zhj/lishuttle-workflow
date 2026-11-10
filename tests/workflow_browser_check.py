@@ -12,7 +12,7 @@ import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 from playwright.sync_api import sync_playwright, expect
 
@@ -48,7 +48,39 @@ class Fixture:
         self.render_count = 0
         self.radius = "1000"
         self.fail_parameter_once = False
+        self.xml_revision = 1
+        self.csv_revision = 1
+        self.csv_headers = [["编号"], ["Cell ID"]]
+        self.csv_rows = [["1"], ["2"]]
+        self.csv_editable = True
         self.unknown = []
+        self.current_files = 'changed'
+        self.building_enabled = False
+        self.building_revision = 1
+
+    def building_status(self):
+        return dict(supported=True, enabled=self.building_enabled, revision=f'source-{self.building_revision}',
+                    requires_rebuild=True, path='C:/fixture/project/Propagation/Frame/src/PathLossofIndoorEngine.cpp')
+
+    def historical_result(self, sid=701):
+        return dict(sid=sid, historical=True, associated=True, historical_verdict='success' if sid == 701 else 'unconfirmed',
+                    verdict='success' if sid == 701 else 'unconfirmed', status='done' if sid == 701 else 'interrupted',
+                    exit=0 if sid == 701 else None, label='Fixture historical run',
+                    context=dict(project=STATE['project'], task_name='archived-task', func='pred'),
+                    dir='C:/fixture/outputs/archived-task', exists=self.current_files != 'missing',
+                    current_files=dict(status=self.current_files, files=[]),
+                    archive=dict(status='complete' if sid == 701 else 'incomplete', dir='C:/fixture/archives/' + str(sid)),
+                    process=dict(status='exited' if sid == 701 else 'interrupted', exit=0 if sid == 701 else None),
+                    artifacts=dict(status='valid' if sid == 701 else 'unconfirmed'), business=dict(status='usable'),
+                    files=[dict(rel='RSRP.dem', size=8)], log_tail=['historical evidence'], issues=[], errors=[])
+
+    def csv_grid(self):
+        return dict(path=TASK["engineering_file"], encoding="utf-8", revision=f"csv-{self.csv_revision}",
+                    format_revision="format-1", header_lines=len(self.csv_headers),
+                    header_rows=self.csv_headers, header_zh=self.csv_headers[0] if self.csv_headers else [],
+                    header_en=self.csv_headers[1] if len(self.csv_headers) > 1 else [],
+                    rows=self.csv_rows, columns={"CellId": 0}, editable=self.csv_editable,
+                    read_only_reason="Fixture unknown format" if not self.csv_editable else "")
 
     def reply(self, endpoint, body):
         self.requests.append((endpoint, body))
@@ -56,8 +88,40 @@ class Fixture:
             return STATE
         if endpoint == "runtime_state":
             return self.runtime
+        if endpoint == 'history':
+            runs = [dict(self.historical_result(sid), created_at='2026-11-09T01:00:00+00:00',
+                         result=dict(verdict='success' if sid == 701 else 'unconfirmed')) for sid in (701, 702)]
+            return dict(runs=runs, total=2, limit=10, offset=0)
+        if endpoint == 'results':
+            return self.historical_result(int(body.get('sid', ['701'])[0]))
+        if endpoint == 'output':
+            sid = int(body.get('sid', ['701'])[0])
+            if sid == 703:
+                self.runtime = dict(busy=False, phase='idle')
+                return dict(lines=['Fixture build complete'], total=1, next_since=1, has_more=False,
+                            status='done', exit=0, label='build', result=dict(verdict='success'),
+                            context=dict(project=STATE['project'], operation='build'))
+            since, limit = int(body.get('since', ['0'])[0]), int(body.get('limit', ['500'])[0])
+            lines = [f'history line {index}' for index in range(503 if sid == 701 else 1)]
+            report = self.historical_result(sid)
+            return dict(lines=lines[since:since + limit], total=len(lines), next_since=min(len(lines), since + limit),
+                        has_more=since + limit < len(lines), status=report['status'], exit=report['exit'],
+                        result=dict(verdict=report['verdict']), context=report['context'], archive=report['archive'], label=report['label'])
+        if endpoint == 'open_folder':
+            return dict(ok=True)
+        if endpoint == 'indoor_building_export':
+            return self.building_status()
+        if endpoint == 'enable_indoor_building_export':
+            assert body['revision'] == f'source-{self.building_revision}'
+            self.building_enabled = True
+            self.building_revision += 1
+            return dict(self.building_status(), ok=True, changed=True)
+        if endpoint == 'toolkit':
+            assert body['step'] == 'build'
+            self.runtime = dict(busy=True, phase='running', sid=703, label='build', operation='build')
+            return dict(sid=703, runtime=self.runtime, build_values=CONFIG, profile_revision='1')
         if endpoint == "detect_project_config":
-            return dict(values={}, presets=BUILD["presets"], warnings=[])
+            return dict(values={}, fields={}, presets=BUILD["presets"], warnings=[])
         if endpoint == "build_status":
             return dict(build_values={k: CONFIG[k] for k in ("PRESET", "BUILD_SUBDIR", "INSTALL_SUBDIR", "EXE_NAME")},
                         build_workflow=BUILD)
@@ -77,11 +141,13 @@ class Fixture:
             self.render_count += 1
             if self.render_count == 1:
                 return dict(error="Fixture recoverable assembly error")
-            return dict(schema_ok=True, render_exit=0, schema_name="source-job.xml",
+            return dict(schema_ok=True, generated=True, render_status="ready", render_exit=0, schema_name="source-job.xml",
                         runtime_name="source-job", func=body["func"], task_id=body["task_id"],
                         out_dir="C:/fixture/outputs/source-job", render_output="Fixture assembly complete", copied=[])
         if endpoint == "params":
-            return dict(function="pred", file="C:/fixture/project/Bin/source-job.xml", values={"CalcRadius": self.radius},
+            function = body.get('func', ['pred'])[0]
+            return dict(function=function, indoor_building_export=self.building_status() if function == 'predindoor' else None,
+                        file="C:/fixture/project/Bin/source-job.xml", revision=f"xml-{self.xml_revision}", values={"CalcRadius": self.radius},
                         groups=[dict(group="Prediction", rows=[dict(name="CalcRadius", label="计算半径", type="float",
                             desc="Fixture editable parameter", recommended=True, classification="current")])])
         if endpoint == "preflight":
@@ -89,11 +155,21 @@ class Fixture:
         if endpoint == "param_write":
             if self.fail_parameter_once:
                 return dict(ok=False, error="Fixture parameter save failed")
+            if body.get("revision") != f"xml-{self.xml_revision}":
+                return dict(ok=False, code="FILE_CONFLICT", error="Fixture XML conflict: 文件已变化，请重新加载，草稿已保留")
             self.radius = body["value"]
-            return dict(ok=True, target="xml")
+            self.xml_revision += 1
+            return dict(ok=True, target="schema", revision=f"xml-{self.xml_revision}")
         if endpoint == "csv":
-            return dict(path=TASK["engineering_file"], encoding="utf-8", header_zh=["编号"],
-                        header_en=["CellID"], rows=[["1"]])
+            return self.csv_grid()
+        if endpoint == "csv_save":
+            if body.get("revision") != f"csv-{self.csv_revision}":
+                return dict(ok=False, code="FILE_CONFLICT", error="Fixture CSV conflict: 文件已变化，请重新加载，草稿已保留")
+            assert body["header_rows"] == self.csv_headers, body
+            assert len(body["rows"]) == 2, body
+            self.csv_rows = body["rows"]
+            self.csv_revision += 1
+            return dict(ok=True, message="Fixture CSV saved", revision=f"csv-{self.csv_revision}")
         self.unknown.append(endpoint)
         return dict(error="Unexpected fixture endpoint: " + endpoint)
 
@@ -110,6 +186,8 @@ class Handler(SimpleHTTPRequestHandler):
         endpoint = urlparse(self.path).path.removeprefix("/api/")
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length)) if length else {}
+        if self.command == 'GET':
+            body = parse_qs(urlparse(self.path).query)
         payload = json.dumps(self.fixture.reply(endpoint, body)).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -243,6 +321,19 @@ def check():
             expect(page.locator('#params-area [data-tag="CalcRadius"]')).to_have_value("1300")
             fixture.fail_parameter_once = False
             passed.append("failed XML autosave retains draft across filtering, exposes retry and explicit discard")
+            fixture.radius = "external-value"
+            fixture.xml_revision += 1
+            parameter = page.locator('#params-area [data-tag="CalcRadius"]')
+            parameter.fill("local-draft")
+            parameter.press("Tab")
+            expect(page.locator("#hint")).to_contain_text("Fixture XML conflict")
+            expect(parameter).to_have_value("local-draft")
+            page.locator("#btn-params-save").click()
+            expect(page.locator("#hint")).to_contain_text("Fixture XML conflict")
+            assert fixture.radius == "external-value"
+            page.locator("#btn-params-discard").click()
+            expect(page.locator('#params-area [data-tag="CalcRadius"]')).to_have_value("external-value")
+            passed.append("external XML edit conflicts on save and retry, keeps local draft until explicit reload")
             page.locator("#csv-editor summary").click()
             page.locator("#btn-csv-load").click()
             cell = page.locator("#csv-wrap td[contenteditable]").first
@@ -255,10 +346,98 @@ def check():
             expect(page.locator("#csv-wrap td[contenteditable]").first).to_have_text("1")
             expect(page.locator("#btn-csv-discard")).to_be_hidden()
             passed.append("unsaved CSV blocks input change and explicit discard reloads saved content")
+            fixture.csv_rows = [["external"], ["2"]]
+            fixture.csv_revision += 1
+            cell = page.locator("#csv-wrap td[contenteditable]").first
+            cell.fill("csv-draft")
+            page.locator("#btn-csv-save").click()
+            expect(page.locator("#hint")).to_contain_text("Fixture CSV conflict")
+            expect(cell).to_have_text("csv-draft")
+            expect(page.locator("#btn-csv-discard")).to_be_visible()
+            assert fixture.csv_rows[0] == ["external"]
+            page.locator("#btn-csv-discard").click()
+            expect(page.locator("#csv-wrap td[contenteditable]").first).to_have_text("external")
+            passed.append("external CSV edit conflicts and keeps full table draft until explicit reload")
+            for count in (2, 1, 0):
+                fixture.csv_headers = [["编号"], ["Cell ID"]][:count]
+                fixture.csv_revision += 1
+                page.locator("#btn-csv-load").click()
+                cells = page.locator("#csv-wrap td[contenteditable]")
+                expect(cells).to_have_count(2)
+                cells.first.fill(f"first-{count}")
+                page.locator("#btn-csv-save").click()
+                expect(page.locator("#btn-csv-discard")).to_be_hidden()
+                assert fixture.csv_rows == [[f"first-{count}"], ["2"]]
+                cells.last.fill(f"second-{count}")
+                page.locator("#btn-csv-save").click()
+                expect(page.locator("#btn-csv-discard")).to_be_hidden()
+                assert fixture.csv_rows == [[f"first-{count}"], [f"second-{count}"]]
+                fixture.csv_rows = [["external"], ["2"]]
+            passed.append("two, one and zero header rows preserve both records and advance revision after each save")
+            fixture.csv_editable = False
+            page.locator("#btn-csv-load").click()
+            expect(page.locator("#csv-wrap td[contenteditable]")).to_have_count(0)
+            expect(page.locator("#csv-msg")).to_contain_text("Fixture unknown format")
+            saves = sum(name == 'csv_save' for name, _ in fixture.requests)
+            page.evaluate("saveCsv()")
+            assert sum(name == 'csv_save' for name, _ in fixture.requests) == saves
+            passed.append("unknown engineering format is read only in the browser")
             page.locator('input[name="func"][value="commsensing"]').check()
             expect(page.locator("#assembly-summary")).to_contain_text("请重新装配")
             expect(page.locator("#btn-run")).to_be_disabled()
             passed.append("function change marks prior assembly stale and blocks run")
+            page.locator('input[name="func"][value="predindoor"]').check()
+            page.evaluate('loadParams()')
+            expect(page.locator('#indoor-building-panel')).to_be_visible()
+            expect(page.locator('#indoor-building-status')).to_contain_text('未开启')
+            page.locator('#btn-enable-indoor-building').click()
+            expect(page.locator('#indoor-building-status')).to_contain_text('重新编译')
+            expect(page.locator('#btn-enable-indoor-building')).to_be_disabled()
+            page.locator('#params-search').fill('CalcRadius')
+            expect(page.locator('#indoor-building-status')).to_contain_text('已开启')
+            page.locator('#btn-indoor-building-build').click()
+            expect(page.locator('#stage-build')).to_be_visible()
+            passed.append('indoor export changes source only on click, preserves enabled status across filters and prompts rebuilding')
+            page.evaluate("toolkit('build')")
+            expect(page.locator('#run-connection')).to_have_text('日志已读取完整')
+            expect(page.locator('#runtime-status')).to_have_text('平台空闲')
+            assert page.evaluate('S.pollTimer === null && !S.runtime.busy && !S.inputTransition')
+            page.locator('#build-mode').select_option('release')
+            passed.append('finished build drains logs, refreshes program state and releases input and runtime locks')
+            job_before_history = page.evaluate('JSON.stringify(S.job)')
+            page.locator('[data-history-sid="701"]').click()
+            expect(page.locator('#result-status')).to_contain_text('当时：成功')
+            expect(page.locator('#result-status')).to_contain_text('当前文件：已变化')
+            expect(page.locator('#result-status')).to_have_class('badge unknown')
+            expect(page.locator('#btn-open-archive')).to_be_enabled()
+            expect(page.locator('#run-connection')).to_have_text('历史日志已读取完整')
+            expect(page.locator('#run-console')).to_contain_text('history line 502')
+            assert page.evaluate('JSON.stringify(S.job)') == job_before_history
+            passed.append('recent run preserves assembly, separates historical success from overwritten current files, drains all log pages')
+            with page.expect_download() as download:
+                page.locator('#btn-export-log').click()
+            exported = Path(download.value.path()).read_text(encoding='utf-8-sig')
+            assert 'history line 0' in exported and 'history line 502' in exported
+            assert '日志行数：503' in exported
+            page.locator('#btn-open-archive').click()
+            expect(page.locator('#hint')).not_to_contain_text('打开失败')
+            passed.append('historical export includes all 503 lines and archive folder is available')
+            fixture.current_files = 'missing'
+            page.locator('#btn-results').click()
+            expect(page.locator('#result-status')).to_contain_text('有文件缺失')
+            expect(page.locator('#result-files')).to_contain_text('当前输出目录不存在')
+            expect(page.locator('#btn-open-archive')).to_be_enabled()
+            passed.append('missing current output keeps historical evidence and archive accessible')
+            page.locator('[data-history-sid="702"]').click()
+            expect(page.locator('#run-connection')).to_have_text('历史日志已读取完整')
+            expect(page.locator('#run-status')).to_contain_text('未确认')
+            fixture.runtime = dict(busy=True, external=True, phase='running', label='Another instance', sid=999)
+            page.evaluate('refreshRuntimeState(true)')
+            expect(page.locator('#btn-stop')).to_be_disabled()
+            assert page.evaluate('S.sid') == 702
+            fixture.runtime = dict(busy=False, phase='idle')
+            page.evaluate('refreshRuntimeState()')
+            passed.append('interrupted history finishes reading; another instance cannot be cancelled or replace its console')
             page.evaluate("document.querySelectorAll('.workflow-stage').forEach(x=>x.open=true)")
             for width, filename in [(1440, "workflow-desktop.png"), (390, "workflow-mobile.png"), (320, "workflow-narrow.png")]:
                 page.set_viewport_size(dict(width=width, height=1000))
