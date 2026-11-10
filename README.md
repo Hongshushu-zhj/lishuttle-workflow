@@ -30,7 +30,7 @@
 
 引擎项目、第三方库和业务数据请向项目维护者获取，仓库中的示例任务单不附带实际数据。若已有可运行的 Windows 构建产物，可以跳过编译，但仍需完整的依赖和运行配置。
 
-配置源中必须有完整样例 `CONFIG_SRC/runtimelibrary/runtimeschema.xml`，用于生成运行单和读取默认值。DLL 需要与 exe 的架构、Debug/Release 配置及引擎版本匹配。引擎自己的 CMake 预设、第三方依赖路径也必须适用于本机，平台不会自动修复引擎构建文件。
+配置源中必须有完整样例，用于生成运行单和读取默认值：室外为 `CONFIG_SRC/runtimelibrary/runtimeschema.xml`，室内为同目录的 `indoorruntimeschema.xml`。DLL 需要与 exe 的架构、Debug/Release 配置及引擎版本匹配。引擎自己的 CMake 预设、第三方依赖路径也必须适用于本机，平台不会自动修复引擎构建文件。
 
 把工作目录放在自己有写入权限的位置。现有批处理使用 GBK 代码页，首次使用建议采用简单的英文路径，避免 `!`、`%` 等特殊字符。
 
@@ -283,14 +283,18 @@ python .\platform\backend\server.py
 1. 按上述六阶段导航操作。在“项目与环境”登记并保存项目，在“程序准备”应用匹配的已有程序或按需编译；工具链缺项只阻断实际需要它的动作。
 2. 在“任务与输入”确认地图与工参任务目录，点击对应“重新扫描”，选择城市/场景和任务。目录修改只写当前项目档案。选择工参后可保存“当前工参与地图对应关系”，再次选择相同工参和运行 XML 时恢复当前项目的绑定。
 3. 在“任务与输入”选择功能、填写任务名，建议用英文字母、数字、`-`、`_`，例如 `demo-pl`。装配后生成 `demo-pl.xml`，其 `RuntimeSchema name`、输出子目录及 VS 平台启动项同步为本次任务名；源 XML 保留原状。修改任务名或任务 ID 后需重新装配，页面会阻止继续运行旧任务。功能列表按当前引擎项目读取，缺少某功能时先确认版本支持。
-4. 点击“装配并渲染”，自动先从当前项目 `CONFIG_SRC`、`DLL_SRC` 补齐 Bin 的基础资源（含目录结构和 exe 旁的 `config/*.xml`），然后生成任务配置，最后按勾选装配任务天线、模型。基础补齐只复制缺失文件，保留已有运行 XML、模型、天线和 DLL；跳过源中的 `.bak`、`.task-bak`、`.tmp` 备份。源目录缺失时停止并显示错误；装配输出展示复制来源、目标和数量。复用 XML 的预览阶段不复制，确认后才装配。专用运行单生成在 exe 的 `runtimelibrary/` 下，任务单按项目生成在 `jobs/<项目ID>/<构建标识>/web-*.env`。运行单以当前项目 `CONFIG_SRC/runtimelibrary/runtimeschema.xml` 为完整底稿，保留全部参数、注释、顺序及样例默认值，仅替换任务名、数据路径和任务单明确指定的算高/层高；不按所选功能删减参数。室内任务另设置必需的 `MapFormat`、`MapPath`。样例缺失或无效时直接报错，不回退到精简模板。参数面板出现不表示输入数据已经齐全。
+4. 点击“装配并渲染”，自动先从当前项目 `CONFIG_SRC`、`DLL_SRC` 补齐 Bin 的基础资源（含目录结构和 exe 旁的 `config/*.xml`），然后生成任务配置，最后按勾选装配任务天线、模型。基础补齐只复制缺失文件，保留已有运行 XML、模型、天线和 DLL；跳过源中的 `.bak`、`.task-bak`、`.tmp` 备份。源目录缺失时停止并显示错误；装配输出展示复制来源、目标和数量。复用 XML 的预览阶段不复制，确认后才装配。专用运行单生成在 exe 的 `runtimelibrary/` 下，任务单按项目生成在 `jobs/<项目ID>/<构建标识>/web-*.env`。室外任务以当前项目 `CONFIG_SRC/runtimelibrary/runtimeschema.xml` 为完整底稿；室内 `predindoor / plindoor / indoorrays` 使用独立的 `indoorruntimeschema.xml`，要求底稿声明 `MapFormat=indoor`。保留参数、注释、顺序及样例默认值，仅替换任务名、数据路径和任务单明确指定的算高/层高；室内底稿重复接收高度的处理见下文。样例缺失或无效时直接报错，不回退到通用样例或精简模板。参数面板出现不表示输入数据已经齐全。
 5. 检查并保存参数。`cali / pred / predindoor / acp / commsensing` 默认进入“本功能可配置 + 未分类”，按本地引擎源码调用链显示功能参数及路损、地图、工参、天线依赖。“本功能当前生效参数”进一步隐藏开关未启用的条件项、仅启动读取项和未分类字段；“全部已识别参数”保留当前运行 XML 的所有实际字段。切换功能会重新计算范围，手选的显示范围和搜索词保持不变。参数旁显示触发条件及源码依据；缺失的强制读取元素和可选参数单独提示，不冒充已配置值，也不自动写入 XML。其他功能暂沿用旧字典推荐范围。
-   每个可编辑参数旁提供“ThirdPart 默认”按钮：数值从当前项目完整样例读取；路径只填入当前项目配置源内确实存在的对应资源（例如场景配置、杂波匹配配置），点击即备份并写入目标 XML，不修改任务源 XML。无可靠默认资源、样例缺少字段或目标 XML 缺少字段时禁用并提示；留空不会自动覆盖。需要调整 CSV 时，在“任务与输入”的工参编辑器加载、编辑并明确保存或放弃。
+   每个可编辑参数旁提供“ThirdPart 默认”按钮：按实际运行 XML 的 `MapFormat` 选择当前项目的室内或室外完整样例，数值从该样例读取；路径只填入当前项目配置源内确实存在的对应资源（例如场景配置、杂波匹配配置），点击即备份并写入目标 XML，不修改任务源 XML。无可靠默认资源、样例缺少字段、样例字段重复/结构化或目标 XML 缺少字段时禁用并提示；留空不会自动覆盖。需要调整 CSV 时，在“任务与输入”的工参编辑器加载、编辑并明确保存或放弃。
 6. 在“参数与运行前检查”执行检查，处理缺项并取得当前有效的通过报告后，在“运行与结果”点击“运行 lishuttle”（启动时会在取得占用后重新检查）。报告定位具体参数和文件，不自动修复输入。“导出运行日志”保存当前会话的全部控制台输出（含指令、导出时间、状态和退出码）为 UTF-8 `.log` 文件，运行中也可导出。体检、编译输出同样支持导出；不包含引擎另行写入的历史 `uplan.log`。刷新页面会恢复本服务仍在执行的会话；服务重启后可从“最近运行”查看日志、当时结论和归档。日志连接中断会显示状态并从已读取位置重试。
 7. 完成后在“运行与结果”分别检查进程退出码、产物验证、业务可用性。“结果”默认查询当前会话；勾选“仅浏览任务目录”或输入其他任务名则只查看历史文件，明确标注“未关联本次运行”。
 8. 需要整理时，在“装配与确认”的高级维护区域展开“清理平台历史配置”，先“预览可清理配置”，核对后“归档并清理以上配置”。仅处理当前项目所选构建目录中具有可核验平台渲染记录的历史 XML、`.bak`、manifest、生成任务 env 及对应平台 VS 启动项；保留当前运行单（页面无当前任务时保留最近生成的一份）、任务源 XML、被其他 XML 或手写启动项引用的配置、基础资源和结果。新任务 env 按项目和构建分别存放；旧版共享 env 无法确认构建独占时保留。来源不明的文件跳过；平台进程运行时拒绝清理，文件变化后须重新预览。文件移至本工作流已忽略的 `docs/runtime-config-archives/<时间及唯一编号>/`，不会永久删除；按 `restore.json` 将文件复制回 `source` 路径即可恢复，需要恢复启动项时参考同目录 `launch.vs.json.before` 合并，避免覆盖后来新增的启动项。此入口不清理其他 Debug/Release 构建目录，需切换对应配置再预览。
 
 室外路损选 `pl`，室内路损选 `plindoor`，室外预测选 `pred`，室内预测选 `predindoor`（需要引擎支持）。任务 ID 通常保持默认 `1`；预测产物位于实际任务输出目录的 `pred/<任务ID>/`。最大计算高度、层高在装配后的配置参数面板调整；网页生成任务单不额外覆盖这些值。
+
+室内预测装配后，参数区显示当前 XML 实际定义的 `MaxDeepth`（室内射线树最大深度，保留引擎原拼写）、`MaxReflection`、`MaxDiffraction`、`MaxPenetration`、`MaxRayNumber` 及室内接收缩放参数。这些参数直接保存到 XML，无需重编译；调整深度等射线参数后应确认 `IsForcedCalc=true`，避免复用未包含新参数的旧 `.ils` 缓存。此前从通用样例生成的室内任务，请先记录手动调整的值，取消“使用任务已有运行配置”，重新装配并核对参数；复用已有 XML 会保留原有配置，不会自动补写缺失参数。
+
+当前引擎的室内样例包含两项 `DefaultUEHeight`（1、1.5），引擎实际读取首项。仅在新建室内样例任务时，平台保留首项并移除其余简单标量同名项，以消除预检歧义并允许编辑接收高度；装配日志和 manifest 的 `sample_adjustments` 记录原值及保留值。项目样例、任务源 XML 不变，已有 XML 复用、结构化字段及其他重复字段仍保留并提示核对；来源样例重复字段的“ThirdPart 默认”禁用。室内未选择的区域、路测目录清空，避免沿用样例作者机器的路径。
 
 平台一次只执行一个运行、体检、编译或装配任务，从准备输入到进程树退出、结果验证及归档结束均保留占用。期间拒绝再次启动，以及装配、参数/CSV 修改、配置保存、项目切换和相关清理；后端返回 HTTP 409 和 `RUNTIME_BUSY`，其他浏览器标签页也适用。日志、结果和停止仍可用；停止会终止本服务托管的整个子进程树，确认结束并保存记录后释放占用。多个平台服务及 `run_local.bat` 共用 Windows 系统临时目录下的资源锁；相同 Bin 或输出目录不能同时使用，进程被强制结束后锁由操作系统释放。页面会提示其他实例占用，但不能取消另一个实例的任务。手动 exe、VS、Excel 和其他不使用该协议的程序不受它管理。
 
@@ -492,7 +496,7 @@ python .\scripts\render_schema.py .\jobs\my-pl.env local-win
 | 工具按钮调用 `cmd /c` 和 Windows `.bat`；打开文件夹使用 `os.startfile`，引擎输出按 GBK 解码 | macOS/Linux 不能仅改路径直接复用网页完整流程，需要适配启动、编译、文件夹打开和编码处理 | [core.py](platform/backend/core.py)：`start_toolkit`、`Runner`；[server.py](platform/backend/server.py)：`open_folder` |
 | exe 固定在 `PROJECT_DIR/BUILD_SUBDIR/Bin/EXE_NAME`，运行单固定在其 `runtimelibrary/` 下 | `BUILD_SUBDIR` 从预设派生、`EXE_NAME` 自动识别，`Bin`、`runtimelibrary` 是代码中的目录约定；引擎产物布局不同需调整构建布局或平台代码 | [core.py](platform/backend/core.py)：`schema_path`、`start_lishuttle`；[render_schema.py](scripts/render_schema.py) |
 | 项目内容校验及功能定义文件位置固定 | 项目须包含 `CMakeLists.txt`、`LiShuttle/`、`SwanUtility/incl/LiShuttleTypes.h`；改名或改内部布局需适配识别逻辑。项目校验的样例警告仍检查传统 `ThirdPart/Config` 位置，未随自定义 `CONFIG_SRC` 改变 | [core.py](platform/backend/core.py)：`validate_project`、`scan_functions` |
-| 完整样例固定在 `CONFIG_SRC/runtimelibrary/runtimeschema.xml`，参数名和 XML 结构有约定 | 可以修改配置源根目录，但不能任意改样例文件名、节点或参数名；不同引擎版本需核对兼容性。已有任务 XML 要使用 UTF-8 | [render_schema.py](scripts/render_schema.py)、[task_schema.py](scripts/task_schema.py)、[core.py](platform/backend/core.py)：`thirdpart_defaults` |
+| 完整样例固定在 `CONFIG_SRC/runtimelibrary/`：室外 `runtimeschema.xml`、室内 `indoorruntimeschema.xml`，参数名和 XML 结构有约定 | 可以修改配置源根目录，但不能任意改样例文件名、节点或参数名；不同引擎版本需核对兼容性。已有任务 XML 要使用 UTF-8 | [render_schema.py](scripts/render_schema.py)、[task_schema.py](scripts/task_schema.py)、[core.py](platform/backend/core.py)：`thirdpart_defaults` |
 | 地图按根目录下的直接子目录识别，有 `.das` 文件即室内，否则以 `heights/index.txt` 判定室外 | `.das` 扩展名忽略大小写和文件名长度，室内优先；根目录应填各场景的父目录，不递归搜索更深目录；扫描通过仅表示文件已发现，运行前仍检查引擎兼容性和地图内容 | [indoor_maps.py](scripts/indoor_maps.py)、[core.py](platform/backend/core.py)：`scan_cities`；[task_schema.py](scripts/task_schema.py) |
 | 任务按任务根目录的子目录组织；天线、模型等资源使用约定名称 | 支持 `antenna/`、`antennas/`、`models/` 等约定，不会自动理解任意资源名称；XML 和 CSV 则按内容识别 | [core.py](platform/backend/core.py)：`scan_tasks`、`assemble_files` |
 | 体检固定检查 `ThirdPart/Lib`、`uplancommon.lib`、`lishuttlectl.lib` 等 | 没有独立的 `LIB_SRC` 配置；依赖库布局或名称不同需要调整体检脚本，并同步核对引擎 CMake | [doctor_local.bat](scripts/doctor_local.bat) |

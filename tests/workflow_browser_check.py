@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import sys
 import threading
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -17,6 +19,9 @@ from urllib.parse import urlparse, parse_qs
 from playwright.sync_api import sync_playwright, expect
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path[:0] = [str(ROOT / 'scripts'), str(ROOT / 'platform/backend')]
+from parameter_catalog import parse_document, build_catalog
+PARAM_SPEC = json.loads((ROOT / 'platform/backend/params_spec.json').read_text(encoding='utf-8'))
 CONFIG = dict(PRESET="release", BUILD_SUBDIR="build/release", INSTALL_SUBDIR="install",
               EXE_NAME="lishuttle.exe", CONFIG_SRC="C:/fixture/ThirdPart/config",
               DLL_SRC="C:/fixture/ThirdPart/bin", MAP_ROOT="C:/fixture/maps",
@@ -57,6 +62,11 @@ class Fixture:
         self.current_files = 'changed'
         self.building_enabled = False
         self.building_revision = 1
+        self.indoor_values = dict(MapFormat='indoor', MapPath='C:/fixture/maps/indoor',
+            EngineeringFilePath='C:/fixture/ap.csv', PathlossDirectory='C:/fixture/outputs',
+            MaxRayNumber='8', MaxDeepth='6', MaxReflection='4', MaxDiffraction='2', MaxPenetration='2',
+            MinimumWallLength='0.2', DefaultCalcResolution='1', DefaultUEHeight='1',
+            IndoorRxPowerSF='10', IndoorSinrSF='2', IsForcedCalc='true')
 
     def building_status(self):
         return dict(supported=True, enabled=self.building_enabled, revision=f'source-{self.building_revision}',
@@ -146,18 +156,37 @@ class Fixture:
                         out_dir="C:/fixture/outputs/source-job", render_output="Fixture assembly complete", copied=[])
         if endpoint == "params":
             function = body.get('func', ['pred'])[0]
+            if function == 'predindoor':
+                raw = ('<RuntimeSchema name="source-job">' + ''.join(
+                    f'<{tag}>{value}</{tag}>' for tag, value in self.indoor_values.items()) + '</RuntimeSchema>').encode()
+                document = parse_document(raw)
+                return dict(build_catalog(document, PARAM_SPEC, function), values=document['values'],
+                    file='C:/fixture/project/Bin/source-job.xml', revision=f'xml-{self.xml_revision}',
+                    indoor_building_export=self.building_status(), thirdpart_defaults={
+                        tag: dict(available=True, value=value,
+                                  source='C:/fixture/ThirdPart/config/runtimelibrary/indoorruntimeschema.xml')
+                        for tag, value in self.indoor_values.items()})
             return dict(function=function, indoor_building_export=self.building_status() if function == 'predindoor' else None,
                         file="C:/fixture/project/Bin/source-job.xml", revision=f"xml-{self.xml_revision}", values={"CalcRadius": self.radius},
                         groups=[dict(group="Prediction", rows=[dict(name="CalcRadius", label="计算半径", type="float",
                             desc="Fixture editable parameter", recommended=True, classification="current")])])
         if endpoint == "preflight":
             return dict(ok=True, issues=[], context=dict(mode=dict(requested="ground", effective="ground")))
+        if endpoint == 'param_default':
+            assert body['tag'] == 'MaxDeepth'
+            assert body['revision'] == f'xml-{self.xml_revision}'
+            self.indoor_values['MaxDeepth'] = '6'
+            self.xml_revision += 1
+            return dict(ok=True, revision=f'xml-{self.xml_revision}', value='6')
         if endpoint == "param_write":
             if self.fail_parameter_once:
                 return dict(ok=False, error="Fixture parameter save failed")
             if body.get("revision") != f"xml-{self.xml_revision}":
                 return dict(ok=False, code="FILE_CONFLICT", error="Fixture XML conflict: 文件已变化，请重新加载，草稿已保留")
-            self.radius = body["value"]
+            if body['tag'] in self.indoor_values:
+                self.indoor_values[body['tag']] = body['value']
+            else:
+                self.radius = body["value"]
             self.xml_revision += 1
             return dict(ok=True, target="schema", revision=f"xml-{self.xml_revision}")
         if endpoint == "csv":
@@ -388,6 +417,22 @@ def check():
             passed.append("function change marks prior assembly stale and blocks run")
             page.locator('input[name="func"][value="predindoor"]').check()
             page.evaluate('loadParams()')
+            page.locator('#params-search').fill('')
+            for tag in ('MaxDeepth', 'MaxReflection', 'MaxDiffraction', 'MaxPenetration',
+                        'MaxRayNumber', 'IndoorRxPowerSF', 'IndoorSinrSF'):
+                expect(page.locator(f'input[data-tag="{tag}"]')).to_have_value(fixture.indoor_values[tag])
+            expect(page.locator('#params-source')).to_contain_text('无需重新编译')
+            depth = page.locator('input[data-tag="MaxDeepth"]')
+            depth.fill('3')
+            depth.press('Tab')
+            expect(page.locator('#hint')).to_contain_text('MaxDeepth 已写入')
+            assert fixture.indoor_values['MaxDeepth'] == '3'
+            assert fixture.indoor_values['IsForcedCalc'] == 'true'
+            default = page.locator('button[data-default-tag="MaxDeepth"]')
+            expect(default).to_have_attribute('title', re.compile('indoorruntimeschema.xml'))
+            default.click()
+            expect(page.locator('input[data-tag="MaxDeepth"]')).to_have_value('6')
+            passed.append('indoor ray and scaling parameters display, save to XML and restore the indoor sample default')
             expect(page.locator('#indoor-building-panel')).to_be_visible()
             expect(page.locator('#indoor-building-status')).to_contain_text('未开启')
             page.locator('#btn-enable-indoor-building').click()

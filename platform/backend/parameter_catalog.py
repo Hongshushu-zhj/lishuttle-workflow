@@ -5,6 +5,7 @@ import re
 import xml.etree.ElementTree as ET
 from xml.parsers import expat
 from function_profiles import function_profile
+from task_schema import runtime_scene
 
 
 def parse_document(raw):
@@ -49,8 +50,7 @@ def parse_document(raw):
 def build_catalog(document, spec, func, show_all=True):
     known = {p['name']:p for p in spec['params']}
     values = document['values']
-    format_name = values.get('MapFormat', '').strip().lower()
-    scene = 'indoor' if format_name == 'indoor' or (not format_name and values.get('MapPath', '').strip()) else 'outdoor'
+    scene = runtime_scene(values)
     hybrid = func in ('plhybrid', 'hybridrays')
     rules, profile = function_profile(func, values)
     groups = OrderedDict((name, []) for name in spec['groups'])

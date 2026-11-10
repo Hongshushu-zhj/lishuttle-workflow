@@ -40,6 +40,18 @@ class ProjectDefaultsTests(unittest.TestCase):
         _, document = core.read_schema_document(body.get('schema', 'job.xml'))
         return Api.param_default(dict(body, revision=document['revision'] if document else 'missing'))
 
+    def write_target(self, fields):
+        target = self.project / 'out/build/custom/Bin/runtimelibrary/job.xml'
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('<RuntimeSchema>' + fields + '</RuntimeSchema>', encoding='utf-8')
+        return target
+
+    def write_indoor_sample(self, fields='<CpuLoad>40</CpuLoad>'):
+        sample = self.config / 'runtimelibrary/indoorruntimeschema.xml'
+        sample.write_text('<RuntimeSchema><MapFormat>indoor</MapFormat>' + fields + '</RuntimeSchema>',
+                          encoding='utf-8')
+        return sample
+
     def test_content_validation_and_manual_registry(self):
         result = core.validate_project(str(self.project))
         self.assertTrue(result['ok'])
@@ -69,6 +81,75 @@ class ProjectDefaultsTests(unittest.TestCase):
         self.assertTrue(defaults['SceneSettingsPath']['available'])
         self.assertFalse(defaults['EngineeringFilePath']['available'])
         self.assertEqual(defaults['CpuLoad']['value'], '80')
+
+    def test_default_source_uses_actual_xml_scene_instead_of_requested_function(self):
+        indoor_sample = self.write_indoor_sample()
+        cases = [('<MapFormat>indoor</MapFormat>', 'pl', '40', indoor_sample),
+                 ('<MapPath>maps/scene</MapPath>', 'predindoor', '80',
+                  self.config / 'runtimelibrary/runtimeschema.xml'),
+                 ('<MapFormat>PLANET</MapFormat><MapPath>unused</MapPath>',
+                  'predindoor', '80', self.config / 'runtimelibrary/runtimeschema.xml')]
+        for fields, func, value, sample in cases:
+            with self.subTest(fields=fields):
+                target = self.write_target(fields + '<CpuLoad>99</CpuLoad>')
+                response = Api.params(dict(schema=['job.xml'], func=[func]))
+                default = response['thirdpart_defaults']['CpuLoad']
+                self.assertEqual(default['value'], value)
+                self.assertEqual(default['source'], sample.as_posix())
+                result = self.default_param(schema='job.xml', tag='CpuLoad', func=func)
+                self.assertTrue(result['ok'], result)
+                self.assertIn('<CpuLoad>' + value + '</CpuLoad>', target.read_text(encoding='utf-8'))
+
+    def test_missing_or_invalid_indoor_sample_never_falls_back_to_outdoor_default(self):
+        for contents in (None, '<RuntimeSchema>', '<Other><CpuLoad>22</CpuLoad></Other>',
+                         '<RuntimeSchema><MapFormat>PLANET</MapFormat><CpuLoad>22</CpuLoad></RuntimeSchema>'):
+            with self.subTest(contents=contents):
+                sample = self.config / 'runtimelibrary/indoorruntimeschema.xml'
+                if contents is None:
+                    sample.unlink(missing_ok=True)
+                else:
+                    sample.write_text(contents, encoding='utf-8')
+                target = self.write_target('<MapFormat>indoor</MapFormat><CpuLoad>99</CpuLoad>')
+                before = target.read_bytes()
+                response = Api.params(dict(schema=['job.xml'], func=['pl']))
+                self.assertNotIn('CpuLoad', response['thirdpart_defaults'])
+                result = self.default_param(schema='job.xml', tag='CpuLoad')
+                self.assertFalse(result['ok'], result)
+                self.assertEqual(target.read_bytes(), before)
+                self.assertFalse(Path(str(target) + '.bak').exists())
+
+    def test_duplicate_and_structured_sample_defaults_are_disabled_and_explained(self):
+        self.write_indoor_sample('<DefaultUEHeight>1</DefaultUEHeight>'
+                                 '<DefaultUEHeight>1.5</DefaultUEHeight>'
+                                 '<CpuLoad><Value>40</Value></CpuLoad>')
+        target = self.write_target('<MapFormat>indoor</MapFormat><DefaultUEHeight>9</DefaultUEHeight>'
+                                   '<CpuLoad>99</CpuLoad>')
+        before = target.read_bytes()
+        response = Api.params(dict(schema=['job.xml'], func=['pl']))
+        for tag, reason in (('DefaultUEHeight', '重复'), ('CpuLoad', '结构化')):
+            with self.subTest(tag=tag):
+                default = response['thirdpart_defaults'][tag]
+                self.assertFalse(default['available'])
+                self.assertIn(reason, default['reason'])
+                result = self.default_param(schema='job.xml', tag=tag)
+                self.assertFalse(result['ok'], result)
+                self.assertIn(reason, result['message'])
+        self.assertEqual(target.read_bytes(), before)
+        self.assertFalse(Path(str(target) + '.bak').exists())
+
+    def test_restore_reloads_actual_xml_scene_and_preserves_revision_conflict(self):
+        self.write_indoor_sample()
+        target = self.write_target('<MapFormat>PLANET</MapFormat><CpuLoad>99</CpuLoad>')
+        loaded = Api.params(dict(schema=['job.xml'], func=['pl']))
+        self.assertEqual(loaded['thirdpart_defaults']['CpuLoad']['value'], '80')
+        target.write_bytes(target.read_bytes().replace(b'PLANET', b'indoor'))
+        before = target.read_bytes()
+        conflict = Api.param_default(dict(schema='job.xml', tag='CpuLoad', revision=loaded['revision']))
+        self.assertEqual(conflict['code'], 'FILE_CONFLICT')
+        self.assertEqual(target.read_bytes(), before)
+        result = self.default_param(schema='job.xml', tag='CpuLoad')
+        self.assertTrue(result['ok'], result)
+        self.assertIn('<CpuLoad>40</CpuLoad>', target.read_text(encoding='utf-8'))
 
     def test_default_write_backups_and_preserves_other_fields(self):
         dest = self.project / 'out/build/custom/Bin/runtimelibrary/job.xml'
@@ -109,8 +190,8 @@ class ProjectDefaultsTests(unittest.TestCase):
         switched = threading.Event()
         switch_results = []
         original_defaults = core.thirdpart_defaults
-        def defaults():
-            value = original_defaults()
+        def defaults(values=None):
+            value = original_defaults(values)
             entered.set()
             if not release.wait(3):
                 raise RuntimeError('test timeout')

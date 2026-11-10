@@ -445,12 +445,12 @@
   },
   {
    "name": "MaxDeepth",
-   "label": "最大传播深度",
+   "label": "室内射线树最大深度",
    "group": "室内射线追踪",
    "type": "int",
    "applies": "indoor",
    "default": "6",
-   "desc": "反射+衍射+穿透累计事件数上限"
+   "desc": "室内射线树的最大深度。直接修改运行 XML，无需重新编译；修改后请确认 IsForcedCalc=true，避免复用旧 .ils 路损缓存。"
   },
   {
    "name": "IndoorRxPowerSF",

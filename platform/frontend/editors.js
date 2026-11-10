@@ -31,6 +31,7 @@ function renderParams(r) {
   const counts = r.counts || {total:r.groups.reduce((sum,g)=>sum+g.rows.length,0)};
   const info = S.functionInfo?.[r.function] || FUNC_INFO[r.function];
   const label = info?.label || info?.zh || r.function || S.func || '';
+  const indoor = r.function === 'predindoor';
   $('params-toolbar').classList.remove('hidden');
   $('params-scope').value = scope;
   $('params-search').value = S.paramsSearch || '';
@@ -38,15 +39,19 @@ function renderParams(r) {
   $('params-search').oninput = () => { if (!guardParameterFilter()) return; S.paramsSearch = $('params-search').value; renderParams(S.paramsData); };
   $('params-summary').textContent = `XML 已识别 ${counts.total} 项 · 当前显示 ${shown} 项 · 推荐功能：${label}` +
     (r.counts ? ` · 本功能可配置 ${counts.recommended} 项 · 其他功能/场景 ${counts.other} 项 · 未分类 ${counts.unclassified} 项` : '');
-  $('params-source').textContent = `实际读取与编辑文件：${r.file || '当前运行 XML'}${r.schema_name ? ` · name=${r.schema_name}` : ''}。字典中但当前 XML 未定义的字段不作为已配置参数显示。`;
+  $('params-source').textContent = `实际读取与编辑文件：${r.file || '当前运行 XML'}${r.schema_name ? ` · name=${r.schema_name}` : ''}。字典中但当前 XML 未定义的字段不作为已配置参数显示。` +
+    (indoor ? '下方室内射线与接收参数直接保存到当前 XML，无需重新编译程序。' : '');
   const review = profile.source_review || {};
   const reviewText = review.status === 'matched' ? '当前项目源码与调研版本一致' : review.status === 'changed'
     ? `当前项目源码存在差异，功能范围待复核：${(review.changed || []).join('、')}` : '当前项目源码不完整，使用已调研版本的参考范围';
   const required = profile.missing_required || [], optional = profile.missing_optional || [];
+  const missingIndoor = indoor ? [...new Set([...required, ...optional])].filter(tag =>
+    ['MaxRayNumber','MaxDeepth','MaxReflection','MaxDiffraction','MaxPenetration','IndoorRxPowerSF','IndoorSinrSF','IsForcedCalc'].includes(tag)) : [];
   $('params-profile').innerHTML = profile.reviewed
     ? `<p><strong>${esc(profile.label || label)}</strong>：${esc(profile.description || '')}</p>` +
       `<p class="${review.status === 'matched' ? '' : 'param-warning'}">${esc(reviewText)}</p>` +
       (profile.scene_warning ? `<p class="param-warning">${esc(profile.scene_warning)}</p>` : '') +
+      (missingIndoor.length ? `<p class="param-warning">当前 XML 缺少室内参数：${esc(missingIndoor.join('、'))}。如需调整这些参数，请从室内样例重新装配运行单，再核对当前任务设置；平台不会自动添加缺失参数。</p>` : '') +
       (required.length ? `<p class="param-warning">本功能强制读取的元素在当前 XML 中缺失：${esc(required.join('、'))}。请核对所选运行配置；不会自动补写或覆盖参数。</p>` : '') +
       (optional.length ? `<details><summary>本功能另有 ${optional.length} 项可选参数未在 XML 中定义</summary><p>${esc(optional.join('、'))}</p><p>这些是可配置项，不是已配置值；缺失时由引擎默认或条件分支处理。</p></details>` : '') +
       (profile.notes || []).map(note=>`<p>${esc(note)}</p>`).join('')

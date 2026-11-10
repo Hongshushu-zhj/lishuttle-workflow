@@ -19,7 +19,7 @@ Windows 和 Linux 用的是同一个文件。
 读三个东西：
     env/<target>.env                  环境定义（路径根、预设名、工具链）
     jobs/<job>.env                    任务单（功能、城市、工参、区域）
-    <PROJECT_DIR>/<CONFIG_SRC>/runtimelibrary/runtimeschema.xml    完整样例
+    <PROJECT_DIR>/<CONFIG_SRC>/runtimelibrary/(indoor)runtimeschema.xml    按场景选择完整样例
 
 输出：
     <PROJECT_DIR>/<BUILD_SUBDIR>/Bin/runtimelibrary/<SCHEMA_NAME>        成品运行单
@@ -39,7 +39,8 @@ import uuid
 from file_safety import FileTransaction
 from indoor_maps import indoor_map_entries
 from project_config import load_local, validate_operation
-from task_schema import render_existing, runtime_details, LOCAL_PATHS, synchronize_runtime_name
+from task_schema import render_existing, runtime_details, LOCAL_PATHS, synchronize_runtime_name, project_sample_path
+from xml.parsers import expat
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
@@ -317,20 +318,68 @@ def do_print_run(table, prepare_render=False, batch=False):
     return 0
 
 
-def render_project_sample(table, job):
+def indoor_task(table):
+    return (table.get('MAP_FORMAT', '').strip().lower() == 'indoor'
+            or table.get('TEMPLATE') == 'runtimeschema-indoor.xml.tpl'
+            or table.get('FUNC') in ('predindoor', 'plindoor', 'indoorrays'))
+
+
+def normalize_indoor_sample_height(text, root, adjustments):
+    """The shipped sample repeats this scalar; match the engine's first read.
+
+    Only newly generated indoor samples are normalized. Existing user XML and
+    all other repeated/structured fields retain the normal ambiguity checks.
+    Expat offsets keep comments, unrelated nested fields and line endings intact.
+    """
+    nodes = root.findall('DefaultUEHeight')
+    if len(nodes) < 2 or any(len(node) or node.attrib for node in nodes):
+        return text
+    raw = text.encode('utf-8')
+    parser = expat.ParserCreate()
+    depth, spans = 0, []
+
+    def start(name, attrs):
+        nonlocal depth
+        depth += 1
+        if depth == 2 and name == 'DefaultUEHeight':
+            spans.append([parser.CurrentByteIndex, None])
+
+    def end(name):
+        nonlocal depth
+        if depth == 2 and name == 'DefaultUEHeight':
+            begin = spans[-1][0]
+            opening_end = raw.index(b'>', begin)
+            spans[-1][1] = (opening_end + 1 if raw[begin:opening_end].rstrip().endswith(b'/')
+                            else raw.index(b'>', parser.CurrentByteIndex) + 1)
+        depth -= 1
+
+    parser.StartElementHandler, parser.EndElementHandler = start, end
+    parser.Parse(raw, True)
+    for begin, end_at in reversed(spans[1:]):
+        raw = raw[:begin] + raw[end_at:]
+    adjustments.append(dict(tag='DefaultUEHeight', original_values=[n.text or '' for n in nodes],
+        value=nodes[0].text or '', reason='室内引擎读取首项；新建任务仅保留首项，避免重复参数歧义'))
+    return raw.decode('utf-8')
+
+
+def render_project_sample(table, job, adjustments=None):
     """复制当前引擎的完整样例，只定点替换任务值，不重排 XML 或注释。"""
-    sample = os.path.join(table['PROJECT_DIR'], table.get('CONFIG_SRC', 'ThirdPart/Config'),
-                          'runtimelibrary', 'runtimeschema.xml')
+    indoor = indoor_task(table)
+    sample = project_sample_path(table, indoor=indoor)
     if not os.path.isfile(sample):
         sys.exit(f'[错误] 找不到完整运行单样例：{to_slash(sample)}')
-    with open(sample, 'r', encoding='utf-8-sig', newline='') as fh:
-        text = fh.read()
     try:
-        root = ET.fromstring(text)
-    except ET.ParseError as exc:
+        with open(sample, 'r', encoding='utf-8-sig', newline='') as fh:
+            text = fh.read()
+        root = ET.fromstring(text, parser=ET.XMLParser(target=ET.TreeBuilder(insert_comments=True)))
+    except (OSError, UnicodeError, ET.ParseError) as exc:
         sys.exit(f'[错误] 运行单样例 XML 无效：{sample}：{exc}')
     if root.tag != 'RuntimeSchema':
         sys.exit(f'[错误] 运行单样例根节点必须是 RuntimeSchema：{sample}')
+    if indoor and (root.findtext('MapFormat') or '').strip().lower() != 'indoor':
+        sys.exit(f'[错误] 室内运行单样例必须声明 MapFormat=indoor：{sample}')
+    if indoor:
+        text = normalize_indoor_sample_height(text, root, adjustments if adjustments is not None else [])
 
     values = {
         'EngineeringFilePath': table['ENGINEERING_FILE'],
@@ -342,10 +391,8 @@ def render_project_sample(table, job):
                      ('DEFAULT_FLOOR_HEIGHT', 'DefaultFloorHeight')):
         if job.get(key):
             values[tag] = table[key]
-    if table.get('DRIVETEST_DIR') or table.get('DT_ROOT'):
+    if indoor or table.get('DRIVETEST_DIR') or table.get('DT_ROOT'):
         values['DriverTestFileDictionaryPath'] = table['DT_ROOT']
-    indoor = (table.get('MAP_FORMAT', '').lower() == 'indoor'
-              or table.get('TEMPLATE') == 'runtimeschema-indoor.xml.tpl')
     if indoor:
         values.update(MapFormat='indoor', MapPath=table.get('MAP_PATH', ''))
     else:
@@ -384,7 +431,7 @@ def render_project_sample(table, job):
             part = re.sub(pattern, replace, part)
         parts[i] = part
     rendered = ''.join(parts)
-    # 室内分流所必需的字段在室外样例中可能不存在；其余字段一律不增删。
+    # 室内底稿缺少 MapPath 时补上任务目录；不从室外样例拼凑室内参数。
     if indoor:
         newline = '\r\n' if '\r\n' in text else '\n'
         extra = ''.join(f'  <{tag}>{escape(values[tag])}</{tag}>{newline}'
@@ -409,6 +456,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True,
     written = []
     actual_paths = {}
     attempt_id = attempt_id or uuid.uuid4().hex
+    sample_adjustments = []
 
     if write_output:
         # 默认室内外入口均从当前项目完整样例复制。显式指定其他模板仍兼容。
@@ -425,7 +473,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True,
             table['SCENE_SETTINGS_FILE'] = existing['scene_settings_file']
             table['DT_ROOT'] = existing['drivetest_dir']
         elif tpl_name in ('runtimeschema.xml.tpl', 'runtimeschema-indoor.xml.tpl'):
-            rendered, source = render_project_sample(table, job)
+            rendered, source = render_project_sample(table, job, sample_adjustments)
         else:
             tpl_path = os.path.join(ROOT, "templates", tpl_name)
             if not os.path.isfile(tpl_path):
@@ -453,6 +501,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True,
             "job_name": table["JOB_NAME"],
             "schema_source": source,
             "schema_mode": 'existing' if existing else 'sample',
+            "sample_adjustments": sample_adjustments,
             "path_changes": existing['changes'] if existing else [],
             "project_config": dict(env),
             "target": target,
@@ -509,8 +558,7 @@ def do_render(env, job, target, job_path, env_path, write_output=True,
     # 此处检查文件存在，内容及楼层一致性由运行预检验证。
     map_root = to_slash(table.get("MAP_ROOT", ""))
     city = table.get("CITY", "")
-    is_indoor = (table.get("MAP_FORMAT", "").strip().lower() == "indoor"
-                 or "indoor" in (table.get("TEMPLATE") or "").lower())
+    is_indoor = indoor_task(table)
     def input_path(tag, default):
         value = actual_paths.get(tag, default).replace('\\', '/')
         return os.path.join(table['EXE_DIR'], value) if value and not os.path.isabs(value) else value
@@ -546,6 +594,9 @@ def do_render(env, job, target, job_path, env_path, write_output=True,
 
     if written:
         print(f"运行单底稿：{source}")
+        for adjustment in sample_adjustments:
+            print(f"  [提示] {adjustment['tag']}：{adjustment['reason']}；"
+                  f"原值 {' / '.join(adjustment['original_values'])} → {adjustment['value']}")
         print("已生成运行单：")
         for path in written:
             print(f"  {path}")

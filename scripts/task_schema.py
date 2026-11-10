@@ -21,6 +21,22 @@ LOCAL_PATHS = set(OUTDOOR_PATHS) | {
 }
 
 
+def runtime_scene(values):
+    """Match the engine: missing MapFormat defaults to outdoor PLANET.
+
+    MapPath alone is also supported by directory-based outdoor maps.
+    """
+    format_name = str(values.get('MapFormat', '')).strip().lower()
+    return 'indoor' if format_name == 'indoor' else 'outdoor'
+
+
+def project_sample_path(env, indoor=False):
+    """One source of truth for assembly and project parameter defaults."""
+    filename = 'indoorruntimeschema.xml' if indoor else 'runtimeschema.xml'
+    return os.path.join(env['PROJECT_DIR'], env.get('CONFIG_SRC') or 'ThirdPart/Config',
+                        'runtimelibrary', filename)
+
+
 def path_overrides(value):
     if isinstance(value, str):
         try:

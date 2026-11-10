@@ -44,7 +44,7 @@ sys.path.insert(0, SCRIPTS)
 from render_schema import read_env_file, build_table  # noqa: E402
 from file_safety import atomic_write, file_revision, FileTransaction, FileConflict
 from engineering_format import grid_layout, ALIASES, recognized_columns
-from task_schema import schema_candidates, render_existing, runtime_details, path_overrides, read_runtime, local_path_values, OUTDOOR_PATHS
+from task_schema import schema_candidates, render_existing, runtime_details, path_overrides, read_runtime, local_path_values, OUTDOOR_PATHS, project_sample_path, runtime_scene
 from project_config import ProjectStore, FIELDS, MACHINE_FIELDS, write_snapshot, validate_operation
 from project_detection import detect_project_config
 from indoor_maps import indoor_floor_files
@@ -130,28 +130,33 @@ def add_project(path):
     return result
 
 
-def thirdpart_defaults():
+def thirdpart_defaults(values=None):
     """默认值源于当前项目样例；路径必须落在真实存在的配置源内。"""
     env = load_env()
-    config = os.path.realpath(os.path.join(env['PROJECT_DIR'], env.get('CONFIG_SRC', 'ThirdPart/Config')))
-    sample = os.path.join(config, 'runtimelibrary', 'runtimeschema.xml')
+    config = os.path.realpath(os.path.join(env['PROJECT_DIR'], env.get('CONFIG_SRC') or 'ThirdPart/Config'))
+    indoor = runtime_scene(values or {}) == 'indoor'
+    sample = project_sample_path(env, indoor=indoor)
     try:
-        root = ET.parse(sample).getroot()
-    except (OSError, ET.ParseError):
+        with open(sample, 'rb') as fh:
+            document = parse_document(fh.read())
+    except (OSError, ValueError):
         return {}
-    if root.tag != 'RuntimeSchema':
+    if indoor and document['values'].get('MapFormat', '').strip().lower() != 'indoor':
         return {}
     path_tags = {p['name'] for p in load_spec()['params'] if p.get('type') == 'path'}
     path_tags.update(('BuildingPenetration', 'RoadsToBeRecorded', 'PredictedCells'))
     known = {'SceneSettingsPath': 'config/scenesettings.xml',
              'ClutterMatchPath': 'config/cluttermatchsettings.xml'}
     result = {}
-    for node in root:
-        value = node.text or ''
+    for tag, field in document['fields'].items():
+        value = field['value']
         item = dict(available=True, value=value, source=to_slash(sample), reason='')
-        if node.tag in path_tags or node.tag.endswith(('Path', 'Directory')):
+        if field['read_only']:
+            result[tag] = dict(item, available=False, value='', reason='项目样例：' + field['read_only_reason'])
+            continue
+        if tag in path_tags or tag.endswith(('Path', 'Directory')):
             item.update(available=False, value='', reason='ThirdPart 中没有可确认的默认资源，请选择任务数据路径')
-            candidates = [os.path.join(config, known[node.tag])] if node.tag in known else []
+            candidates = [os.path.join(config, known[tag])] if tag in known else []
             if value.strip():
                 native = to_native(value.strip())
                 candidates += [os.path.join(os.path.dirname(sample), native), os.path.join(config, native)]
@@ -164,7 +169,7 @@ def thirdpart_defaults():
                 if inside and os.path.exists(candidate):
                     item.update(available=True, value=to_slash(candidate), source=to_slash(candidate), reason='')
                     break
-        result[node.tag] = item
+        result[tag] = item
     return result
 
 

@@ -30,9 +30,9 @@ class IndoorMapReviewTests(unittest.TestCase):
         self.scene.mkdir(parents=True)
         self.floor = self.scene / 'custom-floor.das'
         self.floor.write_text(DAS, encoding='utf-8')
-        sample = self.project / 'config/runtimelibrary/runtimeschema.xml'
+        sample = self.project / 'config/runtimelibrary/indoorruntimeschema.xml'
         sample.parent.mkdir(parents=True)
-        sample.write_text('<RuntimeSchema name="sample"><MapFormat>PLANET</MapFormat>'
+        sample.write_text('<RuntimeSchema name="sample"><MapFormat>indoor</MapFormat>'
                           '<EngineeringFilePath>old.csv</EngineeringFilePath>'
                           '<PathlossDirectory>old</PathlossDirectory></RuntimeSchema>', encoding='utf-8')
         self.csv = self.root / 'cells.csv'

@@ -513,7 +513,7 @@ class Api:
         return {**catalog, **extra, "file": path, "schema_name": document['name'], "values": document['values'],
                 "revision": document['revision'],
                 "param_sources": {'DefaultCalcRadius': core.radius_source(schema)},
-                "thirdpart_defaults": core.thirdpart_defaults()}
+                "thirdpart_defaults": core.thirdpart_defaults(document['values'])}
 
     @staticmethod
     @runtime_operation
@@ -525,10 +525,15 @@ class Api:
         invalid = revision_required(body, 'revision')
         if invalid:
             return invalid
-        default = core.thirdpart_defaults().get(tag)
-        if not default or not default['available']:
-            return {'ok': False, 'message': (default or {}).get('reason', '当前项目样例没有此参数的默认值')}
         try:
+            _, document = core.read_schema_document(body.get('schema', ''))
+            if document is None:
+                return {'ok': False, 'message': '读不到当前运行单，请先装配后重新加载'}
+            if document['revision'] != body['revision']:
+                raise core.FileConflict('运行 XML 已变化，请重新加载后再保存')
+            default = core.thirdpart_defaults(document['values']).get(tag)
+            if not default or not default['available']:
+                return {'ok': False, 'message': (default or {}).get('reason', '当前项目样例没有此参数的默认值')}
             result = core.write_schema_param(body.get('schema', ''), tag, default['value'],
                 expected_revision=body['revision'], return_revision=True)
             response = dict(ok=result[0], message=result[1], value=default['value'], source=default['source'])

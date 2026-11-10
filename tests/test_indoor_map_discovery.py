@@ -31,6 +31,8 @@ class IndoorMapDiscoveryTests(unittest.TestCase):
         sample.write_text('<RuntimeSchema name="sample"><MapFormat>PLANET</MapFormat>'
                           '<EngineeringFilePath>old.csv</EngineeringFilePath>'
                           '<PathlossDirectory>old</PathlossDirectory></RuntimeSchema>', encoding='utf-8')
+        sample.with_name('indoorruntimeschema.xml').write_text(
+            sample.read_text(encoding='utf-8').replace('PLANET', 'indoor'), encoding='utf-8')
         self.maps = self.root / 'map'
         self.scene = self.maps / 'test-indoor-map'
         self.scene.mkdir(parents=True)
