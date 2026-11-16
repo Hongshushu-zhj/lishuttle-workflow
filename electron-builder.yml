@@ -1,0 +1,38 @@
+appId: com.lishuttle.workflow
+productName: LiShuttle Workflow
+asar: true
+directories:
+  output: release/stable
+files:
+  - desktop/main.cjs
+  - desktop/preload.cjs
+  - desktop/backend-host.cjs
+  - desktop/security.cjs
+  - desktop/paths.cjs
+  - desktop/ipc.cjs
+  - desktop/status.html
+  - package.json
+extraResources:
+  - from: .desktop-build/workflow
+    to: workflow
+  - from: .desktop-build/python-package
+    to: python
+  - from: .desktop-build/third-party
+    to: third-party
+  - from: .desktop-build/build-info.json
+    to: build-info.json
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  signExecutable: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: false
+  packElevateHelper: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+artifactName: LiShuttle-Workflow-Setup-${version}-${arch}.${ext}

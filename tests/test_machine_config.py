@@ -109,6 +109,7 @@ class MachineConfigTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / 'scripts/project_config.py'
         script = script_dir / 'project_config.py'
         script.write_bytes(source.read_bytes())
+        (script_dir / 'runtime_paths.py').write_bytes(source.with_name('runtime_paths.py').read_bytes())
         result = subprocess.run([sys.executable,str(script),'--set-machine','CMAKE='+self.tools['CMAKE']],
                                 capture_output=True,text=True,encoding='utf-8')
         self.assertEqual(result.returncode,0,result.stderr)

@@ -590,7 +590,9 @@ class Api:
             if body.get('apply'):
                 if body.get('token') != plan['token']:
                     return {'error': '配置文件已变化，请重新预览清理范围'}
-                return apply_cleanup(plan, os.path.join(core.ROOT, 'docs', 'runtime-config-archives'))
+                archive_root = (core.MAINTENANCE_DIR if core.PATHS.desktop else
+                                os.path.join(core.ROOT, 'docs', 'runtime-config-archives'))
+                return apply_cleanup(plan, archive_root)
             return {key: value for key, value in plan.items() if not key.startswith('_')}
         except (ValueError, OSError, KeyError) as exc:
             return {'error': f'配置清理未执行：{exc}'}

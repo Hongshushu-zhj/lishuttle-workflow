@@ -39,6 +39,7 @@ import uuid
 from file_safety import FileTransaction
 from indoor_maps import indoor_map_entries
 from project_config import load_local, validate_operation
+from runtime_paths import resolve_paths
 from task_schema import render_existing, runtime_details, LOCAL_PATHS, synchronize_runtime_name, project_sample_path
 from xml.parsers import expat
 import xml.etree.ElementTree as ET
@@ -262,6 +263,13 @@ def apply_xml_paths(table, paths):
 def validate_batch_values(values):
     if any('!' in str(value) for value in values.values()):
         raise ValueError('本地批处理不支持路径或配置中的 ! 字符；请调整路径，或使用 Python 入口。未加载配置或启动引擎。')
+    if any(any(char in str(value) for char in '%"\r\n') for value in values.values()):
+        raise ValueError('本地批处理不支持配置中的 %、双引号或换行；请调整路径或使用 Python 入口。未启动工具。')
+    try:
+        for value in values.values():
+            str(value).encode('gbk')
+    except UnicodeEncodeError as exc:
+        raise ValueError('本地批处理使用 Windows GBK，所选路径包含不支持的字符；请选择兼容路径或使用 Python 入口。未启动工具。') from exc
 
 
 def do_print_env(target, env_path, project=None, batch=False, operation=None):
@@ -673,7 +681,8 @@ def main():
             sys.exit("用法：render_schema.py --print-env <目标环境>")
         target = args[0]
         operation = next((op for op in ('doctor', 'build', 'stage', 'run') if '--check-' + op in flags), None)
-        return do_print_env(target, os.path.join(ROOT, "env", f"{target}.env"), project, '--batch' in flags, operation)
+        env_path = str(resolve_paths().env_file) if target == 'local-win' else os.path.join(ROOT, 'env', f'{target}.env')
+        return do_print_env(target, env_path, project, '--batch' in flags, operation)
 
     if len(args) != 2:
         print(__doc__)
@@ -683,7 +692,7 @@ def main():
 
     job_arg, target = args
     job_path = job_arg if os.path.isabs(job_arg) else os.path.join(ROOT, job_arg)
-    env_path = os.path.join(ROOT, "env", f"{target}.env")
+    env_path = str(resolve_paths().env_file) if target == 'local-win' else os.path.join(ROOT, 'env', f'{target}.env')
 
     env = load_local(env_path, project=project) if target == 'local-win' else read_env_file(env_path, "环境文件")
     job = read_env_file(job_path, "任务单")

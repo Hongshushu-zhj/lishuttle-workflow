@@ -1,0 +1,11 @@
+# Git owns source normalization; Windows batch scripts remain CRLF.
+* text=auto
+*.bat text eol=crlf
+*.py text eol=lf
+*.cjs text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.vue text eol=lf
+*.css text eol=lf
+*.json text eol=lf
+*.md text eol=lf

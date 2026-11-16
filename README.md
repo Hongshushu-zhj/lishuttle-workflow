@@ -2,7 +2,9 @@
 
 在 Windows 浏览器中选择地图和任务、修改运行参数和工参 CSV、编译并运行 LiShuttle、查看结果和日志。
 
-后端使用 Python 标准库，前端是原生 HTML/CSS/JavaScript，不需要 Node.js、npm 或额外 pip 包。本教程只介绍 Windows 本地运行。
+桌面版使用 Electron + Vue，并内置 Python，支持 Windows 10/11 x64 离线安装。提供资源自动发现、原生路径选择和独立用户数据目录；安装与操作见 [桌面版使用说明](docs/desktop/usage.md)，验证范围见 [桌面版验收记录](docs/desktop/acceptance.md)。从源码构建桌面版需要 Node.js/npm。
+
+Web 版后端使用 Python 标准库，前端是原生 HTML/CSS/JavaScript，不需要 Node.js、npm 或额外 pip 包。以下教程介绍 Web 版的 Windows 本地运行。
 
 **本仓库不包含 LiShuttle C++ 引擎源码、第三方库、地图和真实任务数据。** 使用者需要单独取得这些资源并配置本机路径，才能完成计算。配置模板中的路径只是示例。
 

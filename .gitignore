@@ -13,7 +13,12 @@
 !/env/local-win.env.example
 
 # Local platform adjustment notes.
-/docs/
+/docs/*
+!/docs/superpowers/
+/docs/superpowers/*
+!/docs/superpowers/specs/
+!/docs/superpowers/plans/
+!/docs/desktop/
 
 # Local task sheets; retain the reusable examples.
 /jobs/*
@@ -116,3 +121,11 @@ id_ed25519_*
 *.pdb
 *.obj
 *.lib
+
+# Desktop dependencies, local run state and reproducible build output.
+node_modules/
+/desktop-ui/dist/
+/.desktop-build/
+/.desktop-test-data/
+/.npm-cache/
+/release/

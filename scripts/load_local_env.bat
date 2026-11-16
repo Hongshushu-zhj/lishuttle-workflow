@@ -1,11 +1,12 @@
 @echo off
+if not defined LISHUTTLE_PYTHON set "LISHUTTLE_PYTHON=python"
 rem Shared local profile loader. Caller uses setlocal.
 rem Capture once; all later render/print-run subprocesses inherit this snapshot.
 chcp 936 >nul 2>&1
 set "PYTHONIOENCODING=gbk:replace"
 set "LISHUTTLE_ENV_EXPORT=%TEMP%\lishuttle-env-%RANDOM%-%RANDOM%.tmp"
 if not defined LISHUTTLE_CONFIG_SNAPSHOT (
-    python scripts\project_config.py --snapshot > "%LISHUTTLE_ENV_EXPORT%"
+    "%LISHUTTLE_PYTHON%" "%~dp0project_config.py" --snapshot > "%LISHUTTLE_ENV_EXPORT%"
     if errorlevel 1 (
         del /q "%LISHUTTLE_ENV_EXPORT%" 2>nul
         exit /b 1
@@ -13,7 +14,7 @@ if not defined LISHUTTLE_CONFIG_SNAPSHOT (
     set /p LISHUTTLE_CONFIG_SNAPSHOT=<"%LISHUTTLE_ENV_EXPORT%"
 )
 if not defined LISHUTTLE_CONFIG_SNAPSHOT exit /b 1
-python scripts\render_schema.py --print-env local-win --batch --check-%~1 > "%LISHUTTLE_ENV_EXPORT%"
+"%LISHUTTLE_PYTHON%" "%~dp0render_schema.py" --print-env local-win --batch --check-%~1 > "%LISHUTTLE_ENV_EXPORT%"
 if errorlevel 1 (
     del /q "%LISHUTTLE_ENV_EXPORT%" 2>nul
     exit /b 1

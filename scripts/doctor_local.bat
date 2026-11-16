@@ -9,7 +9,8 @@ chcp 936 >nul 2>&1
 set "PYTHONIOENCODING=gbk:replace"
 cd /d "%~dp0.."
 
-where python >nul 2>&1
+if not defined LISHUTTLE_PYTHON set "LISHUTTLE_PYTHON=python"
+where "%LISHUTTLE_PYTHON%" >nul 2>&1
 if errorlevel 1 (
 	echo [错误] 找不到 python
 	echo        本套脚本用 python 解析环境文件和运行单，请确认它在 PATH 上

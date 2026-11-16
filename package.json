@@ -1,0 +1,25 @@
+{
+  "name": "lishuttle-workflow-desktop",
+  "productName": "LiShuttle Workflow (Dev)",
+  "version": "0.1.0",
+  "desktopChannel": "dev",
+  "description": "LiShuttle workflow Windows desktop workspace",
+  "author": "LiShuttle contributors",
+  "private": true,
+  "main": "desktop/main.cjs",
+  "scripts": {
+    "desktop:dev": "node scripts/desktop-build.cjs dev --channel dev",
+    "desktop:prepare": "node scripts/prepare-python.cjs",
+    "test:desktop": "node --test desktop/tests/*.test.cjs",
+    "desktop:pack": "node scripts/desktop-build.cjs pack --channel stable",
+    "desktop:dist": "node scripts/desktop-build.cjs dist --channel stable",
+    "desktop:dist:dev": "node scripts/desktop-build.cjs dist --channel dev",
+    "verify:package": "node scripts/package-verify.cjs",
+    "desktop:smoke": "node scripts/desktop-smoke.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "electron": "45.3.3",
+    "electron-builder": "26.18.0"
+  }
+}

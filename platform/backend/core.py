@@ -34,10 +34,15 @@ from vs_launch import sync_launch
 
 HERE = os.path.dirname(os.path.abspath(__file__))      # platform/backend
 ROOT = os.path.dirname(os.path.dirname(HERE))          # 工作流根目录
+sys.path.insert(0, os.path.join(ROOT, 'scripts'))
+from runtime_paths import resolve_paths, python_executable
+PATHS = resolve_paths()
+ROOT = str(PATHS.resource_root)
 SCRIPTS = os.path.join(ROOT, "scripts")
-ENV_FILE = os.path.join(ROOT, "env", "local-win.env")
-PROJECTS_FILE = os.path.join(ROOT, "env", "projects.json")
-JOBS_DIR = os.path.join(ROOT, "jobs")
+ENV_FILE = str(PATHS.env_file)
+PROJECTS_FILE = str(PATHS.projects_file)
+JOBS_DIR = str(PATHS.jobs_dir)
+MAINTENANCE_DIR = str(PATHS.maintenance_dir)
 SPEC_FILE = os.path.join(HERE, "params_spec.json")
 
 sys.path.insert(0, SCRIPTS)
@@ -473,6 +478,7 @@ def run_render(job_file, transaction=None):
     """
     child_env = dict(os.environ)
     child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env['LISHUTTLE_PYTHON'] = python_executable()
     child_env['LISHUTTLE_CONFIG_SNAPSHOT'] = write_snapshot(load_env())
     job = read_env_file(job_file, '任务单')
     table = build_table(load_env(), job)
@@ -490,7 +496,7 @@ def run_render(job_file, transaction=None):
     with tempfile.TemporaryDirectory(prefix='lishuttle-render-') as directory:
         receipt_path = os.path.join(directory, 'receipt.json')
         proc = subprocess.run(
-            [sys.executable, os.path.join(SCRIPTS, "render_schema.py"), job_file, "local-win",
+            [python_executable(), os.path.join(SCRIPTS, "render_schema.py"), job_file, "local-win",
              '--attempt-id', attempt_id, '--receipt', receipt_path]
             + (['--no-backup'] if transaction is not None else []),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -1260,7 +1266,7 @@ class Runner:
                 event.wait(.1)
 
 
-RUNNER = Runner(history=RunHistory(os.path.join(ROOT, '.lishuttle-runs')))
+RUNNER = Runner(history=RunHistory(PATHS.runs_dir))
 
 
 def runtime_resources(env, source=False):
@@ -1344,7 +1350,15 @@ def start_toolkit(step):
             return None, str(exc)
         bat = os.path.join(SCRIPTS, {"doctor": "doctor_local.bat", "build": "build_local.bat",
                                      "stage": "stage_local.bat"}[step])
-        child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env))
+        from render_schema import validate_batch_values
+        validate_batch_values(env)
+        # cmd.exe and delayed expansion cannot safely transport these paths.
+        # Reject before any script starts rather than truncating/executing them.
+        for path in (bat, python_executable(), str(PATHS.snapshots_dir)):
+            if any(char in path for char in '!%&|<>^()\r\n"'):
+                return None, '本地工具批处理不支持应用/解释器/快照路径中的 ! % & | < > ^ ( ) 或引号，请选择不含这些字符的目录。未启动工具。'
+        child_env = dict(os.environ, LISHUTTLE_CONFIG_SNAPSHOT=write_snapshot(env),
+                         LISHUTTLE_PYTHON=python_executable())
         binary = os.path.realpath(os.path.join(env['PROJECT_DIR'], env.get('BUILD_SUBDIR', ''), 'Bin'))
         sid = RUNNER.start(["cmd", "/d", "/c", bat], ROOT, step, env=child_env,
                            context={'project': env['PROJECT_DIR'], 'bin_dir': binary,

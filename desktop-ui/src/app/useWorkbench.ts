@@ -1,0 +1,30 @@
+import {computed, reactive, watch} from 'vue';
+import {ApiClient,ApiError,UnknownOutcomeError} from '../shared/api';
+import {EditorLedger,LogSession,PreviewGate,Workflow,fingerprint,type Json} from '../domain/controllers';
+import {createProject} from './useProject';
+import {createInputs} from './useInputs';
+import {createEditors} from './useEditors';
+import {createSession} from './useSession';
+import {createDesktopFeatures} from './useDesktopFeatures';
+export const labels:Record<string,string>={PRESET:'构建预设',BUILD_SUBDIR:'构建目录（相对项目）',INSTALL_SUBDIR:'安装目录（相对项目）',EXE_NAME:'程序文件名',VS_ROOT:'Visual Studio 目录',CMAKE:'CMake 程序',NINJA:'Ninja 程序',VCVARS:'MSVC 环境脚本',CONFIG_SRC:'基础配置来源',DLL_SRC:'动态库来源',MAP_ROOT:'地图根目录',GONGCAN_ROOT:'工参任务根目录',OUT_ROOT:'结果根目录',DT_ROOT:'路测根目录'};
+export const machineKeys=['VS_ROOT','CMAKE','NINJA','VCVARS'];
+export const buildKeys=['PRESET','BUILD_SUBDIR','INSTALL_SUBDIR','EXE_NAME'];
+export type Common={s:Json;api:ApiClient;flow:Workflow;xml:EditorLedger;csvEdits:EditorLedger;log:LogSession;preview:PreviewGate;importPreview:PreviewGate;sync:()=>void;run:(label:string,fn:()=>Promise<any>)=>Promise<any>;guard:(allowDirty?:boolean)=>boolean;resetEditors:()=>void;onProject?:()=>Promise<void>;onJob?:()=>Promise<void>;onDone?:()=>Promise<void>};
+export function useWorkbench(){
+ const s:Json=reactive({view:'workbench',stage:0,state:{projects:[],cities:[],tasks:[],functions:[],function_info:[],project_config:{},machine_config:{},build_workflow:{}},draft:{},detection:null,projectPath:'',mode:'existing',func:'',taskId:'1',jobName:'',city:'',taskDir:'',engineering:'',source:'',polygon:'',syncEngineering:false,copyModels:true,copyAntennas:false,pathOverrides:{},pathDefaults:{},localIssues:{},catalog:{configs:[]},runtimeSchema:'',importSource:'',importName:'',job:null,params:null,paramValues:{},paramSearch:'',paramScope:'current',xmlDirty:false,csv:null,csvDirty:false,csvPath:'',csvPage:1,csvPageSize:40,csvColumn:'',csvValue:'',editorTab:'xml',runtime:{busy:false},pending:0,operation:'',error:'',notice:'',unknown:null,assembly:null,preflight:null,result:null,resultJob:'',directoryOnly:false,resultSid:0,history:{runs:[],total:0,offset:0,limit:20},historyFilter:'',historyFunction:'',logOpen:false,logHeight:250,logFollow:true,logSearch:'',logStatus:'尚未连接会话',logPage:null,logHistorical:false,scanRoot:'',scanDepth:5,scanBudget:20000,scan:null,preferences:{},preferenceRevision:'',info:{},legacyRoot:'',pathMappingFrom:'',pathMappingTo:'',includeLegacyHistory:false,legacyPreview:null,cleanup:null,ready:false});
+ const api=new ApiClient();const flow=reactive(new Workflow());const xml=reactive(new EditorLedger());const csvEdits=reactive(new EditorLedger());const log=reactive(new LogSession());const preview=reactive(new PreviewGate());const importPreview=reactive(new PreviewGate());
+ const sync=()=>flow.update({project:s.state.project,revision:s.state.profile_revision,machine:s.state.machine_revision,config:s.state.project_config,draft:s.draft,mode:s.mode,func:s.func,taskId:s.taskId,jobName:s.jobName,city:s.city,taskDir:s.taskDir,engineering:s.engineering,source:s.source,polygon:s.polygon,sync:s.syncEngineering,models:s.copyModels,antennas:s.copyAntennas,paths:s.pathOverrides,schema:s.mode==='existing'?s.job?.schema:''});
+ watch(()=>[s.state.profile_revision,s.draft,s.mode,s.func,s.taskId,s.jobName,s.city,s.taskDir,s.engineering,s.source,s.polygon,s.syncEngineering,s.copyModels,s.copyAntennas,s.pathOverrides,s.job?.schema],sync,{deep:true,flush:'sync'});
+ watch(()=>[xml.dirty,csvEdits.dirty,s.pending,s.draft,s.state.project_config,s.state.machine_config],()=>{s.xmlDirty=xml.dirty;s.csvDirty=csvEdits.dirty;window.desktop?.setDirty(xml.dirty||csvEdits.dirty||s.pending>0||fingerprint({...s.state.project_config,...s.state.machine_config})!==fingerprint(s.draft));},{flush:'sync',deep:true});
+ const resetEditors=()=>{s.params=null;s.paramValues={};s.csv=null;s.csvPath='';xml.discard();csvEdits.discard();api.scope.invalidate('params');api.scope.invalidate('csv');};
+ const guard=(allowDirty=false)=>{const reason=s.unknown?'上一次操作结果待核对，请先刷新并核对。':s.runtime?.busy?'后台正在执行操作，请等待完成或取消。':s.pending?'请等待当前操作完成。':!allowDirty&&(xml.dirty||csvEdits.dirty)?'请先保存或放弃编辑，再更改工作上下文。':'';if(reason){s.error=reason;return false;}return true;};
+ const run=async(label:string,fn:()=>Promise<any>)=>{s.pending++;s.operation=label;s.error='';try{return await fn();}catch(error){if(error instanceof UnknownOutcomeError){s.unknown={operation:error.operation,message:error.message};flow.reset();preview.clear();importPreview.clear();}if(error instanceof ApiError){if(error.data.preflight)s.preflight=error.data.preflight;if(error.data.code==='PREVIEW_STALE'){preview.clear();importPreview.clear();}if(error.data.runtime)s.runtime=error.data.runtime;}s.error=error instanceof Error?error.message:String(error);return undefined;}finally{s.pending--;if(!s.pending)s.operation='';}};
+ const h:Common={s,api,flow,xml,csvEdits,log,preview,importPreview,sync,run,guard,resetEditors};
+ const project=createProject(h);const inputs=createInputs(h);const editors=createEditors(h);const session=createSession(h);const features=createDesktopFeatures(h);
+ h.onProject=async()=>{await inputs.refreshCatalog(true);};h.onJob=async()=>{await editors.loadParams();};h.onDone=async()=>{await project.refreshBuild();await session.loadHistory();};
+ const configDirty=computed(()=>fingerprint({...s.state.project_config,...s.state.machine_config})!==fingerprint(s.draft));
+ const runReason=computed(()=>s.unknown?'操作结果待核对':s.runtime.busy?'后台正在运行':s.pending?'当前操作进行中':s.xmlDirty||s.csvDirty?'请先保存编辑':configDirty.value?'请先应用项目与程序配置':!s.job?'请先加载或装配运行 XML':!flow.assemblyCurrent?'输入已变化，请重新加载或装配':!flow.canRun?'请完成当前配置的运行前检查':'');
+ const init=async()=>{await project.refresh();await features.load();s.ready=true;session.startRuntimePoll();};
+ return {s,api,flow,xml,log,preview,importPreview,labels,machineKeys,buildKeys,configDirty,runReason,...project,...inputs,...editors,...session,...features,guard,run,init};
+}
+export type Workbench=ReturnType<typeof useWorkbench>;

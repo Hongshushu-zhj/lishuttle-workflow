@@ -9,6 +9,7 @@ import re
 import shutil
 import tempfile
 import threading
+from runtime_paths import resolve_paths
 
 ROOT = Path(__file__).resolve().parents[1]
 FIELDS = ('PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME', 'VS_ROOT',
@@ -93,7 +94,7 @@ def atomic_json(path, value):
 
 class ProjectStore:
     def __init__(self, env_file=None, store_file=None):
-        self.env_file = Path(env_file or ROOT / 'env/local-win.env')
+        self.env_file = Path(env_file or resolve_paths().env_file)
         self.file = Path(store_file or self.env_file.with_name('project-profiles.json'))
 
     @contextmanager
@@ -313,7 +314,7 @@ class ProjectStore:
 
 
 def write_snapshot(env, directory=None):
-    directory = Path(directory or ROOT / 'env/snapshots')
+    directory = Path(directory or resolve_paths().snapshots_dir)
     digest = hashlib.sha256(json.dumps(env, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
     path = directory / (digest + '.json')
     if not path.is_file():
