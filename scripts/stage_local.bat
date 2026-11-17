@@ -8,20 +8,17 @@ rem 解析为 <exe目录>/runtimelibrary/（main.cpp:68-94），与工作目录无关。
 rem 另外 ThirdPart\Config 和 ThirdPart\Dll 被刻意排除在 VS 同步之外，
 rem 所以这一步没法省。
 rem ============================================================
-setlocal enabledelayedexpansion
+setlocal DisableDelayedExpansion
 chcp 936 >nul 2>&1
 set "PYTHONIOENCODING=gbk:replace"
 cd /d "%~dp0.."
 
-if not defined LISHUTTLE_PYTHON set "LISHUTTLE_PYTHON=python"
-where "%LISHUTTLE_PYTHON%" >nul 2>&1
-if errorlevel 1 (
-	echo [错误] 找不到 python，请确认它在 PATH 上
-	exit /b 1
-)
+call "%~dp0validate_local_python.bat"
+if errorlevel 1 exit /b %ERRORLEVEL%
 
 call scripts\load_local_env.bat stage
 if errorlevel 1 exit /b 1
+setlocal EnableDelayedExpansion
 
 if "!PROJECT_DIR!"=="" (
 	echo [错误] 环境变量加载失败。先手动验证一下：

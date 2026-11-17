@@ -4,20 +4,17 @@ rem 本地编译（Windows / x64-release 预设）
 rem   用法:  scripts\build_local.bat             仅编译
 rem          scripts\build_local.bat --install   编译并安装
 rem ============================================================
-setlocal enabledelayedexpansion
+setlocal DisableDelayedExpansion
 chcp 936 >nul 2>&1
 set "PYTHONIOENCODING=gbk:replace"
 cd /d "%~dp0.."
 
-if not defined LISHUTTLE_PYTHON set "LISHUTTLE_PYTHON=python"
-where "%LISHUTTLE_PYTHON%" >nul 2>&1
-if errorlevel 1 (
-	echo [错误] 找不到 python，请确认它在 PATH 上
-	exit /b 1
-)
+call "%~dp0validate_local_python.bat"
+if errorlevel 1 exit /b %ERRORLEVEL%
 
 call scripts\load_local_env.bat build
 if errorlevel 1 exit /b 1
+setlocal EnableDelayedExpansion
 
 if "!PROJECT_DIR!"=="" (
 	echo [错误] 环境变量加载失败。先手动验证一下：

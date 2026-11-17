@@ -173,6 +173,8 @@ class LocalRunBatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='本地 入口-') as directory:
             root = Path(directory)
             (root / 'run_local.bat').write_bytes((ROOT / 'scripts/run_local.bat').read_bytes())
+            (root / 'validate_local_python.bat').write_bytes(
+                (ROOT / 'scripts/validate_local_python.bat').read_bytes())
             (root / 'run_local.py').write_text(
                 'import sys\nprint(repr(sys.argv[1:]), flush=True)\nraise SystemExit(27)\n',
                 encoding='utf-8')
