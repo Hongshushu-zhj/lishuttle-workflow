@@ -10,7 +10,8 @@ set "PYTHONIOENCODING=gbk:replace"
 cd /d "%~dp0.."
 
 call "%~dp0validate_local_python.bat"
-if errorlevel 1 exit /b %ERRORLEVEL%
+set "LISHUTTLE_PYTHON_CHECK=%ERRORLEVEL%"
+if not "%LISHUTTLE_PYTHON_CHECK%"=="0" exit /b %LISHUTTLE_PYTHON_CHECK%
 
 call scripts\load_local_env.bat build
 if errorlevel 1 exit /b 1

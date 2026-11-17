@@ -10,7 +10,8 @@ set "PYTHONIOENCODING=gbk:replace"
 cd /d "%~dp0.."
 
 call "%~dp0validate_local_python.bat"
-if errorlevel 1 exit /b %ERRORLEVEL%
+set "LISHUTTLE_PYTHON_CHECK=%ERRORLEVEL%"
+if not "%LISHUTTLE_PYTHON_CHECK%"=="0" exit /b %LISHUTTLE_PYTHON_CHECK%
 
 rem ---- 加载环境变量 ----
 rem 刻意不自己逐行解析 env 文件：那是 UTF-8 带中文注释，而 cmd 按当前

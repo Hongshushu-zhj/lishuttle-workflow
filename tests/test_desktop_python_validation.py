@@ -132,6 +132,33 @@ class DesktopPythonValidationTests(unittest.TestCase):
                 self.assertIn('xml', output)
                 self.assertIn(str(broken / 'python.exe'), output)
 
+    def test_negative_interpreter_exit_stops_every_entrypoint_with_exact_status(self):
+        for status in (-1, -1073741515):
+            broken = self.root / f'异常 Python ! {status}'
+            shutil.copytree(self.runtime, broken)
+            archive = broken / 'python313.zip'
+            replacement = archive.with_suffix('.new.zip')
+            with zipfile.ZipFile(archive) as source, zipfile.ZipFile(replacement, 'w') as target:
+                for item in source.infolist():
+                    if item.filename not in ('argparse.pyc', 'argparse.py'):
+                        target.writestr(item, source.read(item))
+                target.writestr('argparse.py', f'raise SystemExit({status})\n')
+            replacement.replace(archive)
+            interpreter = broken / 'python.exe'
+            # Windows exposes a native signed status as its unsigned DWORD to
+            # subprocess; compare both the directly selected exe and each bat.
+            actual = subprocess.run([str(interpreter), '-B', '-c', 'import argparse'],
+                                    capture_output=True, timeout=20).returncode
+            self.assertEqual(actual & 0xFFFFFFFF, status & 0xFFFFFFFF)
+            for name in ENTRYPOINTS:
+                with self.subTest(status=status, entrypoint=name):
+                    code, output = self.invoke(name, interpreter)
+                    self.assertEqual(code, actual, output)
+                    self.assertNotIn(MARKER, output)
+                    self.assertIn('Python validation failed', output)
+                    self.assertIn(str(interpreter), output)
+                    self.assertIn(f'exit {status}', output)
+
 
 if __name__ == '__main__':
     unittest.main()
