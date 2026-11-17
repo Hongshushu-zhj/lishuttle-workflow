@@ -124,7 +124,15 @@ def scan_resources(roots, max_depth=4, max_entries=20000, cancel=None, progress=
                 add('map', leaf, ['.das 场景文件' if indoor else 'heights/index.txt'], {'MAP_ROOT': leaf.parent.as_posix()})
                 add('map-root', leaf.parent, ['包含已识别地图'], {'MAP_ROOT': leaf.parent.as_posix()})
             if any(name.endswith('.dll') for name in files):
-                add('dll', directory, ['包含 DLL（架构与版本须运行前核对）'], {'DLL_SRC': directory.as_posix()})
+                if directory.name.lower() in ('debug', 'release'):
+                    add('dll', directory.parent, ['包含 ' + directory.name + ' 动态库；按构建预设选择子目录'],
+                        {'DLL_ROOT': directory.parent.as_posix(), 'DLL_SRC': ''})
+                elif 'debug' in subdirs or 'release' in subdirs:
+                    add('dll', directory, ['包含 Debug/Release 子目录'],
+                        {'DLL_ROOT': directory.as_posix(), 'DLL_SRC': ''})
+                else:
+                    add('dll', directory, ['旧版直接 DLL 来源；可改选包含 Debug/Release 的根目录'],
+                        {'DLL_ROOT': '', 'DLL_SRC': directory.as_posix()})
             task_evidence = []
             for name, path in files.items():
                 if cancel.is_set():

@@ -29,7 +29,7 @@ async function desktopSmoke({executable,output,keepData=false}={}){
   await page.waitForURL(/^http:\/\/127\.0\.0\.1:\d+\/?/, {timeout:30000});await page.locator('#app').waitFor({timeout:30000});await page.waitForFunction(()=>document.querySelector('#app')?.textContent?.trim().length>20);
   evidence.origin=new URL(page.url()).origin;evidence.checks.push('Production UI loaded from authenticated random loopback port');
   const bridge=await page.evaluate(async()=>({keys:Object.keys(window.desktop).sort(),info:await window.desktop.info(),node:typeof process,require:typeof require,cookie:document.cookie}));
-  assert.deepEqual(bridge.keys,['info','openPath','pickDirectory','pickFile','saveText','setDirty'].sort());assert.equal(bridge.node,'undefined');assert.equal(bridge.require,'undefined');assert.equal(bridge.cookie,'');assert.equal(bridge.info.dataDir.startsWith(data),true);
+  assert.deepEqual(bridge.keys,['exportSessionLog','info','openPath','pickDirectory','pickFile','saveText','setDirty'].sort());assert.equal(bridge.node,'undefined');assert.equal(bridge.require,'undefined');assert.equal(bridge.cookie,'');assert.equal(bridge.info.dataDir.startsWith(data),true);
   evidence.info=bridge.info;evidence.checks.push('Exact native bridge; Node globals absent; session credential HttpOnly; isolated data root');
   assert.equal((await request(evidence.origin,'/api/desktop_info')).status,401);evidence.checks.push('Unauthenticated API rejected');
   const preferences=await application.evaluate(({BrowserWindow})=>{const p=BrowserWindow.getAllWindows()[0].webContents.getLastWebPreferences();return {sandbox:p.sandbox,contextIsolation:p.contextIsolation,nodeIntegration:p.nodeIntegration,webSecurity:p.webSecurity};});

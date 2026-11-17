@@ -2,9 +2,9 @@
 const fs=require('node:fs');const path=require('node:path');const {createHash}=require('node:crypto');
 function isAllowedWorkflowFile(file){
  if(typeof file!=='string'||file.includes('\\')||file.split('/').some(part=>['..','.',''].includes(part)))return false;
- const backend = new Set(['core','desktop_entry','desktop_features','desktop_supervisor','discovery','engineering_format','engineering','function_profiles','indoor_building_export','managed_process','migration','parameter_catalog','preflight','resource_lock','result_validation','run_guard','run_history','runtime_cleanup','runtime_configs','server','vs_launch'].map(name=>'platform/backend/'+name+'.py'));
- const scripts = new Set(['file_safety','indoor_maps','patch_gongcan','project_config','project_detection','project_workflow','render_schema','run_local','runtime_paths','task_schema'].map(name=>'scripts/'+name+'.py'));
- const batches = new Set(['build_local','doctor_local','load_local_env','run_local','stage_local'].map(name=>'scripts/'+name+'.bat'));
+ const backend = new Set(['core','log_stream','desktop_entry','desktop_features','desktop_supervisor','discovery','engineering_format','engineering','function_profiles','indoor_building_export','managed_process','migration','parameter_catalog','preflight','resource_lock','result_validation','run_guard','run_history','runtime_cleanup','runtime_configs','server','vs_launch'].map(name=>'platform/backend/'+name+'.py'));
+ const scripts = new Set(['dll_dependencies','file_safety','indoor_maps','patch_gongcan','project_config','project_detection','project_workflow','render_schema','run_local','runtime_paths','task_schema'].map(name=>'scripts/'+name+'.py'));
+ const batches = new Set(['build_local','doctor_local','load_local_env','run_local','stage_local','validate_local_python'].map(name=>'scripts/'+name+'.bat'));
  return backend.has(file) || scripts.has(file) || batches.has(file) ||
   ['platform/backend/params_spec.json','platform/backend/function_profile_sources.json','templates/runtimeschema.xml.tpl','templates/runtimeschema-indoor.xml.tpl'].includes(file) ||
   /^desktop-ui\/dist\/(?:assets\/)?[a-z0-9_.@-]+\.(?:html|js|css|svg|png|ico|woff2?)$/i.test(file);
@@ -22,7 +22,7 @@ function verifyManifestTree(directory,expected,allowed=()=>true){
 }
 function verifyPackage(unpacked){
  const resources=path.join(unpacked,'resources'),info=JSON.parse(fs.readFileSync(path.join(resources,'build-info.json'),'utf8'));
- if(!['stable','dev'].includes(info.channel)||info.version!=='0.1.0'||!info.unsigned)throw new Error('Invalid build metadata');
+ if(!['stable','dev'].includes(info.channel)||info.version!==require('../package.json').version||!info.unsigned)throw new Error('Invalid build metadata');
  const unexpected=fs.readdirSync(resources).filter(name=>!['app.asar','workflow','python','third-party','build-info.json'].includes(name));if(unexpected.length)throw new Error('Unexpected top-level resources: '+unexpected.join(', '));
  const workflow=path.join(resources,'workflow'),python=path.join(resources,'python');
  const workflowFiles=verifyManifestTree(workflow,info.workflowHashes,isAllowedWorkflowFile);
@@ -37,7 +37,8 @@ function verifyPackage(unpacked){
  const appMetadata=JSON.parse(asar.extractFile(archive,'package.json').toString('utf8'));
  if(appMetadata.name!=='lishuttle-workflow-desktop'||appMetadata.version!==info.version||appMetadata.desktopChannel!==info.channel)throw new Error('Application metadata differs from build');
  const archiveFiles=asar.listPackage(archive).map(file=>file.replace(/\\/g,'/').replace(/^\//,''));
- for(const name of archiveFiles){if(!name.includes('.')&&!name.includes('tests'))continue;if(!/^(package\.json|desktop\/(?:main|preload|backend-host|security|paths|ipc)\.cjs|desktop\/status\.html)$/.test(name))throw new Error('Unexpected application archive content: '+name);}
+ for(const required of ['desktop/main.cjs','desktop/preload.cjs','desktop/backend-host.cjs','desktop/security.cjs','desktop/paths.cjs','desktop/ipc.cjs','desktop/session-export.cjs','desktop/status.html','package.json'])if(!archiveFiles.includes(required))throw new Error('Required application archive file missing: '+required);
+ for(const name of archiveFiles){if(!name.includes('.')&&!name.includes('tests'))continue;if(!/^(package\.json|desktop\/(?:main|preload|backend-host|security|paths|ipc|session-export)\.cjs|desktop\/status\.html)$/.test(name))throw new Error('Unexpected application archive content: '+name);}
  for(const file of ['LICENSE.electron.txt','LICENSES.chromium.html'])if(!fs.existsSync(path.join(unpacked,file)))throw new Error('Missing Electron/Chromium license: '+file);
  const validation=require('./prepare-python.cjs').validateRuntime(python,{importApplication:true});
  return {channel:info.channel,version:info.version,workflowFiles,runtimeFiles,noticeFiles,python:validation.version,archiveFiles:archiveFiles.length,unsigned:info.unsigned};
@@ -46,5 +47,5 @@ function writeChecksums(directory){
  const hashes=hashTree(directory);const entries=Object.entries(hashes).filter(([name])=>name!=='SHA256SUMS.txt'&&!name.startsWith('win-unpacked/'));
  fs.writeFileSync(path.join(directory,'SHA256SUMS.txt'),entries.map(([name,hash])=>hash+'  '+name).join('\n')+'\n');return entries.length;
 }
-if(require.main===module){try{console.log(JSON.stringify(verifyPackage(path.resolve(process.argv[2]||'release/stable/win-unpacked')),null,2));}catch(error){console.error(error.stack||error.message);process.exitCode=1;}}
+if(require.main===module){try{console.log(JSON.stringify(verifyPackage(path.resolve(process.argv[2]||'release/stable/'+require('../package.json').version+'/win-unpacked')),null,2));}catch(error){console.error(error.stack||error.message);process.exitCode=1;}}
 module.exports={isAllowedWorkflowFile,hashTree,verifyManifestTree,verifyPackage,writeChecksums};

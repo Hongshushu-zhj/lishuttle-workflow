@@ -2,8 +2,9 @@
 from pathlib import Path
 
 from project_detection import detect_project_config
+from dll_dependencies import resolve_dll
 
-BUILD_FIELDS = ('PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME', 'DLL_SRC')
+BUILD_FIELDS = ('PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME', 'DLL_ROOT', 'DLL_SRC')
 
 
 def preset_mode(preset):
@@ -40,6 +41,9 @@ def describe_build(env):
         if not mode:
             continue
         entry = dict(preset, mode=mode, directory_exists=(Path(env['PROJECT_DIR']) / preset['values']['BUILD_SUBDIR']).is_dir())
+        dll = resolve_dll(env, preset['build_type'])
+        entry['dll'] = dll
+        entry['values'] = dict(preset['values'], DLL_ROOT=dll['root'], DLL_SRC=dll['source'])
         result['presets'][name] = entry
         result['modes'][mode].append(name)
     for mode in result['modes']:
@@ -47,6 +51,7 @@ def describe_build(env):
     selected = result['presets'].get(result['selected'])
     if selected:
         result['selected_mode'] = selected['mode']
+        result['dll'] = selected['dll']
     subdir = env.get('BUILD_SUBDIR', '')
     if subdir:
         path = Path(env['PROJECT_DIR']) / subdir
@@ -57,15 +62,19 @@ def describe_build(env):
     return result
 
 
-def prepare_build(env, preset):
+def prepare_build(env, preset, draft=None):
+    if draft is not None:
+        if (not isinstance(draft, dict) or set(draft) - {'DLL_ROOT', 'DLL_SRC'}
+                or any(not isinstance(value, str) or any(c in value for c in '\r\n\0"') for value in draft.values())):
+            raise ValueError('动态库草稿仅支持单行根目录和兼容来源目录')
+        env = dict(env, **draft)
     status = describe_build(env)
     entry = status['presets'].get(preset)
     if not entry:
         raise ValueError('未找到可用于 Debug/Release 的 Windows x64 Ninja 预设，请检查项目 CMakePresets.json')
     values = {key: entry['values'].get(key, '') for key in BUILD_FIELDS}
-    defaults = {item['values'].get('DLL_SRC') for item in status['presets'].values()}
-    if env.get('DLL_SRC') and env['DLL_SRC'] not in defaults:
-        values['DLL_SRC'] = env['DLL_SRC']
+    dll = resolve_dll(env, entry['build_type'])
+    values.update(DLL_ROOT=dll['root'], DLL_SRC=dll['source'])
     if not env.get('CONFIG_SRC'):
         values['CONFIG_SRC'] = detect_project_config(env, machine={})['values'].get('CONFIG_SRC', '')
     return values
@@ -105,7 +114,10 @@ def required_issues(env, operation='render'):
         if not value:
             add(key, f'请填写并保存{label}（{key}）')
         elif key != 'OUT_ROOT' and not (Path(env['PROJECT_DIR']) / value).is_dir():
-            add(key, f'{label}不存在，请检查路径（{key}）')
+            if key == 'DLL_SRC':
+                add('DLL_ROOT', resolve_dll(env)['message'])
+            else:
+                add(key, f'{label}不存在，请检查路径（{key}）')
         elif key == 'OUT_ROOT' and Path(value).exists() and not Path(value).is_dir():
             add(key, '结果根目录不能指向文件，请选择文件夹')
     return issues

@@ -139,7 +139,7 @@ class RunPersistenceTests(unittest.TestCase):
 
     def test_failed_log_persistence_never_reports_success(self):
         runner = self.runner()
-        with patch.object(runner.history, 'append', side_effect=OSError('disk full')):
+        with patch.object(runner.history, 'append_lines', side_effect=OSError('disk full')):
             sid = runner.start([sys.executable, '-u', '-c', 'print("line")'], str(self.root), 'fixture')
             self.done(runner, sid)
         output = runner.output(sid, 0)

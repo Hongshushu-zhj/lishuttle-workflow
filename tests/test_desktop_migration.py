@@ -273,7 +273,8 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(saved['PROJECT_PROFILE_ID'],project_id(new/'external-engine'))
         self.assertEqual(saved['MAP_ROOT'],(new/'maps').as_posix())
         self.assertEqual(saved['CMAKE'],(new/'tools/cmake.exe').as_posix())
-        self.assertEqual(saved['DLL_SRC'],'ThirdPart/Dll')
+        self.assertEqual(saved['DLL_ROOT'],'ThirdPart/Dll')
+        self.assertEqual(saved['DLL_SRC'],'')  # A valid preset determines the required mode.
         self.assertEqual(saved['PRESET'],str(old/'unstructured-preset'))
         new_key = json.dumps([os.path.normcase(os.path.realpath(new/'tasks')),
             str(new/'tasks/engineering.csv').replace('\\','/'),str(new/'tasks/input.xml').replace('\\','/')],ensure_ascii=False)

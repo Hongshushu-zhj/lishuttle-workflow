@@ -63,6 +63,16 @@ class DiscoveryTests(unittest.TestCase):
         self.assertLessEqual(result['visited'], 3)
         self.assertEqual(scan_resources([str(self.root)], max_depth=0)['visited'], 0)
 
+    def test_dll_mode_candidates_select_the_parent_root(self):
+        root = self.root / 'ThirdPart/Dll'
+        for mode in ('Debug', 'Release'):
+            (root / mode).mkdir(parents=True)
+            (root / mode / 'library.dll').write_bytes(b'fixture')
+        candidates = [entry for entry in scan_resources([str(self.root)])['results'] if entry['kind'] == 'dll']
+        self.assertTrue(candidates)
+        self.assertTrue(all(entry['values'].get('DLL_ROOT') == root.as_posix() for entry in candidates))
+        self.assertTrue(all(entry['values'].get('DLL_SRC') == '' for entry in candidates))
+
     def test_cancelled_scan_and_unavailable_root_are_reported(self):
         cancelled = threading.Event()
         cancelled.set()

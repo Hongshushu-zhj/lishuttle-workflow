@@ -111,7 +111,7 @@ class RuntimeLifecycleTests(unittest.TestCase):
             tree = real_tree(*args, **kwargs)
             stream = tree.proc.stdout
             class BadStream:
-                def __iter__(self):
+                def read(self, size):
                     raise OSError('fixture log broken')
                 def close(self):
                     stream.close()

@@ -21,6 +21,8 @@ import sys
 import threading
 import hashlib
 import tempfile
+import weakref
+from pathlib import Path
 import math
 import xml.etree.ElementTree as ET
 from copy import deepcopy
@@ -29,6 +31,7 @@ import secrets
 from run_guard import RuntimeGuard
 from managed_process import ManagedProcess
 from run_history import RunHistory
+from log_stream import EventJournal, OutputDecoder, LogExportResponse
 from engineering import identify_engineering, validate_engineering, normalized, engineering_kind
 from vs_launch import sync_launch
 
@@ -1059,9 +1062,13 @@ class Runner:
         self.counter = secrets.randbits(51)
         self.guard = guard if guard is not None else RUNTIME
         self.history = history
+        self._log_temporary = None
+        self._log_cleanup = None
 
     def start(self, cmd, cwd, label, env=None, context=None, baseline=None, finalize=None):
         context = deepcopy(context or {})
+        decoder = OutputDecoder((env or os.environ).get('LISHUTTLE_LOG_ENCODING', 'gbk'))
+        context['log_encoding'] = decoder.encoding
         if context.get('operation') == 'build':
             source_project = context.get('project') or (context.get('project_config') or {}).get('PROJECT_DIR')
             if source_project:
@@ -1079,7 +1086,16 @@ class Runner:
                     self.history.finish(sid, 'done', None, {'verdict': 'failed',
                         'process': {'status': 'snapshot_failed', 'exit': None}}, internal_error=message)
                     raise OSError(message)
+            if self.history:
+                log_directory = self.history._directory(sid)
+            else:
+                if self._log_temporary is None:
+                    self._log_temporary = tempfile.mkdtemp(prefix='lishuttle-events-')
+                    self._log_cleanup = weakref.finalize(self, shutil.rmtree, self._log_temporary, ignore_errors=True)
+                log_directory = Path(self._log_temporary) / str(sid)
             try:
+                journal = EventJournal(log_directory, sid, decoder.encoding)
+                journal.terminal_ready = False
                 process_options = {}
                 cleanup_note = ''
                 if context.get('operation') == 'build':
@@ -1102,7 +1118,7 @@ class Runner:
                                           "label": label, "exit": None, "context": context,
                                           "cancelled": False, "internal_error": '', "result": None,
                                           'cleanup_note': cleanup_note,
-                                          "token": token, 'done_event': threading.Event()}
+                                          "token": token, "journal": journal, 'done_event': threading.Event()}
                     self.guard.bind(token, sid, context)
             except BaseException:
                 tree.terminate()
@@ -1113,12 +1129,17 @@ class Runner:
             def pump():
                 s = self.sessions[sid]
                 try:
-                    for line in proc.stdout:
-                        line = line.rstrip('\r\n')
+                    while True:
+                        raw = proc.stdout.read(4096)
+                        text, complete = decoder.feed(raw, final=not raw)
+                        if text:
+                            journal.append(text)
                         with self.lock:
-                            s['lines'].append(line)
+                            s['lines'].extend(complete)
                         if self.history:
-                            self.history.append(sid, line)
+                            self.history.append_lines(sid, complete)
+                        if not raw:
+                            break
                 except Exception as exc:
                     with self.lock:
                         s['internal_error'] = f'日志读取失败：{exc}'
@@ -1173,6 +1194,17 @@ class Runner:
                             s['internal_error'] += f'；关闭进程句柄失败：{exc}'
                         if result.get('verdict') == 'success':
                             result['verdict'] = 'unconfirmed'
+                try:
+                    # Persist the final event before freezing the historical
+                    # verdict, but do not announce completion until archiving ends.
+                    journal.finish(defer_complete=True)
+                except Exception as exc:
+                    s['internal_error'] += f'；日志事件保存失败：{exc}'
+                    journal.fail(exc)
+                    if result.get('verdict') == 'success':
+                        result['verdict'] = 'unconfirmed'
+                    result.setdefault('issues', []).append({'severity': 'error',
+                        'code': 'LOG_SAVE_FAILED', 'message': str(exc)})
                 if self.history:
                     try:
                         record = self.history.finish(sid, 'done', code, result,
@@ -1188,6 +1220,7 @@ class Runner:
                             'code': 'HISTORY_SAVE_FAILED', 'message': str(exc), 'path': str(self.history.root)})
                 with self.lock:
                     s.update(result=result, status='done')
+                    journal.complete()
                     self.guard.release(token)
                     s['done_event'].set()
 
@@ -1231,6 +1264,29 @@ class Runner:
             return self.history.output(sid, since=since, limit=limit)
         return {"error": "会话不存在", 'code':'SESSION_NOT_FOUND'}
 
+    def log_journal(self, sid):
+        with self.lock:
+            session = self.sessions.get(sid)
+            if session:
+                return session['journal']
+        if self.history and self.history.get(sid):
+            return EventJournal.open(self.history._directory(sid), sid)
+        return None
+
+    def export_log(self, sid):
+        # Export never reads/aggregates legacy lines just to obtain metadata.
+        with self.lock:
+            session = self.sessions.get(sid)
+            record = ({key: deepcopy(session.get(key)) for key in ('status', 'exit', 'context')}
+                      if session else None)
+        if record is None and self.history:
+            record = self.history.get(sid)
+        if record is None:
+            raise ValueError('会话不存在')
+        journal = self.log_journal(sid)
+        legacy = self.history._directory(sid) / 'console.log' if not journal and self.history else None
+        return LogExportResponse(sid, record, journal, legacy)
+
     def stop(self, sid):
         with self.lock:
             s = self.sessions.get(sid)
@@ -1264,6 +1320,10 @@ class Runner:
                 except Exception:
                     pass  # stop records the diagnostic and remains retryable.
                 event.wait(.1)
+        if self._log_cleanup:
+            self._log_cleanup()
+            self._log_temporary = None
+            self._log_cleanup = None
 
 
 RUNNER = Runner(history=RunHistory(PATHS.runs_dir))

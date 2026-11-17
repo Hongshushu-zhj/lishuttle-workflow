@@ -1,5 +1,41 @@
 # LiShuttle Workflow 桌面版验收记录
 
+## 0.1.1 改进验收 · 2026-11-17
+
+本轮在独立桌面分支 `codex/desktop-app` 完成；原 Web 工作区、实际引擎和业务数据未改动。以下检查使用临时项目、假工具文件或一次性输出进程，不代表真实 LiShuttle 业务计算已通过。
+
+| 范围 | 实际结果 |
+| --- | --- |
+| Python 后端 | 最终完整回归 732 项，2 项跳过，其余通过；117.505 秒。 |
+| Web 与桌面外壳 | 154 项通过，包括大于 16 MiB 的流式导出、失败时原目标保留、必需安装包文件及版本目录隔离。 |
+| Vue 界面 | 38 项通过；类型检查及生产构建通过。 |
+| DLL 专项复审 | 根目录迁移、预设解析、来源复制中变化、目标外部编辑、失败回滚等问题均补回归并通过；最终独立复审通过。 |
+| 日志专项复审 | 分块中文输出、重连续读、写盘失败、事件完整性、结果归档收尾和关闭等待均覆盖；最终独立复审通过。 |
+| 浏览器验收 | 13 组业务/布局场景通过，页面异常为空；覆盖三路 XML、编辑、旧历史、完整导出及大样本。 |
+| 真实服务连接 | 实际 API 预览并应用 `Dll/Debug`；实际子进程退出前显示已刷新的中文半行；真实完整日志下载通过。 |
+| 包内体检 | 旧 0.1.0 在仅有 System32 的 PATH 下重现“找不到 python”；新包使用内置解释器、实际 doctor 和配置加载脚本，中文空格临时项目的工具、DLL、配置和数据检查全部就位。 |
+| 打包桌面启动 | 实际 Electron 0.1.1 的 13 项检查通过，页面异常为空；隔离用户目录、无系统 Python/Node PATH，正常退出后自己拥有的服务和监管进程均结束。 |
+| 包内容 | 46 个工作流资源、35 个 Python 运行时文件、3 个通知文件、10 个 ASAR 条目，通过白名单、必需文件及资源哈希检查。 |
+
+本次字体采用 Windows 中文界面字体优先；正文和控件 15px、辅助文字至少 13px、日志 14px，字段标签字重 600。1366×768、1093×614、911×512、683×384 逻辑尺寸的布局与操作位置检查通过；小窗采用重排和滚动。它不等同于物理多屏完整验收。
+
+规模夹具为 10,000×30 CSV、100,000 行日志、500 条历史；观察 CSV 加载 0.374 秒、旧日志分页补读 23.89 秒。实时事件显示另以真实服务验收；以上均为本机样本，不是业务性能承诺。
+
+0.1.1 交付目录为 `release/stable/0.1.1/`，保留原 `release/stable/` 下 0.1.0 应用。安装包名为 `LiShuttle-Workflow-Setup-0.1.1-x64.exe`；最终构建摘要、SHA-256、源码提交及干净状态分别以该目录中的 `package-verification.json`、`SHA256SUMS.txt` 和 `win-unpacked/resources/build-info.json` 为准。打包启动与体检证据保存在 `smoke/`。
+
+```powershell
+node scripts/package-verify.cjs release/stable/0.1.1/win-unpacked
+node scripts/desktop-smoke.cjs --executable "release/stable/0.1.1/win-unpacked/LiShuttle Workflow.exe" --output release/stable/0.1.1/smoke
+& "release/stable/0.1.1/win-unpacked/resources/python/python.exe" -B tests/desktop_packaged_doctor.py --resources release/stable/0.1.1/win-unpacked/resources --output release/stable/0.1.1/smoke
+python -B tests/desktop_live_acceptance.py
+```
+
+仍需用合法真实引擎及代表数据验证实际 MSVC 编译、DLL 依赖与业务计算，以及另一台 Windows 的断网安装和升级。安装包未配置发布者签名；本轮未执行覆盖安装。原批处理的 GBK、特殊符号与长路径边界继续适用。下方保留 0.1.0 的历史记录。
+
+---
+
+## 0.1.0 初版验收
+
 日期：2026-11-16。版本：0.1.0，正式渠道构建。目标为 Windows 10/11 x64；本次验证机为 Windows build 26200 x64、Intel Core i7-11800H、16 GiB 内存。Windows 10 与其他电脑的实际安装兼容性仍需单独验收。
 
 ## 已执行的自动验证

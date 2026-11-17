@@ -2,6 +2,7 @@
 from functools import wraps
 import os
 from pathlib import Path
+import sys
 import threading
 
 import core
@@ -50,9 +51,11 @@ def _write(label):
 @_error_boundary
 def desktop_info(_):
     paths = resolve_paths()
-    return dict(version='0.1.0', channel=os.environ.get('LISHUTTLE_DESKTOP_CHANNEL', 'dev'),
+    return dict(version='0.1.1', channel=os.environ.get('LISHUTTLE_DESKTOP_CHANNEL', 'dev'),
         data_dir=str(paths.data_root), resource_root=str(paths.resource_root),
-        logs_dir=str(paths.logs_dir), schema_version=1)
+        logs_dir=str(paths.logs_dir), schema_version=1,
+        python_runtime=dict(path=sys.executable, version=sys.version.split()[0],
+                            available=True, bundled=paths.desktop))
 
 
 @_error_boundary

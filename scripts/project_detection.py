@@ -9,6 +9,7 @@ import subprocess
 
 from project_config import FIELDS
 from indoor_maps import indoor_floor_files
+from dll_dependencies import resolve_dll
 
 
 def slash(value):
@@ -233,9 +234,11 @@ def detect_project_config(env, machine=None):
         elif len(found) == 1:
             values['EXE_NAME'] = found[0]
         preset['built'] = bool(values.get('EXE_NAME') and (binary / values['EXE_NAME']).is_file())
-        mode = 'Debug' if preset['build_type'] == 'Debug' else 'Release' if preset['build_type'] in ('Release', 'RelWithDebInfo', 'MinSizeRel') else ''
-        if mode and (project / 'ThirdPart/Dll' / mode).is_dir():
-            values['DLL_SRC'] = 'ThirdPart/Dll/' + mode
+        dll = resolve_dll(env, preset['build_type'])
+        if dll['root']:
+            values['DLL_ROOT'] = dll['root']
+        if dll['exists']:
+            values['DLL_SRC'] = dll['source']
         for key, value in values.items():
             label = value if key == 'EXE_NAME' else f'{preset["label"]} · {value}'
             add(key, value, preset['source'], label + (' · 已编译' if key == 'PRESET' and preset['built'] else ''))
@@ -245,6 +248,8 @@ def detect_project_config(env, machine=None):
     for relative in ('ThirdPart/Dll/Release', 'ThirdPart/Dll/Debug'):
         if (project / relative).is_dir():
             add('DLL_SRC', relative, slash(project / relative))
+    if (project / 'ThirdPart/Dll').is_dir():
+        add('DLL_ROOT', 'ThirdPart/Dll', slash(project / 'ThirdPart/Dll'))
     directories = dict(MAP_ROOT=('map', 'maps'), GONGCAN_ROOT=('gongcan', 'tasks'),
                        OUT_ROOT=('pathloss', 'outputs'), DT_ROOT=('drivetest',))
     for key, names in directories.items():

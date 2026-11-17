@@ -45,6 +45,10 @@ class DesktopFixture(Fixture):
                 self.preferences = body['values']
                 self.preference_revision = 'prefs-2'
             return dict(schema_version=1, values=self.preferences, revision=self.preference_revision)
+        if endpoint == 'output_stream':
+            return dict(legacy=True)
+        if endpoint == 'preview_build_target':
+            return dict(build_values=self.state()['project_config'], dll=dict(source='C:/fixture/ThirdPart/Dll/Release',mode='Release',exists=True))
         if endpoint == 'desktop_info':
             return dict(version='0.1.0', channel='dev', data_dir='C:/fixture/desktop-data', resource_root='C:/fixture/resources')
         if endpoint == 'discover_start':
@@ -160,7 +164,7 @@ def check_large(p,checks,errors):
         browser=p.chromium.launch(executable_path=browser_path(),headless=True)
         page=browser.new_page(viewport=dict(width=1366,height=900))
         page.on('pageerror',lambda err:errors.append(str(err)))
-        page.add_init_script("window.__saved=[];window.desktop={setDirty:()=>{},saveText:async v=>{window.__saved.push(v);return {saved:true}},info:async()=>({version:'0.1.0',channel:'dev'})}")
+        page.add_init_script("window.__saved=[];window.desktop={setDirty:()=>{},saveText:async v=>{window.__saved.push(v);return {saved:true}},exportSessionLog:async v=>{window.__saved.push(v);return {saved:true}},info:async()=>({version:'0.1.0',channel:'dev'})}")
         page.goto(origin)
         settled(page)
         stage(page,2)
@@ -184,8 +188,8 @@ def check_large(p,checks,errors):
         assert following<40, f'follow stopped at bounded capacity: {following}'
         page.get_by_role('button',name='完整另存为',exact=True).click()
         page.wait_for_function('window.__saved.length===1',timeout=30000)
-        saved=page.evaluate('window.__saved[0].text')
-        assert 'large log line 0' in saved and 'large log line 99999' in saved
+        saved=page.evaluate('window.__saved[0]')
+        assert saved == {'sid':701}, saved  # Native bridge exports by trusted SID, not aggregated renderer text.
         browser.close()
         checks.append(dict(scale_fixture=dict(csv_rows=10000,csv_columns=30,log_lines=100000,history_records=500),
             csv_load_seconds=csv_seconds,log_drain_seconds=log_seconds))
@@ -206,7 +210,7 @@ def check():
             page = browser.new_page(viewport=dict(width=1366, height=900), device_scale_factor=1)
             page.on('pageerror', lambda err: errors.append(str(err)))
             # Native bridge stub records only the public capability calls.
-            page.add_init_script("window.__dirty=[]; window.__saved=[]; window.desktop={setDirty:v=>window.__dirty.push(v),saveText:async v=>{window.__saved.push(v);return {saved:true,path:'C:/fixture/export.log'}},pickDirectory:async()=>null,pickFile:async()=>null,openPath:async()=>{},info:async()=>({version:'0.1.0',channel:'dev',dataDir:'C:/fixture/desktop-data',resourceRoot:'C:/fixture/resources'})}")
+            page.add_init_script("window.__dirty=[]; window.__saved=[]; window.desktop={setDirty:v=>window.__dirty.push(v),saveText:async v=>{window.__saved.push(v);return {saved:true,path:'C:/fixture/export.log'}},exportSessionLog:async v=>{window.__saved.push(v);return {saved:true,path:'C:/fixture/export.log'}},pickDirectory:async()=>null,pickFile:async()=>null,openPath:async()=>{},info:async()=>({version:'0.1.0',channel:'dev',dataDir:'C:/fixture/desktop-data',resourceRoot:'C:/fixture/resources'})}")
             page.goto(origin)
             expect(page.get_by_text('服务已连接', exact=True)).to_be_visible()
             settled(page)

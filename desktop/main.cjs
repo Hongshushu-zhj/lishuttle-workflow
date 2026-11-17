@@ -17,6 +17,7 @@ function log(message) {
   try { if(fs.existsSync(logFile)&&fs.statSync(logFile).size>4*1024*1024)fs.renameSync(logFile,logFile+'.1');fs.appendFileSync(logFile,new Date().toISOString()+' '+String(message).slice(0,65536)+'\n'); } catch {}
 }
 let window=null,backend=null,origin=null,dirty=false,closing=false,allowQuit=false,starting=false;
+const {streamSessionExport}=require('./session-export.cjs');
 const statusUrl=pathToFileURL(path.join(__dirname,'status.html')).href;
 if (!app.requestSingleInstanceLock()) { app.quit(); }
 else {
@@ -26,7 +27,7 @@ else {
  app.on('window-all-closed',()=>{if(allowQuit)app.quit();});
 }
 function info(){return {version:app.getVersion(),channel:paths.channel,dataDir:paths.dataDir,resourceRoot:paths.resourceRoot};}
-registerDesktopIpc({ipcMain,dialog,shell,getWindow:()=>window,getOrigin:()=>origin,getInfo:info,setDirty:value=>{dirty=value;}});
+registerDesktopIpc({ipcMain,dialog,shell,getWindow:()=>window,getOrigin:()=>origin,getInfo:info,exportSession:async(sid,target)=>{const active=backend;if(!active||!origin||active.exitResult)throw Error('本地服务不可用');await streamSessionExport({origin,cookieName:active.bootstrap.cookie_name,secret:active.bootstrap.session_secret,sid,target});},setDirty:value=>{dirty=value;}});
 async function createWindow() {
  const isolated=session.fromPartition('lishuttle-'+randomBytes(16).toString('hex'),{cache:false});
  isolated.setPermissionRequestHandler((_contents,_permission,callback)=>callback(false));

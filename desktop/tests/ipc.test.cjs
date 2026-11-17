@@ -15,3 +15,14 @@ test('saveText writes only to native save dialog result and respects cancel',asy
  assert.deepEqual(await handlers.get('desktop:saveText')(event,{suggestedName:'log.txt',text:'你好'}),{saved:false});assert.equal(fs.existsSync(output),false);
  canceled=false;assert.deepEqual(await handlers.get('desktop:saveText')(event,{suggestedName:'log.txt',text:'你好'}),{saved:true,path:output});assert.equal(fs.readFileSync(output,'utf8'),'你好');
 });
+
+test('session export accepts only sid, uses native target, and never accepts renderer credentials or paths',async()=>{
+ const handlers=new Map();let dialogs=0;const calls=[];const frame={url:'http://127.0.0.1:49152/'};const webContents={mainFrame:frame};const event={sender:webContents,senderFrame:frame};
+ const target=path.join(os.tmpdir(),'native-session.log');let canceled=true;
+ register({ipcMain:{handle:(key,fn)=>handlers.set(key,fn),on:()=>{}},dialog:{showSaveDialog:async()=>{dialogs++;return {canceled,filePath:target};}},shell:{},getWindow:()=>({webContents,isDestroyed:()=>false}),getOrigin:()=>'http://127.0.0.1:49152',getInfo:()=>({}),setDirty:()=>{},exportSession:async(...args)=>calls.push(args)});
+ const save=handlers.get('desktop:exportSessionLog');
+ for(const value of [{sid:'../secret'},{sid:1,path:target},{sid:1,url:'http://evil.invalid'},{sid:1,secret:'x'},{sid:NaN},{sid:0}])await assert.rejects(save(event,value));
+ assert.equal(dialogs,0);assert.deepEqual(await save(event,{sid:7}),{saved:false});assert.deepEqual(calls,[]);
+ canceled=false;assert.deepEqual(await save(event,{sid:7}),{saved:true,path:target});assert.deepEqual(calls,[[7,target]]);
+ await assert.rejects(save({...event,senderFrame:{...frame}},{sid:7}),/trusted/i);
+});

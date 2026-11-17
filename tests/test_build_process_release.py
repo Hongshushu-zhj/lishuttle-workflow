@@ -58,7 +58,7 @@ class BuildProcessReleaseTests(unittest.TestCase):
         lines, outcome = [], []
         def consume():
             try:
-                lines.extend(line.strip() for line in tree.proc.stdout)
+                lines.extend(line.decode('gbk', errors='replace').strip() for line in tree.proc.stdout)
                 outcome.append(tree.wait())
             finally:
                 done.set()

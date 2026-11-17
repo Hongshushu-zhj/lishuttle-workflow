@@ -77,9 +77,9 @@ class BuildDiagnosticsTests(unittest.TestCase):
     def test_unknown_toolchain_reports_why_safe_wait_continues(self):
         release = threading.Event()
         class BlockingOutput:
-            def __iter__(self):
+            def read(self, size):
                 release.wait(5)
-                return iter(())
+                return b''
             def close(self):
                 pass
         tree = SimpleNamespace(proc=SimpleNamespace(stdout=BlockingOutput()), cleanup_error='',

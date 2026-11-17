@@ -10,10 +10,11 @@ import shutil
 import tempfile
 import threading
 from runtime_paths import resolve_paths
+from dll_dependencies import migrate_dll_values, resolve_dll
 
 ROOT = Path(__file__).resolve().parents[1]
 FIELDS = ('PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME', 'VS_ROOT',
-          'CMAKE', 'NINJA', 'VCVARS', 'CONFIG_SRC', 'DLL_SRC', 'MAP_ROOT',
+          'CMAKE', 'NINJA', 'VCVARS', 'CONFIG_SRC', 'DLL_ROOT', 'DLL_SRC', 'MAP_ROOT',
           'OUT_ROOT', 'DT_ROOT', 'GONGCAN_ROOT')
 MACHINE_FIELDS = ('VS_ROOT', 'CMAKE', 'NINJA', 'VCVARS')
 PROJECT_FIELDS = tuple(key for key in FIELDS if key not in MACHINE_FIELDS)
@@ -161,6 +162,20 @@ class ProjectStore:
                 profile['revision'] += 1
             if persist:
                 atomic_json(self.file, data)
+        migrated = False
+        for profile in data['profiles'].values():
+            values = profile['values']
+            dll = migrate_dll_values(values, profile['path'])
+            if any(values.get(key) != value for key, value in dll.items()):
+                if not migrated and persist and self.file.is_file():
+                    backup = Path(str(self.file) + '.dll-root.bak')
+                    if not backup.exists():
+                        shutil.copy2(self.file, backup)
+                values.update(dll)
+                profile['revision'] += 1
+                migrated = True
+        if migrated and persist:
+            atomic_json(self.file, data)
         return data
 
     @staticmethod
@@ -170,9 +185,12 @@ class ProjectStore:
 
     @staticmethod
     def _env(key, profile, data):
-        return dict(profile['values'], **data['machine']['values'],
+        env = dict(profile['values'], **data['machine']['values'],
                     MACHINE_CONFIG_REVISION=str(data['machine'].get('revision', 1)), PROJECT_DIR=profile['path'],
                     PROJECT_PROFILE_ID=key, PROJECT_PROFILE_REVISION=str(profile['revision']))
+        dll = resolve_dll(env)
+        env.update(DLL_ROOT=dll['root'], DLL_SRC=dll['source'])
+        return env
 
     def load(self, project=None, allow_empty=False, read_only=False):
         # Runtime queries may interpret legacy configuration in memory, but
@@ -216,6 +234,9 @@ class ProjectStore:
                 raise ValueError('项目配置已变化，请刷新后重试')
             machine_changed = self._update_machine(data, {k:v for k,v in values.items() if k in MACHINE_FIELDS})
             profile['values'].update({k:v for k,v in values.items() if k in PROJECT_FIELDS})
+            profile['values'].update(migrate_dll_values(profile['values'], profile['path']))
+            dll = resolve_dll(dict(profile['values'], PROJECT_DIR=profile['path']))
+            profile['values'].update(DLL_ROOT=dll['root'], DLL_SRC=dll['source'])
             if not machine_changed:
                 profile['revision'] += 1
             atomic_json(self.file, data)

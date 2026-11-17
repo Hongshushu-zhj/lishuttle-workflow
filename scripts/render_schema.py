@@ -156,7 +156,7 @@ def manifest_source_path(path):
 def build_table(env, job, require_complete=True):
     """合成变量；只读路径发现可返回部分值，真实渲染仍要求完整配置。"""
     for key in ('PROJECT_DIR', 'PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME',
-                'VS_ROOT', 'CMAKE', 'NINJA', 'VCVARS', 'CONFIG_SRC', 'DLL_SRC',
+                'VS_ROOT', 'CMAKE', 'NINJA', 'VCVARS', 'CONFIG_SRC', 'DLL_ROOT', 'DLL_SRC',
                 'PROJECT_PROFILE_ID', 'PROJECT_PROFILE_REVISION'):
         if key in job and job[key] != env.get(key):
             raise ValueError(f'任务单不能覆盖项目配置 {key}，请选择对应项目后重试')

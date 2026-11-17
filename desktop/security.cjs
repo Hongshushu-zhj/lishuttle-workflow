@@ -46,4 +46,11 @@ function validateSaveText(value) {
   if (typeof value.text !== 'string' || Buffer.byteLength(value.text, 'utf8') > 16 * 1024 * 1024) throw new TypeError('Text export exceeds 16 MiB');
   return { suggestedName, text: value.text };
 }
-module.exports = { validateServiceOrigin, isAllowedNavigation, assertTrustedSender, validateDialogOptions, validateSaveText, absolutePath };
+function validateSessionExport(value) {
+  plain(value, ['sid']);
+  const sid = value.sid;
+  if (!((typeof sid === 'number' && Number.isSafeInteger(sid) && sid > 0) ||
+        (typeof sid === 'string' && /^[1-9][0-9]{0,15}$/.test(sid) && Number.isSafeInteger(Number(sid))))) throw new TypeError('Invalid session id');
+  return { sid };
+}
+module.exports = { validateSessionExport, validateServiceOrigin, isAllowedNavigation, assertTrustedSender, validateDialogOptions, validateSaveText, absolutePath };

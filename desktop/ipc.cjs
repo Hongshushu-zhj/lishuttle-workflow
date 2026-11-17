@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('node:fs/promises');
-const { assertTrustedSender, validateDialogOptions, validateSaveText, absolutePath } = require('./security.cjs');
-function registerDesktopIpc({ ipcMain, dialog, shell, getWindow, getOrigin, getInfo, setDirty }) {
+const { assertTrustedSender, validateDialogOptions, validateSaveText, validateSessionExport, absolutePath } = require('./security.cjs');
+function registerDesktopIpc({ ipcMain, dialog, shell, getWindow, getOrigin, getInfo, setDirty, exportSession }) {
   const trusted = event => assertTrustedSender(event, getWindow(), getOrigin());
   const handle = (name, callback) => ipcMain.handle('desktop:' + name, async (event, value) => { trusted(event); return callback(value); });
   handle('pickDirectory', async value => {
@@ -20,6 +20,14 @@ function registerDesktopIpc({ ipcMain, dialog, shell, getWindow, getOrigin, getI
     if (result.canceled || !result.filePath) return { saved: false };
     const target = absolutePath(result.filePath);
     await fs.writeFile(target, text, 'utf8');
+    return { saved: true, path: target };
+  });
+  handle('exportSessionLog', async value => {
+    const { sid } = validateSessionExport(value);
+    const result = await dialog.showSaveDialog(getWindow(), { defaultPath: 'lishuttle-session-' + sid + '.log', title: '完整日志另存为', properties: ['showOverwriteConfirmation'] });
+    if (result.canceled || !result.filePath) return { saved: false };
+    const target = absolutePath(result.filePath);
+    await exportSession(sid, target);
     return { saved: true, path: target };
   });
   handle('openPath', async value => {

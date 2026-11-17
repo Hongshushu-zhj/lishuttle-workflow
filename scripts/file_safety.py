@@ -195,14 +195,17 @@ class FileTransaction:
     def write(self, path, data: bytes, backup=False, expected_revision=None) -> str:
         return _atomic_write(path, data, backup, expected_revision, outer=self)
 
-    def copy(self, source, destination, backup=False):
+    def copy(self, source, destination, backup=False, expected_revision=None):
         """Copy through a temporary file, optionally preserving prior versions.
 
         Resources and snapshots use streamed copies; even a large resource is
-        never loaded into memory as a complete bytes object.
+        never loaded into memory as a complete bytes object. A caller may pin
+        the destination to a previously compared ``expected_revision``.
         """
         destination = Path(os.path.abspath(destination))
         original_revision = file_revision(destination)
+        if expected_revision is not None and original_revision != expected_revision:
+            raise _external_conflict(destination, f'File changed: {destination}', self)
         temporaries = []
         try:
             replacement = _prepare_copy(destination, source)

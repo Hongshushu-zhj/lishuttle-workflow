@@ -10,6 +10,7 @@ files:
   - desktop/security.cjs
   - desktop/paths.cjs
   - desktop/ipc.cjs
+  - desktop/session-export.cjs
   - desktop/status.html
   - package.json
 extraResources:

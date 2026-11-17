@@ -18,7 +18,7 @@ class ManagedProcess:
         self._build_toolchain = (os.path.normcase(os.path.realpath(build_toolchain_root))
                                  if build_toolchain_root else None)
         options = dict(cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                       text=True, encoding='gbk', errors='replace', shell=False, env=env)
+                       text=False, bufsize=0, shell=False, env=env)
         if os.name == 'nt':
             self._windows_job()
             try:

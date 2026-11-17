@@ -170,7 +170,7 @@ class LegacyImporter:
             return value
 
         profiles, identities = {}, {}
-        profile_fields = {'CONFIG_SRC','DLL_SRC','MAP_ROOT','GONGCAN_ROOT','OUT_ROOT','DT_ROOT','BUILD_SUBDIR','INSTALL_SUBDIR'}
+        profile_fields = {'CONFIG_SRC','DLL_ROOT','DLL_SRC','MAP_ROOT','GONGCAN_ROOT','OUT_ROOT','DT_ROOT','BUILD_SUBDIR','INSTALL_SUBDIR'}
         for key, profile in updated['profiles'].items():
             field = 'profiles.' + key
             profile['path'] = replace(profile['path'], field + '.path')

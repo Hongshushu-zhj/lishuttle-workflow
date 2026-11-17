@@ -111,7 +111,12 @@ class DesktopHandler(BaseHTTPRequestHandler):
         if fn is None:
             return self._error(404, 'NOT_FOUND', 'Unknown API')
         try:
-            return self._json(fn(payload))
+            if parsed.path == '/api/output_stream' and self.headers.get('Last-Event-ID'):
+                payload['after'] = [self.headers['Last-Event-ID']]
+            value = fn(payload)
+            if hasattr(value, 'send'):
+                return value.send(self)
+            return self._json(value)
         except (ValueError, TypeError) as exc:
             return self._error(400, 'INVALID_REQUEST', str(exc))
         except Exception:

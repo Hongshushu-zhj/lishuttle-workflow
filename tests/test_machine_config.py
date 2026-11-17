@@ -110,7 +110,14 @@ class MachineConfigTests(unittest.TestCase):
         script = script_dir / 'project_config.py'
         script.write_bytes(source.read_bytes())
         (script_dir / 'runtime_paths.py').write_bytes(source.with_name('runtime_paths.py').read_bytes())
-        result = subprocess.run([sys.executable,str(script),'--set-machine','CMAKE='+self.tools['CMAKE']],
+        for name in ('dll_dependencies.py', 'file_safety.py'):
+            (script_dir / name).write_bytes(source.with_name(name).read_bytes())
+        # Embedded Python uses a fixed ._pth, so explicitly put this isolated
+        # fixture first instead of accidentally importing the real repo modules.
+        launcher = ('import sys,runpy;sys.path.insert(0,sys.argv[1]);'
+                    'sys.argv=sys.argv[2:];runpy.run_path(sys.argv[0],run_name="__main__")')
+        result = subprocess.run([sys.executable,'-X','utf8','-c',launcher,str(script_dir),str(script),
+                                 '--set-machine','CMAKE='+self.tools['CMAKE']],
                                 capture_output=True,text=True,encoding='utf-8')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(json.loads(result.stdout)['values']['CMAKE'],self.tools['CMAKE'])

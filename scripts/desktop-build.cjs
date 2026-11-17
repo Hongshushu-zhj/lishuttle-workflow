@@ -5,7 +5,7 @@ function resolveBuildTarget({mode,channel='stable',version='0.1.0'}){
  if(!['dev','pack','dist'].includes(mode))throw new Error('Mode must be dev, pack or dist');
  if(!['stable','dev'].includes(channel))throw new Error('Channel must be stable or dev');
  if(!/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(version))throw new Error('Invalid release version');
- return {mode,channel,version,appId:'com.lishuttle.workflow'+(channel==='dev'?'.dev':''),productName:'LiShuttle Workflow'+(channel==='dev'?' (Dev)':''),output:'release/'+channel,
+ return {mode,channel,version,appId:'com.lishuttle.workflow'+(channel==='dev'?'.dev':''),productName:'LiShuttle Workflow'+(channel==='dev'?' (Dev)':''),output:'release/'+channel+'/'+version,
  artifactName:'LiShuttle-Workflow'+(channel==='dev'?'-Dev':'')+'-Setup-'+version+'-${arch}.${ext}'};
 }
 function run(executable,args,cwd=root,options={}){

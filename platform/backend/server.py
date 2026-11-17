@@ -304,6 +304,58 @@ class Api:
             return {'error': str(exc)}
 
     @staticmethod
+    @project_operation
+    def preview_build_target(body):
+        from dll_dependencies import resolve_dll
+        try:
+            env = core.load_env()
+            values = core.prepare_build(env, body.get('preset') or env.get('PRESET', ''), body.get('values'))
+            return dict(build_values=values, dll=resolve_dll(dict(env, **values)))
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @runtime_operation
+    @project_operation
+    def apply_build_target(body):
+        try:
+            env = core.load_env()
+            values = core.prepare_build(env, body.get('preset') or env.get('PRESET', ''), body.get('values'))
+            selected = dict(env, **values)
+            if not core.describe_build(selected)['built']:
+                raise ValueError('所选构建目录尚无可识别程序，请先编译该配置。')
+            with core.RUNTIME.operation('应用构建目标') as token:
+                core.RUNTIME.acquire_resources(token, core.runtime_resources(selected))
+                env = core.ProjectStore(core.ENV_FILE).save(values, env.get('PROJECT_PROFILE_REVISION'), env['PROJECT_DIR'])
+                core.PROJECT_CONTEXT.set(env)
+                return Api.state(None)
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @project_operation
+    def dll_status(_):
+        from dll_dependencies import compare_dlls
+        try:
+            return compare_dlls(core.load_env())
+        except (ValueError, OSError) as exc:
+            return {'error': str(exc)}
+
+    @staticmethod
+    @runtime_operation
+    @project_operation
+    def dll_sync(body):
+        from dll_dependencies import sync_dlls
+        invalid = revision_required(body, 'revision')
+        if invalid:
+            return invalid
+        try:
+            env = core.load_env()
+            return sync_dlls(env, core.RUNTIME, core.runtime_resources(env), body['revision'])
+        except (ValueError, OSError) as exc:
+            return editor_error(exc)
+
+    @staticmethod
     @runtime_operation
     @project_operation
     def save_machine_config(body):
@@ -778,7 +830,7 @@ class Api:
         if body.get('step') == 'build':
             try:
                 env = core.load_env()
-                values = core.prepare_build(env, body.get('preset') or env.get('PRESET',''))
+                values = core.prepare_build(env, body.get('preset') or env.get('PRESET',''), body.get('values'))
                 issues = core.required_issues(dict(env, **values), 'build')
                 if issues:
                     return {'error': issues[0]['message'], 'issues': issues}
@@ -803,6 +855,19 @@ class Api:
         since = int(query.get("since", ["0"])[0])
         limit = max(1, min(5000, int(query.get('limit', ['500'])[0])))
         return core.RUNNER.output(sid, since, limit=limit)
+
+    @staticmethod
+    def output_stream(query):
+        from log_stream import LogStreamResponse
+        sid = int(query.get('sid', ['0'])[0])
+        journal = core.RUNNER.log_journal(sid)
+        if journal is None:
+            return {'legacy': True}
+        return LogStreamResponse(journal, int(query.get('after', ['0'])[0]))
+
+    @staticmethod
+    def export_log(query):
+        return core.RUNNER.export_log(int(query.get('sid', ['0'])[0]))
 
     @staticmethod
     @project_operation
@@ -850,6 +915,10 @@ ROUTES = {
     ("POST", "detect_project_config"): Api.detect_project_config,
     ("POST", "validate_setup"): Api.validate_setup,
     ("POST", "build_status"): Api.build_status,
+    ("POST", "preview_build_target"): Api.preview_build_target,
+    ("POST", "apply_build_target"): Api.apply_build_target,
+    ("POST", "dll_status"): Api.dll_status,
+    ("POST", "dll_sync"): Api.dll_sync,
     ("POST", "save_machine_config"): Api.save_machine_config,
     ("POST", "detect_machine_config"): Api.detect_machine_config,
     ("POST", "task_binding"): Api.task_binding,
@@ -873,6 +942,8 @@ ROUTES = {
     ("GET", "runtime_state"): Api.runtime_state,
     ("POST", "toolkit"): Api.toolkit,
     ("GET", "output"): Api.output,
+    ("GET", "output_stream"): Api.output_stream,
+    ("GET", "export_log"): Api.export_log,
     ("GET", "history"): Api.history,
     ("POST", "stop"): Api.stop,
     ("GET", "results"): Api.results,
@@ -905,7 +976,10 @@ class Handler(BaseHTTPRequestHandler):
             if not fn:
                 return self._json({"error": f"未知接口 GET {name}"}, 404)
             try:
-                return self._json(fn(parse_qs(parsed.query)))
+                value = fn(parse_qs(parsed.query))
+                if hasattr(value, 'send'):
+                    return value.send(self)
+                return self._json(value)
             except Exception as exc:  # noqa: BLE001
                 return self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
         # 静态文件

@@ -228,11 +228,18 @@ class RunHistory:
             return copy.deepcopy(record)
 
     def append(self, sid, line):
+        self.append_lines(sid, [line])
+
+    def append_lines(self, sid, lines):
+        # One write per captured chunk keeps legacy evidence complete without
+        # opening a file for every short progress line in a burst.
+        if not lines:
+            return
         with self._lock:
             if not (self._directory(sid) / 'session.json').is_file():
                 raise KeyError('会话不存在')
             with (self._directory(sid) / 'console.log').open('a', encoding='utf-8', newline='\n') as log:
-                log.write(str(line).rstrip('\r\n') + '\n')
+                log.write(''.join(str(line).rstrip('\r\n') + '\n' for line in lines))
                 log.flush()
 
     def _archive_entry(self, record, source, kind, expected_sha256=None, **extra):
