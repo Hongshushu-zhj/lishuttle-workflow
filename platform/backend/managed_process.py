@@ -17,7 +17,10 @@ class ManagedProcess:
         self._build_stop = threading.Event()
         self._build_toolchain = (os.path.normcase(os.path.realpath(build_toolchain_root))
                                  if build_toolchain_root else None)
-        options = dict(cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        # Domain tasks are noninteractive. Inheriting the desktop lifecycle
+        # pipe can block Windows Python startup while the service reads it.
+        options = dict(cwd=cwd, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                        text=False, bufsize=0, shell=False, env=env)
         if os.name == 'nt':
             self._windows_job()

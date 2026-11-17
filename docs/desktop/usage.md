@@ -1,10 +1,10 @@
 # LiShuttle Workflow 桌面版使用说明
 
-版本：0.1.1，Windows 10/11 x64。应用携带 Python 运行环境，安装后无需另装 Python、Node.js 或启动 Web 服务。LiShuttle 引擎、第三方库及地图/工参/模型等业务数据由用户提供，不随安装包分发。
+版本：0.1.2，Windows 10/11 x64。应用携带 Python 运行环境，安装后无需另装 Python、Node.js 或启动 Web 服务。LiShuttle 引擎、第三方库及地图/工参/模型等业务数据由用户提供，不随安装包分发。
 
 ## 安装与数据位置
 
-运行 `LiShuttle-Workflow-Setup-0.1.1-x64.exe`，选择当前用户可写的安装目录。应用为当前用户安装，支持自选目录。安装资源与用户配置分离，更新或卸载默认保留用户数据。
+运行 `LiShuttle-Workflow-Setup-0.1.2-x64.exe`，选择当前用户可写的安装目录。应用为当前用户安装，支持自选目录。安装资源与用户配置分离，更新或卸载默认保留用户数据。
 
 - 正式版：`%LOCALAPPDATA%\LiShuttleWorkflow`。
 - 开发版：`%LOCALAPPDATA%\LiShuttleWorkflow-Dev`。
@@ -75,4 +75,4 @@ npm run desktop:dev
 npm run desktop:dist
 ```
 
-`desktop:dist` 输出正式版安装包到 `release/stable/<版本号>`（当前为 `release/stable/0.1.1`）；`desktop:dist:dev` 输出独立开发版到 `release/dev/<版本号>`。不同版本各自保留，避免覆盖正在使用的旧版目录。依赖版本和 Python 校验值固定在锁文件及准备脚本。打包校验采用白名单，排除本机 env、项目、结果、运行历史和业务数据。
+`desktop:dist` 输出正式版安装包到 `release/stable/<版本号>`（当前为 `release/stable/0.1.2`）；`desktop:dist:dev` 输出独立开发版到 `release/dev/<版本号>`。不同版本各自保留，避免覆盖正在使用的旧版目录。依赖版本和 Python 校验值固定在锁文件及准备脚本。打包校验采用白名单，排除本机 env、项目、结果、运行历史和业务数据。

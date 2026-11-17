@@ -1,5 +1,32 @@
 # LiShuttle Workflow 桌面版验收记录
 
+## 0.1.2 编译启动阻塞修复 · 2026-11-17
+
+根因：桌面服务主线程保持读取生命周期输入管道，构建批处理中的 Python 子进程继承了相同输入，在 Windows 启动阶段阻塞。修复将非交互任务输入设为 `subprocess.DEVNULL`；服务监管协议仍使用自己的双向管道。
+
+| 范围 | 实际结果 |
+| --- | --- |
+| 可重复回归 | 修复前，真实 Runner 下 Python 任务及 build/doctor/stage/run 四个批处理入口均在管道读取时超时；修复后全部通过，任务结束后运行锁释放。 |
+| Python 完整回归 | 734 项，2 项跳过，其余通过；71.759 秒。 |
+| Web 与桌面外壳 | 154 项通过。 |
+| Vue 界面 | 38 项通过。 |
+| 桌面服务实际编译 | 真实 desktop_supervisor → desktop_entry → HTTP API → Runner → 批处理；中文及空格临时路径、隔离用户数据、PATH 仅含 System32，使用本机 CMake/Ninja/MSVC 完成 Debug 和 Release 两次编译，产出程序运行输出预期标识。 |
+| 实时日志与退出 | 两次编译结束前均已读到实际输出；体检全部关键项就位；预设对应 Debug/Release DLL 来源正确；服务仍能响应活动查询及正常关闭。 |
+
+仅运行一次性 C++ 夹具；夹具 DLL/配置文件只用于体检存在性检查，不加载。没有执行真实 LiShuttle 计算或修改实际项目及业务数据。原来卡住的会话 `162495045872085` 已在 22:56:41 被取消。
+
+最终交付目录：`release/stable/0.1.2/`。包资源及哈希结果以 `package-verification.json`、`SHA256SUMS.txt`、`win-unpacked/resources/build-info.json` 为准；最终包的桌面启动和真实编译证据存放于 `smoke/`。
+
+```powershell
+node scripts/package-verify.cjs release/stable/0.1.2/win-unpacked
+node scripts/desktop-smoke.cjs --executable "release/stable/0.1.2/win-unpacked/LiShuttle Workflow.exe" --output release/stable/0.1.2/smoke
+& "release/stable/0.1.2/win-unpacked/resources/python/python.exe" -B tests/desktop_packaged_toolkit.py --resources release/stable/0.1.2/win-unpacked/resources --output release/stable/0.1.2/smoke --vs-root "D:/Program Files/Visual Studio"
+```
+
+最后一条命令的 Visual Studio 目录是本次验收机参数，不写入应用默认配置。真实引擎的项目依赖和业务计算仍需在用户项目中验证。
+
+---
+
 ## 0.1.1 改进验收 · 2026-11-17
 
 本轮在独立桌面分支 `codex/desktop-app` 完成；原 Web 工作区、实际引擎和业务数据未改动。以下检查使用临时项目、假工具文件或一次性输出进程，不代表真实 LiShuttle 业务计算已通过。

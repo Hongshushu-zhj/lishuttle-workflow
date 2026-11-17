@@ -1,7 +1,7 @@
 {
   "name": "lishuttle-workflow-desktop",
   "productName": "LiShuttle Workflow (Dev)",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "desktopChannel": "dev",
   "description": "LiShuttle workflow Windows desktop workspace",
   "author": "LiShuttle contributors",
