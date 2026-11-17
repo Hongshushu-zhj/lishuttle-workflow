@@ -106,7 +106,9 @@ class DesktopServiceTests(unittest.TestCase):
         def finish():
             self.assertNotIn('"status": "stopped"',output.getvalue())
             events.append('archives finished')
-        domain = SimpleNamespace(RUNNER=SimpleNamespace(shutdown=finish),RUNTIME=SimpleNamespace(snapshot=lambda:{'busy':False}))
+        domain = SimpleNamespace(RUNNER=SimpleNamespace(shutdown=finish),
+            RUNTIME=SimpleNamespace(snapshot=lambda:{'busy':False}),
+            shutdown_renderers=lambda:events.append('renderers stopped'))
         feature = SimpleNamespace(ROUTES={},close=lambda:events.append('discovery finished'))
         bootstrap = dict(data_dir=str(root/'user'),static_dir=str(root/'static'),resource_root=str(root),session_secret='t'*48,cookie_name='fixture')
         # Data is a sibling of the immutable resource fixture.
@@ -116,7 +118,7 @@ class DesktopServiceTests(unittest.TestCase):
                 patch.object(sys,'stdin',control),patch.object(sys,'stdout',output):
             result = desktop_entry.main()
         self.assertEqual(result,0)
-        self.assertEqual(events,['archives finished','discovery finished'])
+        self.assertEqual(events,['renderers stopped','archives finished','discovery finished'])
         self.assertEqual(json.loads(output.getvalue().splitlines()[-1]),{'type':'shutdown','status':'stopped','request_id':'fixture'})
 
 

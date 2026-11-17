@@ -245,6 +245,33 @@ class RenderReceiptTests(unittest.TestCase):
         self.assertEqual(result['status'], 'failed')
         self.assertEqual(self.xml.read_bytes(), before)
 
+    def test_renderer_has_independent_input_and_a_bounded_wait(self):
+        real_run = core.run_renderer
+
+        def inspect(*args, **kwargs):
+            self.assertGreater(kwargs.get('timeout', 0), 0,
+                               'a renderer must not hold the assembly request forever')
+            return real_run(*args, **kwargs)
+
+        with patch.object(core, 'run_renderer', side_effect=inspect):
+            result = self.render()
+        self.assertTrue(result['generated'], result)
+
+    def test_renderer_timeout_returns_unconfirmed_generation_with_partial_output(self):
+        self.render()
+        previous = self.xml.read_bytes()
+        timeout = core.subprocess.TimeoutExpired(['renderer'], 120,
+            output='装配尚未完成'.encode('utf-8'), stderr=b'fixture diagnostic')
+        with patch.object(core, 'run_renderer', side_effect=timeout):
+            result = self.render()
+        self.assertFalse(result['generated'], result)
+        self.assertEqual(result['status'], 'failed')
+        self.assertNotEqual(result['exit_code'], 0)
+        self.assertIn('超时', result['output'])
+        self.assertIn('装配尚未完成', result['output'])
+        self.assertIn('fixture diagnostic', result['output'])
+        self.assertEqual(self.xml.read_bytes(), previous)
+
     def test_api_owned_sample_regeneration_backs_up_both_targets_and_can_roll_back(self):
         self.render()
         manifest = Path(str(self.xml) + '.manifest.json')
@@ -273,19 +300,19 @@ class RenderReceiptTests(unittest.TestCase):
         self.assertEqual({p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}, before)
 
     def test_changed_xml_or_manifest_is_rejected_even_with_current_attempt(self):
-        real_run = core.subprocess.run
+        real_run = core.run_renderer
         for suffix in ('', '.manifest.json'):
             with self.subTest(suffix=suffix):
                 def tamper(*args, **kwargs):
                     process = real_run(*args, **kwargs)
                     Path(str(self.xml) + suffix).write_bytes(b'tampered')
                     return process
-                with patch.object(core.subprocess, 'run', side_effect=tamper):
+                with patch.object(core, 'run_renderer', side_effect=tamper):
                     result = self.render()
                 self.assertFalse(result['generated'], result)
 
     def test_replayed_attempt_and_incomplete_target_set_are_rejected(self):
-        real_run = core.subprocess.run
+        real_run = core.run_renderer
         for mode in ('attempt', 'targets'):
             with self.subTest(mode=mode):
                 def tamper(arguments, **kwargs):
@@ -298,12 +325,12 @@ class RenderReceiptTests(unittest.TestCase):
                         receipt['outputs'].pop()
                     receipt_path.write_text(json.dumps(receipt), encoding='utf-8')
                     return process
-                with patch.object(core.subprocess, 'run', side_effect=tamper):
+                with patch.object(core, 'run_renderer', side_effect=tamper):
                     result = self.render()
                 self.assertFalse(result['generated'], result)
 
     def test_non_object_generation_proofs_are_rejected_without_request_failure(self):
-        real_run = core.subprocess.run
+        real_run = core.run_renderer
         for mode in ('null_receipt', 'list_receipt', 'null_generation'):
             with self.subTest(mode=mode):
                 def tamper(arguments, **kwargs):
@@ -323,7 +350,7 @@ class RenderReceiptTests(unittest.TestCase):
                         receipt = None if mode == 'null_receipt' else []
                     receipt_path.write_text(json.dumps(receipt), encoding='utf-8')
                     return process
-                with patch.object(core.subprocess, 'run', side_effect=tamper):
+                with patch.object(core, 'run_renderer', side_effect=tamper):
                     result = self.render()
                 self.assertFalse(result['generated'], result)
                 self.assertEqual(result['status'], 'failed')

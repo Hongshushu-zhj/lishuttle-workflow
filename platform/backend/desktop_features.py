@@ -51,7 +51,7 @@ def _write(label):
 @_error_boundary
 def desktop_info(_):
     paths = resolve_paths()
-    return dict(version='0.1.2', channel=os.environ.get('LISHUTTLE_DESKTOP_CHANNEL', 'dev'),
+    return dict(version='0.1.3', channel=os.environ.get('LISHUTTLE_DESKTOP_CHANNEL', 'dev'),
         data_dir=str(paths.data_root), resource_root=str(paths.resource_root),
         logs_dir=str(paths.logs_dir), schema_version=1,
         python_runtime=dict(path=sys.executable, version=sys.version.split()[0],

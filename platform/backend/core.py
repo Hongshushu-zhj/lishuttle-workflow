@@ -30,6 +30,7 @@ import time
 import secrets
 from run_guard import RuntimeGuard
 from managed_process import ManagedProcess
+from render_process import run_renderer, shutdown_renderers, RenderCancelled
 from run_history import RunHistory
 from log_stream import EventJournal, OutputDecoder, LogExportResponse
 from engineering import identify_engineering, validate_engineering, normalized, engineering_kind
@@ -47,6 +48,7 @@ PROJECTS_FILE = str(PATHS.projects_file)
 JOBS_DIR = str(PATHS.jobs_dir)
 MAINTENANCE_DIR = str(PATHS.maintenance_dir)
 SPEC_FILE = os.path.join(HERE, "params_spec.json")
+RENDER_TIMEOUT_SECONDS = 120
 
 sys.path.insert(0, SCRIPTS)
 from render_schema import read_env_file, build_table  # noqa: E402
@@ -498,12 +500,22 @@ def run_render(job_file, transaction=None):
     attempt_id = secrets.token_hex(24)
     with tempfile.TemporaryDirectory(prefix='lishuttle-render-') as directory:
         receipt_path = os.path.join(directory, 'receipt.json')
-        proc = subprocess.run(
-            [python_executable(), os.path.join(SCRIPTS, "render_schema.py"), job_file, "local-win",
-             '--attempt-id', attempt_id, '--receipt', receipt_path]
-            + (['--no-backup'] if transaction is not None else []),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=ROOT, env=child_env)
+        try:
+            proc = run_renderer(
+                [python_executable(), os.path.join(SCRIPTS, "render_schema.py"), job_file, "local-win",
+                 '--attempt-id', attempt_id, '--receipt', receipt_path]
+                + (['--no-backup'] if transaction is not None else []),
+                timeout=RENDER_TIMEOUT_SECONDS,
+                cwd=ROOT, env=child_env)
+        except RenderCancelled as exc:
+            return dict(exit_code=-1, output=f'[装配已停止] {exc}', generated=False,
+                        status='failed', attempt_id=attempt_id, outputs=[])
+        except subprocess.TimeoutExpired as exc:
+            def decoded(value):
+                return value.decode('utf-8', errors='replace') if isinstance(value, bytes) else value or ''
+            return dict(exit_code=-1, output=decoded(exc.stdout) + decoded(exc.stderr)
+                        + f'\n[装配超时] 配置生成超过 {RENDER_TIMEOUT_SECONDS} 秒，已停止本次生成。',
+                        generated=False, status='failed', attempt_id=attempt_id, outputs=[])
         result = dict(exit_code=proc.returncode, output=(proc.stdout or '') + (proc.stderr or ''),
                       generated=False, status='failed', attempt_id=attempt_id, outputs=[])
         try:

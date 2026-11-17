@@ -304,6 +304,10 @@ def main():
     finally:
         if server is not None:
             server.stopping.set()
+            if core is not None:
+                # Release synchronous assembly requests through their normal
+                # error/transaction rollback path before waiting for HTTP drain.
+                core.shutdown_renderers()
             server.shutdown()
             server.server_close()  # Wait for accepted writes before Runner finalization.
         if core is not None:

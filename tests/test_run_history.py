@@ -260,6 +260,31 @@ class RunHistoryTests(unittest.TestCase):
         self.assertEqual([r['sid'] for r in self.history.list(project='first')], [125, 123])
         self.assertEqual([r['sid'] for r in self.history.list(limit=1, offset=1)], [124])
 
+    def test_list_matches_windows_project_spellings_before_pagination(self):
+        self.fixture(123, r'C:\Projects\LiShuttle')
+        self.fixture(124, 'c:/projects/lishuttle/')
+        self.fixture(125, 'C:/Projects/Other')
+        for project in (r'c:\projects\LISHUTTLE', 'C:/Projects/LiShuttle/'):
+            with self.subTest(project=project):
+                self.assertEqual([r['sid'] for r in self.history.list(project=project)], [124, 123])
+                self.assertEqual([r['sid'] for r in self.history.list(
+                    project=project, limit=1, offset=1)], [123])
+        self.assertEqual(self.history.get(123)['context']['project'], r'C:\Projects\LiShuttle')
+
+    def test_list_matches_unc_windows_project_slashes_and_case(self):
+        self.fixture(123, r'\\Server\Share\LiShuttle')
+        self.fixture(124, r'\\Server\OtherShare\LiShuttle')
+        self.assertEqual([r['sid'] for r in self.history.list(
+            project='//server/share/lishuttle/')], [123])
+
+    def test_list_preserves_case_sensitive_posix_project_identity(self):
+        self.fixture(123, '/srv/Projects/LiShuttle')
+        self.fixture(124, '/srv/projects/lishuttle')
+        self.assertEqual([r['sid'] for r in self.history.list(
+            project='/srv/Projects/LiShuttle')], [123])
+        self.assertEqual([r['sid'] for r in self.history.list(
+            project='/srv/projects/lishuttle')], [124])
+
     def test_unsafe_or_duplicate_session_identifier_cannot_overwrite_history(self):
         self.fixture()
         for sid in ('../outside', '..', 'a/b', 'a\\b', '', -1):

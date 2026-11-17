@@ -76,6 +76,7 @@ async function rendererFailure(){
 async function requestClose(){
  if(closing||allowQuit)return;closing=true;
  try {
+  if(backend&&backend.stopping){await quitAfterBackend();return;}
   if(dirty){
    const decision=await dialog.showMessageBox(window,{type:'warning',title:'有尚未保存的修改',message:'关闭前请保存或放弃当前草稿。',detail:'选择“返回保存”后，请在工作台完成保存，再关闭窗口。',buttons:['返回保存','放弃草稿并退出','取消'],defaultId:0,cancelId:2,noLink:true});
    if(decision.response!==1)return;
@@ -92,7 +93,18 @@ async function requestClose(){
  finally{closing=false;}
 }
 async function quitAfterBackend(){
- if(backend&&!backend.exitResult)await backend.stop({timeout:30000});
+ let force=false;
+ while(backend&&!backend.exitResult){
+  try{
+   if(force){backend.forceStop();await backend.waitForExit(5000);}
+   else await backend.stop({timeout:30000});
+   break;
+  }catch(error){
+   log('Shutdown pending: '+error.message);
+   const decision=await dialog.showMessageBox(window,{type:'warning',title:'后台仍在关闭',message:'关闭请求已发出，后台仍在停止任务或完成归档。',detail:error.message+'\n关闭已开始，暂不能返回工作台继续操作。可以继续等待；强制停止可能留下未完成的文件更新或归档，再次启动后请核对文件状态。',buttons:['继续等待','强制停止后退出'],defaultId:0,cancelId:0,noLink:true});
+   force=decision.response===1;
+  }
+ }
  allowQuit=true;if(window&&!window.isDestroyed())window.destroy();app.quit();
 }
 process.on('uncaughtException',error=>{log('Main failure: '+(error.stack||error.message));dialog.showErrorBox('LiShuttle 发生异常','请查看日志：'+logFile+'\n'+error.message);});

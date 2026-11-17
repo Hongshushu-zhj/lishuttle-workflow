@@ -1,5 +1,42 @@
 # LiShuttle Workflow 桌面版验收记录
 
+## 0.1.3 装配及完整流程修复 · 2026-11-18
+
+本轮 Python 核心完整回归 744 项、2 项跳过，其余通过（65.771 秒）；Web/桌面外壳 158 项、Vue 界面 46 项通过，类型检查通过。独立复审发现的 Windows 子进程持文件句柄边界已补回归：修复前立即模拟回滚 75/80 次被拒绝，修复后相同持锁场景 30/30 次恢复成功。
+
+### 已复现的问题和修复边界
+
+- 原 0.1.2 的真实桌面服务在保持控制输入读取时，合法 `/api/render` 请求超过 10 秒仍无响应；直接继承输入的渲染器 `--help` 也超时，独立空输入约 0.21 秒返回。装配与 Runner 任务使用不同入口，是前次未覆盖的缺陷。
+- 新装配进程使用 `ManagedProcess` 的空输入和进程树所有权。渲染上限 120 秒，超时返回未确认生成；正常退出先停止渲染器，让 HTTP 装配请求通过原 `FileTransaction` 回滚，再完成服务关闭。现有生成凭据、哈希校验和资源保护保留。
+- 退出超时后不再重复向停止读取的服务发送关闭消息；界面保持“仍在关闭”，可以继续等待或明确强停。
+- Windows 当前项目历史按路径语义比较，修复正反斜杠/大小写差异造成的漏显。原始历史上下文不重写，POSIX 路径保留大小写隔离。
+- 前端编辑即作废旧体检，适配模式更新工参路径，活动日志切换与结果关联均有独立回归。
+
+### 实际服务流程
+
+`tests/desktop_packaged_toolkit.py` 使用真实 `desktop_supervisor → desktop_entry → authenticated HTTP API`，从启动到关闭持续保留控制管道。临时安装/用户数据/项目完全隔离，路径含中文和空格，PATH 仅含 System32；使用本机真实 MSVC/CMake/Ninja 编译一次性 C++ 程序。覆盖：
+
+1. 拒绝未鉴权请求；项目、工具链、任务、地图、偏好读取保存。
+2. Debug/Release 两次实际编译及体检；对应 DLL 来源选择；每模式新建与重复装配，各次凭据独立。
+3. 原任务 XML 预览、过期令牌拒绝、适配装配；参数读取保存及旧修订冲突。
+4. 无效预检阻止启动，修复临时输入后通过；实际子进程参数与固定会话上下文正确。
+5. 进程退出前可读日志，分页及完整导出一致；运行中拒绝并发装配；历史及会话结果一致。
+6. 真实关闭和重启后，配置、参数、当前运行配置选择、偏好、日志及历史仍可恢复；原临时源数据字节保持原样。
+
+临时程序只打印参数，不实现 LiShuttle 业务。其退出码为 0，但无业务产物，因此验收明确检查 `verdict=failed`、业务不可用、归档不完整，避免把进程成功当作业务成功。此项是结果状态表达的验收，不是业务计算验收。
+
+最终交付及证据目录：`release/stable/0.1.3/`；`package-verification.json` 校验资源白名单及哈希，`SHA256SUMS.txt` 校验安装包，`win-unpacked/resources/build-info.json` 记录源码提交及干净状态。`smoke/packaged-toolkit.json` 保存完整流程检查、请求耗时和会话结果；`smoke/desktop-smoke.json` 保存最终桌面启动及退出证据。
+
+```powershell
+node scripts/package-verify.cjs release/stable/0.1.3/win-unpacked
+node scripts/desktop-smoke.cjs --executable "release/stable/0.1.3/win-unpacked/LiShuttle Workflow.exe" --output release/stable/0.1.3/smoke
+& "release/stable/0.1.3/win-unpacked/resources/python/python.exe" -B tests/desktop_packaged_toolkit.py --resources release/stable/0.1.3/win-unpacked/resources --output release/stable/0.1.3/smoke --vs-root "D:/Program Files/Visual Studio"
+```
+
+仍需用户真实项目验证室内/室外引擎功能与业务产物；本次不执行真实用户引擎，不改实际业务数据，不声称已完成覆盖安装或另一台 Windows 验收。
+
+---
+
 ## 0.1.2 编译启动阻塞修复 · 2026-11-17
 
 根因：桌面服务主线程保持读取生命周期输入管道，构建批处理中的 Python 子进程继承了相同输入，在 Windows 启动阶段阻塞。修复将非交互任务输入设为 `subprocess.DEVNULL`；服务监管协议仍使用自己的双向管道。

@@ -10,8 +10,10 @@ from datetime import datetime, timezone
 import copy
 import hashlib
 import json
+import ntpath
 import os
 from pathlib import Path
+import posixpath
 import re
 import tempfile
 import threading
@@ -24,6 +26,19 @@ _SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,79}\Z')
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec='microseconds')
+
+
+def _project_identity(project):
+    """Compare historical paths without changing their saved spelling.
+
+    Drive and UNC paths keep Windows semantics even when history is inspected
+    on another OS. POSIX paths retain their case-sensitive identity on Windows.
+    """
+    if not isinstance(project, str):
+        return project
+    if ntpath.splitdrive(project)[0]:
+        return ('windows', ntpath.normcase(ntpath.normpath(project)))
+    return ('posix', posixpath.normpath(project))
 
 
 def _pid_alive(pid):
@@ -328,6 +343,7 @@ class RunHistory:
     def list(self, project='', limit=20, offset=0):
         if not self.root.exists():
             return []
+        project_key = _project_identity(project) if project else None
         records = []
         for directory in self.root.iterdir():
             if not directory.is_dir():
@@ -336,7 +352,8 @@ class RunHistory:
                 record = self.get(directory.name)
             except (OSError, ValueError):
                 continue
-            if record and (not project or record.get('context', {}).get('project') == project):
+            if record and (not project or _project_identity(
+                    record.get('context', {}).get('project')) == project_key):
                 records.append(record)
         records.sort(key=lambda item: (item.get('created_at', ''), str(item.get('sid', ''))), reverse=True)
         offset, limit = max(0, int(offset)), max(0, int(limit))

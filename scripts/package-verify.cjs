@@ -2,7 +2,7 @@
 const fs=require('node:fs');const path=require('node:path');const {createHash}=require('node:crypto');
 function isAllowedWorkflowFile(file){
  if(typeof file!=='string'||file.includes('\\')||file.split('/').some(part=>['..','.',''].includes(part)))return false;
- const backend = new Set(['core','log_stream','desktop_entry','desktop_features','desktop_supervisor','discovery','engineering_format','engineering','function_profiles','indoor_building_export','managed_process','migration','parameter_catalog','preflight','resource_lock','result_validation','run_guard','run_history','runtime_cleanup','runtime_configs','server','vs_launch'].map(name=>'platform/backend/'+name+'.py'));
+ const backend = new Set(['core','log_stream','desktop_entry','desktop_features','desktop_supervisor','discovery','engineering_format','engineering','function_profiles','indoor_building_export','managed_process','render_process','migration','parameter_catalog','preflight','resource_lock','result_validation','run_guard','run_history','runtime_cleanup','runtime_configs','server','vs_launch'].map(name=>'platform/backend/'+name+'.py'));
  const scripts = new Set(['dll_dependencies','file_safety','indoor_maps','patch_gongcan','project_config','project_detection','project_workflow','render_schema','run_local','runtime_paths','task_schema'].map(name=>'scripts/'+name+'.py'));
  const batches = new Set(['build_local','doctor_local','load_local_env','run_local','stage_local','validate_local_python'].map(name=>'scripts/'+name+'.bat'));
  return backend.has(file) || scripts.has(file) || batches.has(file) ||
@@ -28,7 +28,7 @@ function verifyPackage(unpacked){
  const workflowFiles=verifyManifestTree(workflow,info.workflowHashes,isAllowedWorkflowFile);
  const runtimeFiles=verifyManifestTree(python,info.pythonHashes);
  const noticeFiles=verifyManifestTree(path.join(resources,'third-party'),info.noticeHashes);
- for(const required of ['platform/backend/desktop_entry.py','platform/backend/desktop_supervisor.py','platform/backend/core.py','platform/backend/params_spec.json','scripts/runtime_paths.py','scripts/render_schema.py','scripts/build_local.bat','templates/runtimeschema.xml.tpl','templates/runtimeschema-indoor.xml.tpl','desktop-ui/dist/index.html'])if(!info.workflowHashes[required])throw new Error('Required workflow file missing: '+required);
+ for(const required of ['platform/backend/desktop_entry.py','platform/backend/desktop_supervisor.py','platform/backend/core.py','platform/backend/render_process.py','platform/backend/params_spec.json','scripts/runtime_paths.py','scripts/render_schema.py','scripts/build_local.bat','templates/runtimeschema.xml.tpl','templates/runtimeschema-indoor.xml.tpl','desktop-ui/dist/index.html'])if(!info.workflowHashes[required])throw new Error('Required workflow file missing: '+required);
  for(const required of ['python.exe','python313.dll','python313.zip','python313._pth','LICENSE.txt','runtime-manifest.json'])if(!info.pythonHashes[required])throw new Error('Required Python file missing: '+required);
  const runtime=JSON.parse(fs.readFileSync(path.join(python,'runtime-manifest.json'),'utf8'));const pin=require('./prepare-python.cjs').PYTHON;
  if(runtime.archiveSha256!==pin.sha256||runtime.version!==pin.version)throw new Error('Unpinned Python runtime');

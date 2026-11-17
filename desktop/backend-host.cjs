@@ -81,6 +81,9 @@ class BackendHost extends EventEmitter {
   }
   async stop({ timeout = 30000 } = {}) {
     if (!this.child || this.exitResult) return;
+    // Shutdown is irreversible: after its request times out the service may
+    // already be finalizing and no longer reading control messages.
+    if (this.stopping) { await this.waitForExit(timeout); return; }
     this.stopping = true;
     // The ack means domain shutdown and archive finalization have completed.
     await this.request('shutdown', timeout);
