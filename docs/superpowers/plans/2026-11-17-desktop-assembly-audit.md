@@ -22,4 +22,12 @@
 - [x] Audit process lifecycle/stop and frontend state independently. Implement only confirmed workflow defects, each with a failing regression and passing correction.
 - [x] Expand `tests/desktop_packaged_toolkit.py` to use the real supervisor, service, API, assembly, parameters, preflight, execution, logs/history/results, with the control pipe continuously open. Confirm legacy assembly fails and the correction succeeds.
 - [x] Run complete Python, Web/desktop and Vue checks and type checking; verify the production UI during packaging. Review changes, update version/release/acceptance records, commit the verified patch.
-- [ ] Build an offline installer in its own version directory. Run package verification, desktop smoke, the full API workflow against final packaged resources, and verify checksums and clean source revision before delivery.
+- [x] Build an offline installer in its own version directory. Run package verification, desktop smoke, the full API workflow against final packaged resources, and verify checksums and clean source revision before delivery.
+
+## Completion evidence
+
+- Source implementation: `db14ffb`; final package 0.1.3 records a clean build of that commit.
+- Core Python 744 checks (2 skipped), acceptance cleanup helper 1 check/7 scenarios; Web/desktop 158 and Vue 46 checks passed, plus typecheck and production build.
+- Packaged desktop smoke 13 checks and actual packaged full API workflow 22 checks passed; 5 sessions, 208 requests, 5 assemblies at 0.372–0.719 seconds.
+- Package resources and installer checksum verified. Evidence: `release/stable/0.1.3/smoke/`; release documentation updated after packaging without changing packaged implementation.
+- Actual installed user application was not overwritten; install the delivered patch to use the fixes. No real user engine calculation or business-data mutation was performed.
