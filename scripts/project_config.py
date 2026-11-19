@@ -11,10 +11,9 @@ import tempfile
 import threading
 
 ROOT = Path(__file__).resolve().parents[1]
-FIELDS = ('PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME', 'VS_ROOT',
-          'CMAKE', 'NINJA', 'VCVARS', 'CONFIG_SRC', 'DLL_SRC', 'MAP_ROOT',
-          'OUT_ROOT', 'DT_ROOT', 'GONGCAN_ROOT')
 MACHINE_FIELDS = ('VS_ROOT', 'CMAKE', 'NINJA', 'VCVARS')
+RESOURCE_PATH_FIELDS = ('CONFIG_SRC', 'DLL_SRC', 'MAP_ROOT', 'OUT_ROOT', 'DT_ROOT', 'GONGCAN_ROOT')
+FIELDS = ('PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME') + MACHINE_FIELDS + RESOURCE_PATH_FIELDS
 PROJECT_FIELDS = tuple(key for key in FIELDS if key not in MACHINE_FIELDS)
 IDENTITY = ('PROJECT_DIR', 'PROJECT_PROFILE_ID', 'PROJECT_PROFILE_REVISION')
 LOCK = threading.RLock()
@@ -122,6 +121,7 @@ class ProjectStore:
 
     def _read(self, persist=True):
         legacy = {}
+        changed = False
         if self.file.is_file():
             data = json.loads(self.file.read_text(encoding='utf-8'))
             if data.get('version') != 1 or not isinstance(data.get('profiles'), dict):
@@ -148,8 +148,7 @@ class ProjectStore:
             for profile in data['profiles'].values():
                 for key in MACHINE_FIELDS:
                     profile['values'].pop(key, None)
-            if persist:
-                atomic_json(self.file, data)
+            changed = True
         retired = [profile for profile in data['profiles'].values() if 'CASE_ROOT' in profile['values']]
         if retired:
             backup = Path(str(self.file) + '.retired-fields.bak')
@@ -158,8 +157,27 @@ class ProjectStore:
             for profile in retired:
                 profile['values'].pop('CASE_ROOT')
                 profile['revision'] += 1
-            if persist:
-                atomic_json(self.file, data)
+            changed = True
+        if 'shared_paths' not in data:
+            profiles = data['profiles']
+            shared = data['shared_paths'] = {}
+            # Prefer the active project's paths; use other profiles only to fill gaps.
+            for key in sorted(profiles, key=lambda key: key != data['active']):
+                values = profiles[key]['values']
+                for field in RESOURCE_PATH_FIELDS:
+                    value = values.get(field, '')
+                    if Path(value).is_absolute():
+                        shared.setdefault(field, value)
+                        values[field] = ''
+            if shared:
+                backup = Path(str(self.file) + '.shared-paths.bak')
+                if persist and self.file.is_file() and not backup.exists():
+                    shutil.copy2(self.file, backup)
+                for profile in profiles.values():
+                    profile['revision'] += 1
+            changed = True
+        if persist and changed:
+            atomic_json(self.file, data)
         return data
 
     @staticmethod
@@ -169,7 +187,9 @@ class ProjectStore:
 
     @staticmethod
     def _env(key, profile, data):
-        return dict(profile['values'], **data['machine']['values'],
+        values = dict(profile['values'])
+        values.update({k: v for k, v in data['shared_paths'].items() if not values.get(k)})
+        return dict(values, **data['machine']['values'],
                     MACHINE_CONFIG_REVISION=str(data['machine'].get('revision', 1)), PROJECT_DIR=profile['path'],
                     PROJECT_PROFILE_ID=key, PROJECT_PROFILE_REVISION=str(profile['revision']))
 
@@ -214,9 +234,23 @@ class ProjectStore:
             if revision is not None and str(revision) != str(profile['revision']):
                 raise ValueError('项目配置已变化，请刷新后重试')
             machine_changed = self._update_machine(data, {k:v for k,v in values.items() if k in MACHINE_FIELDS})
-            profile['values'].update({k:v for k,v in values.items() if k in PROJECT_FIELDS})
+            local = profile['values']
+            shared = data['shared_paths']
+            previous_shared = shared.copy()
+            for field, value in values.items():
+                if field in MACHINE_FIELDS:
+                    continue
+                if field in RESOURCE_PATH_FIELDS:
+                    if Path(value).is_absolute():
+                        shared[field] = value
+                        value = ''
+                    elif not value and not local.get(field):
+                        shared.pop(field, None)
+                local[field] = value
             if not machine_changed:
-                profile['revision'] += 1
+                affected = data['profiles'].values() if shared != previous_shared else (profile,)
+                for item in affected:
+                    item['revision'] += 1
             atomic_json(self.file, data)
             return self._env(key, profile, data)
 

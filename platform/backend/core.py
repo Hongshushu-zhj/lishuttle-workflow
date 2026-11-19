@@ -66,7 +66,7 @@ def load_env():
 
 
 def save_env_keys(**kwargs):
-    """只写当前项目档案；legacy env 仅用作首次导入。"""
+    """写入本地配置档案；legacy env 仅用作首次导入。"""
     store = ProjectStore(ENV_FILE)
     if 'PROJECT_DIR' in kwargs:
         env = store.select(kwargs.pop('PROJECT_DIR'))

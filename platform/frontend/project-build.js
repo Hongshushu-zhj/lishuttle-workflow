@@ -110,7 +110,7 @@ function renderConfigFields(id, machine) {
       candidates.map(c => `<option value="${attr(c.value)}" ${!manual && value === c.value ? 'selected' : ''}>${esc(c.label || c.value)}</option>`).join('') +
       `<option value="__manual__" ${manual ? 'selected' : ''}>手动填写其他路径或值</option></select>` : '';
     const source = S.configTouched?.has(key) || (machine && value !== (S.projectConfig[key] || '')) ? '当前未保存的选择或输入' :
-      S.projectConfig[key] ? (machine ? '本机全局已保存 · 所有项目共用' : '当前项目已保存配置') :
+      S.projectConfig[key] ? (machine ? '本机全局已保存 · 所有项目共用' : field?.source || '已保存路径') :
         field?.source || (machine ? '未检测到，请安装对应工具后重新检测或手动填写' : '正在检测；也可手动填写');
     return `<label>${label} · ${key}${choice}<input id="config-${key}" class="txt" type="${manual ? 'text' : 'hidden'}" data-config-key="${key}" value="${attr(value)}" aria-label="${attr(label)}">` +
       `<small class="field-help">${esc(source)}</small></label>`;
@@ -202,7 +202,7 @@ function setupError(result) {
 
 function configDraftNote(key) {
   $(MACHINE_KEYS.includes(key) ? 'machine-config-note' : 'project-config-note').textContent =
-    MACHINE_KEYS.includes(key) ? '本机工具链已修改；保存后应用于所有项目。' : '配置已修改；保存当前项目配置后生效。';
+    MACHINE_KEYS.includes(key) ? '本机工具链已修改；保存后应用于所有项目。' : '配置已修改，尚未保存。';
 }
 
 function matchingToolchain(toolchains, root) {
@@ -307,7 +307,7 @@ async function refreshProjectDetection() {
     });
     renderProjectConfig();
     const unresolved = ['CONFIG_SRC','DLL_SRC','MAP_ROOT','GONGCAN_ROOT','OUT_ROOT'].filter(key => !S.projectDraft[key]);
-    $("project-config-note").textContent = `检测完成，自动填充 ${filled} 项；保存当前项目配置后生效。` +
+    $("project-config-note").textContent = `检测完成，自动填充 ${filled} 项；保存后生效。` +
       (unresolved.length ? `待选择或填写：${unresolved.map(key=>PROFILE_LABELS[key]).join('、')}。` : '') +
       ((result.warnings || []).length ? `检测提示：${result.warnings.join('；')}` : '');
     if (filled || unresolved.length) {

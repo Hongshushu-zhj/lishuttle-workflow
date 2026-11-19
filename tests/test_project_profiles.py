@@ -1,4 +1,4 @@
-"""Project resources stay isolated; installed tools are shared machine settings."""
+"""Shared paths and tools with independent project build settings."""
 import json
 import os
 from pathlib import Path
@@ -53,6 +53,64 @@ class ProjectProfileTests(unittest.TestCase):
         self.assertEqual(self.store.select(str(self.a))['PRESET'], 'A')
         self.assertEqual(self.store.select(str(self.b))['BUILD_SUBDIR'], 'out/B')
         self.assertNotEqual(a['PROJECT_PROFILE_ID'], b['PROJECT_PROFILE_ID'])
+
+    def test_saved_absolute_paths_are_reused_by_a_new_project(self):
+        paths = {key: (self.root / key).as_posix() for key in (
+            'CONFIG_SRC', 'DLL_SRC', 'MAP_ROOT', 'GONGCAN_ROOT', 'OUT_ROOT', 'DT_ROOT')}
+        with patch.object(core, 'ENV_FILE', str(self.env)), \
+                patch.object(core, 'PROJECTS_FILE', str(self.root / 'projects.json')), \
+                patch('project_detection.machine_tools', return_value={}):
+            saved = Api.save_project_config({'values': paths})
+            self.assertNotIn('error', saved)
+            switched = Api.add_project({'path': str(self.b)})
+        self.assertEqual(switched['project'], self.b.as_posix())
+        self.assertEqual(switched['project_config']['PRESET'], '')
+        for key, path in paths.items():
+            self.assertEqual(switched['project_config'][key], path, key)
+        self.assertEqual(project_config.load_local(self.env, project=self.b)['OUT_ROOT'], paths['OUT_ROOT'])
+        self.assertEqual(self.store.load(self.a)['PRESET'], 'A')
+
+    def test_existing_absolute_paths_migrate_before_switching(self):
+        a = self.store._blank(self.a)
+        b = self.store._blank(self.b)
+        a['values'].update(MAP_ROOT=(self.root / 'maps').as_posix(), CONFIG_SRC='ThirdPart/Config')
+        b['values'].update(MAP_ROOT=(self.root / 'old-maps').as_posix(),
+                           DT_ROOT=(self.root / 'drivetest').as_posix())
+        a_id, b_id = map(project_config.project_id, (self.a, self.b))
+        self.file.write_text(json.dumps(dict(version=1, active=a_id, profiles={b_id: b, a_id: a},
+            machine={'revision': 1, 'values': dict.fromkeys(project_config.MACHINE_FIELDS, '')})), encoding='utf-8')
+        before = self.file.read_bytes()
+        self.assertEqual(self.store.load(read_only=True)['DT_ROOT'], b['values']['DT_ROOT'])
+        self.assertEqual(self.file.read_bytes(), before)
+        switched = self.store.select(self.b)
+        self.assertEqual(switched['MAP_ROOT'], a['values']['MAP_ROOT'])
+        self.assertEqual(switched['DT_ROOT'], b['values']['DT_ROOT'])
+        self.assertEqual(switched['CONFIG_SRC'], '')
+        self.assertEqual(self.store.load(self.a)['CONFIG_SRC'], a['values']['CONFIG_SRC'])
+        self.assertEqual(Path(str(self.file) + '.shared-paths.bak').read_bytes(), before)
+
+    def test_updating_shared_path_invalidates_old_revision_not_snapshot(self):
+        old = (self.root / 'old-output').as_posix()
+        new = (self.root / 'new-output').as_posix()
+        a = self.store.save({'OUT_ROOT': old})
+        snapshot = project_config.write_snapshot(a, self.root / 'snapshots')
+        self.store.select(self.b)
+        self.store.save({'OUT_ROOT': new})
+        self.assertEqual(self.store.load(self.a)['OUT_ROOT'], new)
+        with self.assertRaisesRegex(ValueError, '变化'):
+            self.store.save({'PRESET': 'stale'}, a['PROJECT_PROFILE_REVISION'], project=self.a)
+        self.assertEqual(project_config.load_local(snapshot=snapshot)['OUT_ROOT'], old)
+
+    def test_relative_path_overrides_shared_default_only_in_its_project(self):
+        shared = (self.root / 'shared-config').as_posix()
+        self.store.save({'CONFIG_SRC': shared})
+        self.store.select(self.b)
+        self.store.save({'CONFIG_SRC': 'ThirdPart/Config'})
+        self.assertEqual(self.store.load()['CONFIG_SRC'], 'ThirdPart/Config')
+        self.assertEqual(self.store.load(self.a)['CONFIG_SRC'], shared)
+        self.assertEqual(self.store.save({'CONFIG_SRC': ''})['CONFIG_SRC'], shared)
+        self.store.save({'CONFIG_SRC': ''})
+        self.assertEqual(self.store.load(self.a)['CONFIG_SRC'], '')
 
     def test_stale_revision_and_unknown_keys_are_rejected_without_writing(self):
         old = self.store.load()

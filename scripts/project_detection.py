@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 
-from project_config import FIELDS
+from project_config import FIELDS, RESOURCE_PATH_FIELDS
 from indoor_maps import indoor_floor_files
 
 
@@ -273,7 +273,9 @@ def detect_project_config(env, machine=None):
         saved = env.get(key, '')
         choices = field['candidates']
         if saved:
-            value, status, source = saved, 'saved', '当前项目已保存配置'
+            value, status = saved, 'saved'
+            source = ('已保存的共享路径' if key in RESOURCE_PATH_FIELDS and Path(saved).is_absolute()
+                      else '当前项目已保存配置')
         elif key in linked_tools and any(c['value'] == linked_tools[key] for c in choices):
             value, status, source = linked_tools[key], 'detected', '所选 VS 安装内的已验证工具'
         elif key in linked:

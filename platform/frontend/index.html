@@ -39,7 +39,7 @@
     <div class="project-location"><span class="field-help">项目目录</span><p id="current-project-path" class="project-path">尚未选择项目</p></div>
     <p id="env-note" class="field-help"></p>
   </div>
-  <div class="section-heading"><p class="field-help">在此选择或切换项目，确认目录与资源位置；配置保存在当前项目。</p>
+  <div class="section-heading"><p class="field-help">构建配置与资源路径</p>
 <button id="btn-project-add" data-runtime-write aria-expanded="false" aria-controls="project-add-form">添加项目</button><button id="btn-project-config" aria-expanded="false" aria-controls="project-config-form">项目配置</button></div>  <form id="project-add-form" class="project-add-form hidden">
     <label for="project-path">项目根目录</label>
     <input id="project-path" class="txt" placeholder="输入或粘贴 LiShuttle 项目所在文件夹的完整路径" required>
@@ -47,9 +47,8 @@
     <span class="field-help">按目录内容识别，不限制项目名称。添加后保存在本机列表。</span>
   </form>
   <form id="project-config-form" class="hidden">
-    <p class="field-help">打开项目时自动检测本项目的预设和资源目录，确定的值直接填入，多个候选可下拉选择或手动填写。每项下方显示来源；保存后仅对当前项目生效。本机工具链请在上方全局入口配置。</p>
     <div id="project-config-fields" class="profile-fields"></div>
-    <button type="submit" data-runtime-write class="primary">保存当前项目配置</button>
+    <button type="submit" data-runtime-write class="primary">保存配置</button>
     <button type="button" id="btn-project-detect">重新检测</button>
     <span id="project-config-note" role="status"></span>
   </form>

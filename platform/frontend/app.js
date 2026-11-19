@@ -168,8 +168,8 @@ async function init() {
         const st = await post('save_project_config', {values});
         if (st.error) return toast(st.error, false);
         applyProjectState(st, {preserveMachineDraft:true});
-        $("project-config-note").textContent = '当前项目配置已保存，任务选择与旧预览已清理。';
-        toast('当前项目配置已保存');
+        $("project-config-note").textContent = '配置已保存，任务选择与旧预览已清理。';
+        toast('配置已保存');
       });
     } catch(error) { toast('保存项目配置失败：'+error.message,false); }
   };

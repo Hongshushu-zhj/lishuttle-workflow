@@ -71,10 +71,10 @@ python .\scripts\project_config.py --show-machine
 | 配置范围 | 配置项 | 使用方式 |
 | --- | --- | --- |
 | 本机全局 | `VS_ROOT`、`CMAKE`、`NINJA`、`VCVARS` | 自动搜索后直接保存；所有引擎项目和本地脚本共用 |
-| 每个引擎项目 | 构建模式/预设、`CONFIG_SRC`、`DLL_SRC` | 选择 Debug/Release 后自动派生构建/安装目录、程序名；确认资源后保存 |
-| 每个项目的数据 | `MAP_ROOT`、`GONGCAN_ROOT`、`OUT_ROOT`、`DT_ROOT` | 按真实业务数据选择，可显式指向共享目录 |
+| 每个引擎项目 | 构建模式/预设、相对资源路径 | 选择 Debug/Release 后自动派生构建/安装目录、程序名；相对路径只在当前项目生效 |
+| 本机共享路径 | `CONFIG_SRC`、`DLL_SRC`、`MAP_ROOT`、`GONGCAN_ROOT`、`OUT_ROOT`、`DT_ROOT` 的绝对路径 | 保存一次，其他项目默认复用；已保存的项目相对路径优先 |
 
-这里的“全局”指**本机这份平台仓库管理的所有引擎项目**，不是 Windows 系统设置，也不跨其他 clone 自动同步。配置保存在被 Git 忽略的 `env/project-profiles.json` 中：全局工具在顶层 `machine.values`，项目配置在 `profiles.<项目ID>.values`。换电脑请重新 clone 并自动检测，不要复制另一台电脑的本机配置或快照。
+这里的“全局”指**本机这份平台仓库管理的所有引擎项目**，不是 Windows 系统设置，也不跨其他 clone 自动同步。配置保存在被 Git 忽略的 `env/project-profiles.json` 中：全局工具在 `machine.values`，共享路径在 `shared_paths`，项目配置在 `profiles.<项目ID>.values`。换电脑请重新 clone 并自动检测，不要复制另一台电脑的本机配置或快照。
 
 “项目与环境”中的“本机工具链（全局）”可查看当前值和下拉候选。点击“自动检测并保存本机工具链”会重新搜索并补齐空缺；已经保存的自定义值保持不变。需要改用另一套工具时，选择候选或切换“手动填写”，然后点击“保存本机工具链”，立即对所有项目生效。改变全局配置会让旧页面修订失效，其他已打开页面需要刷新；已经启动的命令继续使用启动时的配置快照。
 
@@ -95,11 +95,13 @@ python .\scripts\project_config.py --set-machine "VS_ROOT=" --set-machine "CMAKE
 
 ### 本地项目档案与切换
 
-网页、渲染器和本地 Windows 脚本共同读取 `env/project-profiles.json`，运行时合并本机全局工具链和所选项目配置。每个项目独立保存构建预设、构建/安装目录、exe 名、配置/DLL 源目录及地图、工参、路测、输出根目录；切换 A→B→A 会恢复各自项目配置，并复用同一份本机工具链。没有旧 env 时也可以在网页添加首个项目。
+网页、渲染器和本地 Windows 脚本共同读取 `env/project-profiles.json`，运行时合并本机工具链、共享路径和所选项目的配置。切换 A→B→A 会恢复各自的构建设置与相对路径，同时复用已保存的共享路径。没有旧 env 时也可以在网页添加首个项目。
 
 打开或切换项目时，网页会自动检测并填充尚未配置的项目字段：读取本项目的 `CMakePresets.json` / `CMakeUserPresets.json`（含继承和 include），优先选用已有可执行文件的 Windows x64 Ninja 预设；从项目内容识别程序名、配置源和 DLL 目录。地图、工参、输出和路测目录只列出实际存在的约定目录，包括明确标注的同级共享候选；多个业务目录需下拉选择，未找到则说明原因并允许手动填写，不会编造路径。
 
-“项目配置”直接显示检测值和每项来源，候选可下拉选择或切换手动填写。通过上方 Debug/Release 和项目预设选择构建配置，自动派生构建/安装目录、程序名和匹配的 DLL 目录，不再手填这些构建字段。自定义 DLL 目录仍保留。已保存的项目配置和本次手动输入不会被重新检测覆盖，也不会继承其他项目档案。**项目检测结果是草稿，点击“保存当前项目配置”后生效；本机工具链自动检测则直接保存。**
+“项目配置”直接显示检测值和每项来源，候选可下拉选择或切换手动填写。通过上方 Debug/Release 和项目预设选择构建配置，自动派生构建/安装目录、程序名和匹配的 DLL 目录，不再手填这些构建字段。自定义 DLL 目录仍保留。已保存的路径和本次手动输入不会被重新检测覆盖。清空项目相对路径后会恢复共享默认值；清空已显示的共享路径后则移除共享默认值。**项目检测结果是草稿，点击“保存配置”后生效；本机工具链自动检测则直接保存。**
+
+旧档案的绝对资源路径会自动迁移：优先使用升级前活动项目的值，其余档案只补空缺；旧档案备份为 `project-profiles.json.shared-paths.bak`。
 
 升级已有配置时：旧 `env/local-win.env` 首次导入前备份为 `local-win.env.profiles.bak`；旧版项目工具链首次升级前备份整个档案为 `project-profiles.json.machine.bak`。迁移使用当前活动项目的工具配置作为全局起点，不拼接其他项目的工具值，其余项目原来的工具值可从备份查看。旧 env、原有备份及任务数据保持不变。**导入后请用网页或上述命令修改；继续编辑旧 env 不会覆盖档案。** 本机配置、备份及快照不提交 Git。配置源与 DLL 源可以是相对项目路径，也可以是本机绝对路径；构建/安装目录沿用相对项目的目录约定。
 
@@ -174,7 +176,7 @@ LiShuttle C++ 项目、地图和任务包的位置由我提供；缺少位置时
 | `OUT_ROOT` | 可写的结果根目录，通常按任务名存放计算产物 |
 | `DT_ROOT` | 可选：仅路测、校正等相关功能需要的数据目录 |
 
-平台不自动登记父目录中的其他引擎项目。在项目入口点击“添加项目”，输入项目根目录，通过验证后加入本机列表并切换。目录名称不限，以 `CMakeLists.txt`、`LiShuttle/`、`SwanUtility/incl/LiShuttleTypes.h` 组合识别；缺少构建预设或完整运行样例时给出提示。本机列表保存于 `env/projects.json`（不提交 Git），升级前已配置的当前项目会保留。切换时刷新功能、地图和任务列表，并清空旧项目的参数与运行状态；工具链复用本机全局配置，预设与数据根恢复对应项目配置。
+平台不自动登记父目录中的其他引擎项目。在项目入口点击“添加项目”，输入项目根目录，通过验证后加入本机列表并切换。目录名称不限，以 `CMakeLists.txt`、`LiShuttle/`、`SwanUtility/incl/LiShuttleTypes.h` 组合识别；缺少构建预设或完整运行样例时给出提示。本机列表保存于 `env/projects.json`（不提交 Git），升级前已配置的当前项目会保留。切换时刷新功能、地图和任务列表，并清空旧项目的参数与运行状态；预设恢复对应项目的配置，工具链和共享路径直接复用。
 
 配置后创建缺失的输出和工作目录，例如 `OUT_ROOT`。不要用空文件夹替代真实地图或依赖。
 
@@ -510,7 +512,7 @@ python .\scripts\render_schema.py .\jobs\my-pl.env local-win
 | 地图按根目录下的直接子目录识别，有 `.das` 文件即室内，否则以 `heights/index.txt` 判定室外 | `.das` 扩展名忽略大小写和文件名长度，室内优先；根目录应填各场景的父目录，不递归搜索更深目录；扫描通过仅表示文件已发现，运行前仍检查引擎兼容性和地图内容 | [indoor_maps.py](scripts/indoor_maps.py)、[core.py](platform/backend/core.py)：`scan_cities`；[task_schema.py](scripts/task_schema.py) |
 | 任务按任务根目录的子目录组织；天线、模型等资源使用约定名称 | 支持 `antenna/`、`antennas/`、`models/` 等约定，不会自动理解任意资源名称；XML 和 CSV 则按内容识别 | [core.py](platform/backend/core.py)：`scan_tasks`、`assemble_files` |
 | 体检固定检查 `ThirdPart/Lib`、`uplancommon.lib`、`lishuttlectl.lib` 等 | 没有独立的 `LIB_SRC` 配置；依赖库布局或名称不同需要调整体检脚本，并同步核对引擎 CMake | [doctor_local.bat](scripts/doctor_local.bat) |
-| 每个项目独立保存配置和任务地图绑定 | 新项目自动检测空白配置并显示候选，需明确保存；可显式引用共享数据目录，同一平台服务在运行及收尾期间锁定相关输入与配置 | [project_config.py](scripts/project_config.py)、[project_detection.py](scripts/project_detection.py)、[server.py](platform/backend/server.py) |
+| 构建设置和任务地图绑定按项目保存 | 新项目复用共享路径，仍为空的字段自动检测并显示候选；同一平台服务在运行及收尾期间锁定相关输入与配置 | [project_config.py](scripts/project_config.py)、[project_detection.py](scripts/project_detection.py)、[server.py](platform/backend/server.py) |
 | 服务只监听 `127.0.0.1`；启动/停止脚本针对默认端口 8641 | CLI 可用 `--port` 修改服务端口，但停止脚本仍针对默认端口；目前是本机网页，不是开箱即用的局域网多人部署 | [server.py](platform/backend/server.py)、[启动平台.bat](启动平台.bat)、[停止平台.bat](停止平台.bat) |
 
 **结论：兼容目录结构的其他 Windows 电脑可通过本机配置复用；其他操作系统或不同引擎内部布局，仍存在需要改代码的适配项。** 项目档案与本地任务绑定有自动化回归覆盖；尚未在全新电脑上验证安装或运行真实引擎计算。
