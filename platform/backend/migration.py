@@ -13,6 +13,7 @@ import ntpath
 import posixpath
 from file_safety import atomic_write
 from project_config import ProjectStore, FIELDS, MACHINE_FIELDS, PROJECT_FIELDS, atomic_json, project_id
+from project_config import RESOURCE_PATH_FIELDS, RESOURCE_PATH_GROUPS
 from task_schema import LOCAL_PATHS
 
 
@@ -212,6 +213,8 @@ class LegacyImporter:
         for name in sorted(MACHINE_FIELDS):
             if name in updated['machine']['values']:
                 updated['machine']['values'][name] = replace(updated['machine']['values'][name], 'machine.values.' + name)
+        for name, value in updated['shared_paths'].items():
+            updated['shared_paths'][name] = replace(value, 'shared_paths.' + name)
         return updated, changes
 
     def _source(self, source_root):
@@ -262,6 +265,10 @@ class LegacyImporter:
             raise ValueError('本机配置字段不兼容')
         if any(not isinstance(v, str) or any(c in v for c in '\0\r\n"') for v in values.values()):
             raise ValueError('本机工具路径无效')
+        shared = data['shared_paths']
+        if (not isinstance(shared, dict) or set(shared) - set(RESOURCE_PATH_FIELDS)
+                or any(not LegacyImporter._absolute(v) or any(c in v for c in '\0\r\n"') for v in shared.values())):
+            raise ValueError('共享资源路径无效')
         if data.get('active') and data['active'] not in data['profiles']:
             raise ValueError('当前项目标识不存在')
 
@@ -446,7 +453,16 @@ class LegacyImporter:
                 bindings += len(profile.get('bindings', {}))
             machine_values = updated['machine']['values']
             fill = {key: value for key, value in source['machine']['values'].items() if value and not machine_values.get(key)}
-            ProjectStore._update_machine(updated, fill)
+            machine_changed = ProjectStore._update_machine(updated, fill)
+            shared = updated['shared_paths']
+            shared_fill = {key: source['shared_paths'][key] for group in RESOURCE_PATH_GROUPS
+                           if not any(key in shared for key in group)
+                           for key in group if key in source['shared_paths']}
+            if shared_fill:
+                shared.update(shared_fill)
+                if not machine_changed:
+                    for profile in updated['profiles'].values():
+                        profile['revision'] += 1
             if not updated['active']:
                 updated['active'] = source.get('active') or next(iter(updated['profiles']), '')
             stamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S-') + secrets.token_hex(4)

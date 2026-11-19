@@ -54,6 +54,74 @@ class ProjectProfileTests(unittest.TestCase):
         self.assertEqual(self.store.select(str(self.b))['BUILD_SUBDIR'], 'out/B')
         self.assertNotEqual(a['PROJECT_PROFILE_ID'], b['PROJECT_PROFILE_ID'])
 
+    def test_shared_paths_are_reused_when_adding_a_project(self):
+        paths = {key: (self.root / key).as_posix() for key in (
+            'CONFIG_SRC', 'DLL_SRC', 'MAP_ROOT', 'GONGCAN_ROOT', 'OUT_ROOT', 'DT_ROOT')}
+        with patch.object(core, 'ENV_FILE', str(self.env)), \
+                patch.object(core, 'PROJECTS_FILE', str(self.root / 'projects.json')), \
+                patch('project_detection.machine_tools', return_value={}):
+            self.assertNotIn('error', Api.save_project_config({'values': paths}))
+            state = Api.add_project({'path': str(self.b)})
+        self.assertEqual(state['project'], self.b.as_posix())
+        self.assertEqual(state['project_config']['PRESET'], '')
+        self.assertEqual({key: state['project_config'][key] for key in paths}, paths)
+        self.assertEqual(self.store.load(self.a)['PRESET'], 'A')
+
+    def test_shared_path_migration_preserves_backup_and_relative_override(self):
+        a = self.store._blank(self.a)
+        b = self.store._blank(self.b)
+        a['values'].update(MAP_ROOT=(self.root / 'maps').as_posix(), CONFIG_SRC='ThirdPart/Config')
+        b['values'].update(MAP_ROOT=(self.root / 'old-maps').as_posix(),
+                           DT_ROOT=(self.root / 'drivetest').as_posix(),
+                           CONFIG_SRC=(self.root / 'shared-config').as_posix())
+        a_id, b_id = map(project_config.project_id, (self.a, self.b))
+        project_config.atomic_json(self.file, dict(version=1, active=a_id, profiles={b_id: b, a_id: a},
+            machine={'revision': 1, 'values': dict.fromkeys(project_config.MACHINE_FIELDS, '')}))
+        original = self.file.read_bytes()
+        self.assertEqual(self.store.load(read_only=True)['DT_ROOT'], b['values']['DT_ROOT'])
+        self.assertEqual(self.file.read_bytes(), original)
+        switched = self.store.select(self.b)
+        self.assertEqual(switched['MAP_ROOT'], a['values']['MAP_ROOT'])
+        self.assertEqual(switched['CONFIG_SRC'], b['values']['CONFIG_SRC'])
+        self.assertEqual(self.store.load(self.a)['CONFIG_SRC'], a['values']['CONFIG_SRC'])
+        self.assertEqual(Path(str(self.file) + '.shared-paths.bak').read_bytes(), original)
+
+    def test_shared_path_changes_invalidate_other_projects_but_not_a_snapshot(self):
+        old = (self.root / 'old-output').as_posix()
+        new = (self.root / 'new-output').as_posix()
+        a = self.store.save({'OUT_ROOT': old})
+        snapshot = project_config.write_snapshot(a, self.root / 'snapshots')
+        self.store.select(self.b)
+        self.store.save({'OUT_ROOT': new})
+        self.assertEqual(self.store.load(self.a)['OUT_ROOT'], new)
+        with self.assertRaisesRegex(ValueError, '变化'):
+            self.store.save({'PRESET': 'stale'}, a['PROJECT_PROFILE_REVISION'], project=self.a)
+        self.assertEqual(project_config.load_local(snapshot=snapshot)['OUT_ROOT'], old)
+
+    def test_project_local_resource_roots_do_not_bind_other_projects_to_their_prefix(self):
+        config = self.a / 'ThirdPart/Config'
+        dll = self.a / 'ThirdPart/Dll'
+        saved = self.store.save({'CONFIG_SRC': str(config), 'DLL_ROOT': str(dll)})
+        self.assertEqual(saved['CONFIG_SRC'], 'ThirdPart/Config')
+        self.assertEqual(saved['DLL_ROOT'], 'ThirdPart/Dll')
+        switched = self.store.select(self.b)
+        self.assertEqual(switched['CONFIG_SRC'], '')
+        self.assertEqual(switched['DLL_ROOT'], '')
+
+    def test_config_source_is_detected_and_known_old_typo_is_migrated(self):
+        for engine in (self.a, self.b):
+            library = engine / 'ThirdPart/Config/runtimelibrary'
+            library.mkdir(parents=True)
+            (library / 'indoorruntimeschema.xml').write_text('<RuntimeSchema/>')
+        old = self.store._blank(self.a)
+        old['values']['CONFIG_SRC'] = 'ThirdPart/Dll/Config'
+        key = project_config.project_id(self.a)
+        project_config.atomic_json(self.file, dict(version=1, active=key, profiles={key: old},
+            machine={'revision': 1, 'values': dict.fromkeys(project_config.MACHINE_FIELDS, '')}))
+        self.assertEqual(self.store.load()['CONFIG_SRC'], 'ThirdPart/Config')
+        self.assertEqual(self.store.select(self.b)['CONFIG_SRC'], 'ThirdPart/Config')
+        self.assertEqual(self.store.save({'CONFIG_SRC': 'custom'})['CONFIG_SRC'], 'custom')
+
     def test_stale_revision_and_unknown_keys_are_rejected_without_writing(self):
         old = self.store.load()
         self.store.save({'PRESET': 'new'}, old['PROJECT_PROFILE_REVISION'])

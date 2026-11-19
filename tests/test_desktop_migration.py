@@ -41,6 +41,7 @@ class MigrationTests(unittest.TestCase):
         self.assertTrue(result['ok'])
         self.assertEqual(self.store.load()['MAP_ROOT'], 'D:/old/maps')
         self.assertEqual(self.store.binding('fixture-key'), {'city': 'a'})
+        self.assertEqual(self.store.select(self.base / 'new-engine')['MAP_ROOT'], 'D:/old/maps')
         self.assertEqual(before, {str(p): p.read_bytes() for p in self.source.rglob('*') if p.is_file()})
 
     def test_stale_preview_checks_both_source_and_target(self):

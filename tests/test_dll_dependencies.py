@@ -127,6 +127,18 @@ class DllTests(unittest.TestCase):
         self.store.save({'DLL_ROOT': '../other-vendor'})
         self.assertEqual(self.store.select(self.project)['DLL_ROOT'], 'ThirdPart/Dll')
 
+    def test_shared_dll_root_resolves_mode_in_each_project(self):
+        shared = (self.root / 'external DLL').as_posix()
+        self.assertEqual(self.store.save({'DLL_ROOT': shared})['DLL_SRC'], shared + '/Release')
+        other = self.root / 'other'
+        other.mkdir()
+        (other / 'CMakePresets.json').write_bytes((self.project / 'CMakePresets.json').read_bytes())
+        self.assertEqual(self.store.select(other)['DLL_ROOT'], shared)
+        self.assertEqual(self.store.save({'PRESET': 'debug'})['DLL_SRC'], shared + '/Debug')
+        self.assertEqual(self.store.save({'DLL_ROOT': '', 'DLL_SRC': '../vendor/bin64'})['DLL_SRC'], '../vendor/bin64')
+        self.assertEqual(self.store.load(self.project)['DLL_SRC'], shared + '/Release')
+        self.assertEqual(self.store.save({'DLL_ROOT': '', 'DLL_SRC': ''})['DLL_SRC'], shared + '/Debug')
+
     def fixture_sync(self):
         source = self.project / 'ThirdPart/Dll/Release'
         binary = self.project / 'out/release/Bin'

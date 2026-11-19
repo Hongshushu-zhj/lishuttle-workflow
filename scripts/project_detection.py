@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 
-from project_config import FIELDS
+from project_config import FIELDS, config_source_candidates
 from indoor_maps import indoor_floor_files
 from dll_dependencies import resolve_dll
 
@@ -242,9 +242,8 @@ def detect_project_config(env, machine=None):
         for key, value in values.items():
             label = value if key == 'EXE_NAME' else f'{preset["label"]} · {value}'
             add(key, value, preset['source'], label + (' · 已编译' if key == 'PRESET' and preset['built'] else ''))
-    for relative in ('ThirdPart/Config', 'Config'):
-        if (project / relative / 'runtimelibrary/runtimeschema.xml').is_file():
-            add('CONFIG_SRC', relative, slash(project / relative))
+    for relative in config_source_candidates(project):
+        add('CONFIG_SRC', relative, slash(project / relative))
     for relative in ('ThirdPart/Dll/Release', 'ThirdPart/Dll/Debug'):
         if (project / relative).is_dir():
             add('DLL_SRC', relative, slash(project / relative))

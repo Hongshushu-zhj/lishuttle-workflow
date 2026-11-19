@@ -13,13 +13,35 @@ from runtime_paths import resolve_paths
 from dll_dependencies import migrate_dll_values, resolve_dll
 
 ROOT = Path(__file__).resolve().parents[1]
-FIELDS = ('PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME', 'VS_ROOT',
-          'CMAKE', 'NINJA', 'VCVARS', 'CONFIG_SRC', 'DLL_ROOT', 'DLL_SRC', 'MAP_ROOT',
-          'OUT_ROOT', 'DT_ROOT', 'GONGCAN_ROOT')
 MACHINE_FIELDS = ('VS_ROOT', 'CMAKE', 'NINJA', 'VCVARS')
+DLL_FIELDS = ('DLL_ROOT', 'DLL_SRC')
+RESOURCE_PATH_GROUPS = (('CONFIG_SRC',), DLL_FIELDS, ('MAP_ROOT',), ('OUT_ROOT',),
+                        ('DT_ROOT',), ('GONGCAN_ROOT',))
+RESOURCE_PATH_FIELDS = tuple(key for group in RESOURCE_PATH_GROUPS for key in group)
+FIELDS = ('PRESET', 'BUILD_SUBDIR', 'INSTALL_SUBDIR', 'EXE_NAME') + MACHINE_FIELDS + RESOURCE_PATH_FIELDS
 PROJECT_FIELDS = tuple(key for key in FIELDS if key not in MACHINE_FIELDS)
 IDENTITY = ('PROJECT_DIR', 'PROJECT_PROFILE_ID', 'PROJECT_PROFILE_REVISION')
 LOCK = threading.RLock()
+
+
+def config_source_candidates(project):
+    for relative in ('ThirdPart/Config', 'Config'):
+        library = Path(project) / relative / 'runtimelibrary'
+        if any((library / schema).is_file() for schema in ('runtimeschema.xml', 'indoorruntimeschema.xml')):
+            yield relative
+
+
+def project_resource_path(value, project, field):
+    path = Path(os.path.normpath(value))
+    if path.is_absolute():
+        try:
+            value = path.relative_to(project).as_posix()
+        except ValueError:
+            return value
+    if (field == 'CONFIG_SRC' and Path(value).as_posix().lower() == 'thirdpart/dll/config'
+            and not (Path(project) / value).is_dir()):
+        return next(config_source_candidates(project), value)
+    return value
 
 
 def validate_runtime_schema_name(schema):
@@ -124,6 +146,7 @@ class ProjectStore:
 
     def _read(self, persist=True):
         legacy = {}
+        changed = False
         if self.file.is_file():
             data = json.loads(self.file.read_text(encoding='utf-8'))
             if data.get('version') != 1 or not isinstance(data.get('profiles'), dict):
@@ -150,8 +173,7 @@ class ProjectStore:
             for profile in data['profiles'].values():
                 for key in MACHINE_FIELDS:
                     profile['values'].pop(key, None)
-            if persist:
-                atomic_json(self.file, data)
+            changed = True
         retired = [profile for profile in data['profiles'].values() if 'CASE_ROOT' in profile['values']]
         if retired:
             backup = Path(str(self.file) + '.retired-fields.bak')
@@ -160,8 +182,7 @@ class ProjectStore:
             for profile in retired:
                 profile['values'].pop('CASE_ROOT')
                 profile['revision'] += 1
-            if persist:
-                atomic_json(self.file, data)
+            changed = True
         migrated = False
         for profile in data['profiles'].values():
             values = profile['values']
@@ -174,7 +195,31 @@ class ProjectStore:
                 values.update(dll)
                 profile['revision'] += 1
                 migrated = True
-        if migrated and persist:
+        if 'shared_paths' not in data:
+            profiles = data['profiles']
+            shared = data['shared_paths'] = {}
+            paths_migrated = False
+            for key in sorted(profiles, key=lambda key: key != data['active']):
+                profile = profiles[key]
+                values = profile['values']
+                for group in RESOURCE_PATH_GROUPS:
+                    field = next((field for field in group if values.get(field)), None)
+                    if field in ('CONFIG_SRC', *DLL_FIELDS):
+                        converted = project_resource_path(values[field], profile['path'], field)
+                        paths_migrated |= converted != values[field]
+                        values[field] = converted
+                    if field and Path(values[field]).is_absolute():
+                        if not any(name in shared for name in group):
+                            shared[field] = values[field]
+                        values.update(dict.fromkeys(group, ''))
+            if shared or paths_migrated:
+                backup = Path(str(self.file) + '.shared-paths.bak')
+                if persist and self.file.is_file() and not backup.exists():
+                    shutil.copy2(self.file, backup)
+                for profile in profiles.values():
+                    profile['revision'] += 1
+            changed = True
+        if persist and (changed or migrated):
             atomic_json(self.file, data)
         return data
 
@@ -185,7 +230,13 @@ class ProjectStore:
 
     @staticmethod
     def _env(key, profile, data):
-        env = dict(profile['values'], **data['machine']['values'],
+        values, shared = dict(profile['values']), data['shared_paths']
+        for group in RESOURCE_PATH_GROUPS:
+            if not any(values.get(field) for field in group):
+                values.update({field: shared[field] for field in group if field in shared})
+        if not values.get('CONFIG_SRC'):
+            values['CONFIG_SRC'] = next(config_source_candidates(profile['path']), '')
+        env = dict(values, **data['machine']['values'],
                     MACHINE_CONFIG_REVISION=str(data['machine'].get('revision', 1)), PROJECT_DIR=profile['path'],
                     PROJECT_PROFILE_ID=key, PROJECT_PROFILE_REVISION=str(profile['revision']))
         dll = resolve_dll(env)
@@ -233,12 +284,32 @@ class ProjectStore:
             if revision is not None and str(revision) != str(profile['revision']):
                 raise ValueError('项目配置已变化，请刷新后重试')
             machine_changed = self._update_machine(data, {k:v for k,v in values.items() if k in MACHINE_FIELDS})
-            profile['values'].update({k:v for k,v in values.items() if k in PROJECT_FIELDS})
-            profile['values'].update(migrate_dll_values(profile['values'], profile['path']))
-            dll = resolve_dll(dict(profile['values'], PROJECT_DIR=profile['path']))
-            profile['values'].update(DLL_ROOT=dll['root'], DLL_SRC=dll['source'])
+            local, shared = profile['values'], data['shared_paths']
+            previous_local, previous_shared = local.copy(), shared.copy()
+            local.update({k:v for k,v in values.items() if k in PROJECT_FIELDS})
+            if any(field in values for field in DLL_FIELDS):
+                if 'DLL_ROOT' in values and 'DLL_SRC' not in values:
+                    local['DLL_SRC'] = ''
+                local.update(migrate_dll_values(local, profile['path']))
+                if local['DLL_ROOT']:
+                    local['DLL_SRC'] = ''  # The selected preset derives the leaf at read time.
+            for group in RESOURCE_PATH_GROUPS:
+                if not any(field in values for field in group):
+                    continue
+                field = next((field for field in group if local.get(field)), None)
+                if field in ('CONFIG_SRC', *DLL_FIELDS):
+                    local[field] = project_resource_path(local[field], profile['path'], field)
+                absolute = field is not None and Path(local[field]).is_absolute()
+                if absolute or (field is None and not any(previous_local.get(name) for name in group)):
+                    for name in group:
+                        shared.pop(name, None)
+                if absolute:
+                    shared[field] = local[field]
+                    local.update(dict.fromkeys(group, ''))
             if not machine_changed:
-                profile['revision'] += 1
+                affected = data['profiles'].values() if shared != previous_shared else (profile,)
+                for item in affected:
+                    item['revision'] += 1
             atomic_json(self.file, data)
             return self._env(key, profile, data)
 
